@@ -8,7 +8,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "TerraMine - The mine, mapped. The risk, visible.",
+  title: "GEOID - The mine, mapped. The risk, visible.",
   description: "Drone survey to decision platform for mining, quarrying, and civil works.",
 };
 

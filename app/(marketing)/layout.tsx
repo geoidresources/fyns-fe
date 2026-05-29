@@ -14,7 +14,7 @@ export default function MarketingLayout({
       {/* Simple Footer */}
       <footer className="border-t border-white/5 py-8 mt-24">
         <div className="container mx-auto px-4 text-center text-sm text-[#6B7280]">
-          © {new Date().getFullYear()} TerraMine. All rights reserved.
+          © {new Date().getFullYear()} GEOID. All rights reserved.
         </div>
       </footer>
     </div>

@@ -1,6 +1,7 @@
 import React from "react";
 import Link from "next/link";
 import { Globe } from "lucide-react";
+import { Logo } from "@/components/ui/Logo";
 
 export default function AuthLayout({
   children,
@@ -14,12 +15,7 @@ export default function AuthLayout({
         
         {/* Brand Logo */}
         <div className="mb-12">
-          <Link href="/" className="inline-flex items-center gap-3">
-            <div className="w-10 h-10 rounded-md bg-[#C97A4E] flex items-center justify-center text-black">
-              <Globe className="w-6 h-6" />
-            </div>
-            <span className="text-2xl font-medium text-white tracking-tight">TerraMine</span>
-          </Link>
+          <Logo href="/" />
         </div>
         
         <main className="w-full max-w-md">

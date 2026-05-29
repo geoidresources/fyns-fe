@@ -31,7 +31,7 @@ export default function SignInPage() {
   return (
     <div className="flex flex-col gap-8">
       <div>
-        <h1 className="text-4xl font-bold text-white mb-2">Sign in to TerraMine</h1>
+        <h1 className="text-4xl font-bold text-white mb-2">Sign in to GEOID</h1>
         <p className="text-[#9CA3AF]">Welcome back. Enter your credentials to continue.</p>
       </div>
 
