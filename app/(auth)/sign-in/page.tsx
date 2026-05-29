@@ -92,7 +92,7 @@ export default function SignInPage() {
       <div className="text-center mt-4">
         <Link href="#" className="text-sm text-[#818CF8] hover:text-[#A5B4FC] transition-colors mb-6 inline-block">Forgot password?</Link>
         <p className="text-sm text-[#9CA3AF]">
-          Don't have an account? <Link href="/sign-up" className="text-[#818CF8] hover:text-[#A5B4FC] transition-colors">Start free trial</Link>
+          Don&apos;t have an account? <Link href="/sign-up" className="text-[#818CF8] hover:text-[#A5B4FC] transition-colors">Start free trial</Link>
         </p>
       </div>
     </div>
