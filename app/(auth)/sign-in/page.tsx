@@ -8,6 +8,9 @@ import * as z from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Eye } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
+import Cookies from "js-cookie";
 
 const signInSchema = z.object({
   email: z.string().email({ message: "Invalid email address" }),
@@ -19,13 +22,56 @@ type SignInFormValues = z.infer<typeof signInSchema>;
 
 export default function SignInPage() {
   const [showPassword, setShowPassword] = React.useState(false);
+  const [isLoading, setIsLoading] = React.useState(false);
+  const router = useRouter();
   
   const { register, handleSubmit, formState: { errors } } = useForm<SignInFormValues>({
     resolver: zodResolver(signInSchema),
   });
 
-  const onSubmit = (data: SignInFormValues) => {
-    console.log("Sign In:", data);
+  const onSubmit = async (data: SignInFormValues) => {
+    setIsLoading(true);
+    try {
+      const baseUrl = process.env.NEXT_PUBLIC_USER_SVC_BASE_URL || "https://api.development.geoidresources.com/user-svc";
+      const response = await fetch(`${baseUrl}/api/v1/user/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: data.email,
+          password: data.password,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.message || "Failed to sign in. Please check your credentials.");
+      }
+
+      // Store token in cookies
+      if (data.remember) {
+        Cookies.set("token", result.token, { expires: new Date(result.expire_at * 1000) });
+      } else {
+        Cookies.set("token", result.token); // Session cookie
+      }
+      
+      // Store user and client info in localStorage
+      localStorage.setItem("user", JSON.stringify(result.user));
+      localStorage.setItem("client", JSON.stringify(result.client));
+
+      toast.success("Successfully logged in!");
+      router.push("/globe");
+    } catch (error) {
+      if (error instanceof Error) {
+        toast.error(error.message);
+      } else {
+        toast.error("An unexpected error occurred during sign in.");
+      }
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -71,7 +117,9 @@ export default function SignInPage() {
           </label>
         </div>
 
-        <Button type="submit" size="lg" className="h-14 mt-2">Sign in</Button>
+        <Button type="submit" size="lg" className="h-14 mt-2" disabled={isLoading}>
+          {isLoading ? "Signing in..." : "Sign in"}
+        </Button>
       </form>
 
       <div className="relative flex items-center py-2">
