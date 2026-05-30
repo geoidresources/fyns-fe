@@ -5,11 +5,6 @@ import { Viewer, Entity, PointGraphics } from "resium";
 import { Cartesian3, Color, Viewer as CesiumViewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 
-// Bypass Next.js bundler issues with Cesium Web Workers by pointing to unpkg CDN
-if (typeof window !== "undefined") {
-  (window as any).CESIUM_BASE_URL = "https://unpkg.com/cesium@1.141.0/Build/Cesium/";
-}
-
 export function DashboardGlobe({ projects, selectedSiteId }: { projects: any[]; selectedSiteId?: string }) {
   const viewerRef = useRef<any>(null);
   const [mounted, setMounted] = useState(false);

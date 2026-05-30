@@ -26,6 +26,9 @@ export default function RootLayout({
       lang="en"
       className={`${inter.variable} h-full antialiased`}
     >
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: `window.CESIUM_BASE_URL = "https://unpkg.com/cesium@1.141.0/Build/Cesium/";` }} />
+      </head>
       <body className="min-h-full flex flex-col font-sans">
         <BackgroundShell>
           {children}
