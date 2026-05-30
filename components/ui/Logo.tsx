@@ -18,6 +18,7 @@ export function Logo({ className, imageClassName, href = "/" }: LogoProps) {
         width={120} 
         height={40} 
         className={cn("object-contain", imageClassName)}
+        style={{ width: "auto", height: "auto" }}
         priority
       />
     </div>

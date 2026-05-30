@@ -9,10 +9,13 @@ function GlobeModel() {
   const globeRef = useRef<THREE.Group>(null);
   const pointsRef = useRef<THREE.Points>(null);
 
-  useFrame((state) => {
+  const timeRef = useRef(0);
+
+  useFrame((state, delta) => {
+    timeRef.current += delta;
     if (globeRef.current) {
-      globeRef.current.rotation.y = state.clock.getElapsedTime() * 0.05;
-      globeRef.current.rotation.x = Math.sin(state.clock.getElapsedTime() * 0.1) * 0.1;
+      globeRef.current.rotation.y = timeRef.current * 0.05;
+      globeRef.current.rotation.x = Math.sin(timeRef.current * 0.1) * 0.1;
     }
   });
 

@@ -1,7 +1,9 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import dynamic from "next/dynamic";
+import { ContactSalesModal } from "@/components/marketing/ContactSalesModal";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Play, ArrowRight, Layers, Ruler, TriangleAlert, Cpu, Droplet, Move3d, Globe } from "lucide-react";
@@ -11,6 +13,8 @@ import { motion } from "framer-motion";
 const HeroGlobe = dynamic(() => import("@/components/marketing/HeroGlobe").then(mod => mod.HeroGlobe), { ssr: false });
 
 export default function LandingPage() {
+  const [isContactModalOpen, setIsContactModalOpen] = useState(false);
+
   return (
     <div className="flex flex-col gap-24 pb-20">
       
@@ -26,7 +30,9 @@ export default function LandingPage() {
               Drone survey to decision platform for mining, quarrying, and civil works.
             </p>
             <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-              <Button size="lg" className="w-full sm:w-auto px-8">Start free trial</Button>
+              <Link href="/sign-up" className="w-full sm:w-auto">
+                <Button size="lg" className="w-full sm:w-auto px-8">Start free trial</Button>
+              </Link>
               <Button variant="ghost" size="lg" className="w-full sm:w-auto gap-2">
                 <Play className="w-4 h-4" /> Watch demo
               </Button>
@@ -142,10 +148,15 @@ export default function LandingPage() {
           14-day free trial. No credit card. Upload your first survey in 10 minutes.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-          <Button size="lg" className="px-8">Start free trial</Button>
-          <Button variant="secondary" size="lg" className="px-8">Talk to sales</Button>
+          <Link href="/sign-up">
+            <Button size="lg" className="px-8">Start free trial</Button>
+          </Link>
+          <Button variant="secondary" size="lg" className="px-8" onClick={() => setIsContactModalOpen(true)}>
+            Talk to sales
+          </Button>
         </div>
       </section>
+      <ContactSalesModal isOpen={isContactModalOpen} onClose={() => setIsContactModalOpen(false)} />
     </div>
   );
 }
