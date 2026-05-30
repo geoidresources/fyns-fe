@@ -3,13 +3,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Viewer, Entity, PointGraphics } from "resium";
 import { Cartesian3, Color, Viewer as CesiumViewer } from "cesium";
-import "cesium/Build/Cesium/Widgets/widgets.css";
 
 export function DashboardGlobe({ projects, selectedSiteId }: { projects: any[]; selectedSiteId?: string }) {
   const viewerRef = useRef<any>(null);
   const [mounted, setMounted] = useState(false);
 
-  // Avoid hydration mismatch by only rendering Cesium on the client
   useEffect(() => {
     setMounted(true);
   }, []);
@@ -31,7 +29,6 @@ export function DashboardGlobe({ projects, selectedSiteId }: { projects: any[]; 
 
   return (
     <div className="w-full h-full absolute inset-0">
-      {/* Ambient glowing background behind globe isn't strictly necessary with Cesium, but we can keep it */}
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-[#C97A4E]/10 rounded-full blur-[120px] pointer-events-none z-0" />
       
       <div className="w-full h-full absolute inset-0 z-10 cesium-container">
@@ -69,7 +66,6 @@ export function DashboardGlobe({ projects, selectedSiteId }: { projects: any[]; 
         </Viewer>
       </div>
       
-      {/* CSS to override some Cesium defaults for a darker theme */}
       <style dangerouslySetInnerHTML={{__html: `
         .cesium-container .cesium-viewer {
           background-color: #0A0D14;
