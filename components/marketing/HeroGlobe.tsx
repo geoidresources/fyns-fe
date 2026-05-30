@@ -16,21 +16,16 @@ function GlobeModel() {
     }
   });
 
-  // Generate random points for the atmosphere/network
-  const [positions] = React.useState(() => {
-    const count = 2000;
-    const positions = new Float32Array(count * 3);
-    for (let i = 0; i < count; i++) {
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.acos(Math.random() * 2 - 1);
-      const r = 2.1 + Math.random() * 0.2; // Slightly larger than globe
+  const [positions, setPositions] = React.useState<Float32Array | null>(null);
 
-      positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
-      positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-      positions[i * 3 + 2] = r * Math.cos(phi);
-    }
-    return positions;
-  });
+  React.useEffect(() => {
+    fetch('/world-points.json')
+      .then(res => res.json())
+      .then(data => {
+        setPositions(new Float32Array(data));
+      })
+      .catch(err => console.error("Error loading globe points:", err));
+  }, []);
 
   return (
     <group ref={globeRef}>
@@ -45,27 +40,21 @@ function GlobeModel() {
         />
       </Sphere>
 
-      {/* Wireframe overlay for technical feel */}
-      <Sphere args={[2.01, 32, 32]}>
-        <meshBasicMaterial
-          color="#C97A4E"
-          wireframe={true}
-          transparent
-          opacity={0.15}
-        />
-      </Sphere>
+
 
       {/* Surrounding points/telemetry */}
-      <Points positions={positions}>
-        <PointMaterial
-          transparent
-          color="#C97A4E"
-          size={0.02}
-          sizeAttenuation={true}
-          depthWrite={false}
-          opacity={0.6}
-        />
-      </Points>
+      {positions && (
+        <Points positions={positions}>
+          <PointMaterial
+            transparent
+            color="#C97A4E"
+            size={0.02}
+            sizeAttenuation={true}
+            depthWrite={false}
+            opacity={0.6}
+          />
+        </Points>
+      )}
     </group>
   );
 }
