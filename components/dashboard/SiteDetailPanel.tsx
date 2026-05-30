@@ -1,5 +1,6 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { X, ChevronRight, Plus } from "lucide-react";
+import Cookies from "js-cookie";
 
 interface Survey {
   id: string;
@@ -17,25 +18,64 @@ const SURVEYS: Survey[] = [
   { id: "3", date: "10 May 2026", type: "LIDAR", version: "v1", status: "approved", author: "Amit S.", time: "11:15" },
 ];
 
-export function SiteDetailPanel({ onClose }: { onClose: () => void }) {
+export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onClose: () => void }) {
+  const [projectData, setProjectData] = useState<any>(null);
+  
+  useEffect(() => {
+    async function fetchProjectDetails() {
+      const token = Cookies.get("token");
+      if (!token || !projectId) return;
+
+      const baseUrl = process.env.NEXT_PUBLIC_USER_SVC_BASE_URL || "https://api.development.geoidresources.com/user-svc";
+      
+      try {
+        const response = await fetch(`${baseUrl}/api/v1/project/${projectId}`, {
+          headers: {
+            "Authorization": `Bearer ${token}`
+          }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          setProjectData(data);
+        }
+      } catch (err) {
+        console.error("Failed to fetch project details:", err);
+      }
+    }
+
+    fetchProjectDetails();
+  }, [projectId]);
+
+  if (!projectData) return null;
+
   return (
     <div className="w-[360px] h-[calc(100%-2rem)] bg-[#12141A]/95 backdrop-blur-xl border border-[#1E2028] rounded-2xl absolute right-6 top-4 z-10 flex flex-col pointer-events-auto overflow-hidden shadow-2xl">
       <div className="p-6 flex-1 overflow-y-auto">
         <div className="flex justify-between items-start mb-3">
-          <h2 className="text-xl font-semibold text-gray-100">Bandalkop pit</h2>
+          <h2 className="text-xl font-semibold text-gray-100">{projectData.name}</h2>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-300 transition-colors">
             <X size={20} />
           </button>
         </div>
 
         <div className="flex items-center gap-2 mb-3">
-          <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-green-500/10 text-green-400 border border-green-500/20">
-            Active
+          <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+            projectData.lifecycle_status === 'active' 
+              ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+              : 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20'
+          }`}>
+            {projectData.lifecycle_status === 'active' ? 'Active' : projectData.lifecycle_status}
           </span>
+          {projectData.primary_material && (
+            <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-[#1E2028] text-gray-400 border border-[#2A2D35]">
+              {projectData.primary_material}
+            </span>
+          )}
         </div>
 
         <p className="text-xs text-gray-500 mb-6">
-          Karnataka - WGS 84 / UTM zone 43N
+          {projectData.location_name || 'Location Not Set'} {projectData.crs_label ? `- ${projectData.crs_label}` : ''}
         </p>
 
         <div className="grid grid-cols-3 gap-2 mb-8">
