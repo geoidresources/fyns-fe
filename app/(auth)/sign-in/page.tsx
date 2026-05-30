@@ -32,7 +32,8 @@ export default function SignInPage() {
   const onSubmit = async (data: SignInFormValues) => {
     setIsLoading(true);
     try {
-      const response = await fetch("https://api.development.geoidresources.com/user-svc/api/v1/user/login", {
+      const baseUrl = process.env.NEXT_PUBLIC_USER_SVC_BASE_URL || "https://api.development.geoidresources.com/user-svc";
+      const response = await fetch(`${baseUrl}/api/v1/user/login`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
