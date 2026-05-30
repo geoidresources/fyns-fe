@@ -1,14 +1,17 @@
-import React from "react";
-import { Search, Bell, Globe } from "lucide-react";
+import Image from "next/image";
+import { Search, Bell } from "lucide-react";
 
 export function Topbar() {
   return (
     <div className="h-16 border-b border-[#1E2028] bg-[#0A0D14] flex items-center justify-between px-6 shrink-0 z-10 relative">
-      <div className="flex items-center gap-2">
-        <div className="bg-[#C97A4E] rounded p-1">
-          <Globe size={18} color="#0A0D14" />
-        </div>
-        <span className="text-gray-100 font-semibold text-lg tracking-wide">TerraMine</span>
+      <div className="flex items-center">
+        <Image 
+          src="/geoid-logo-cropped.png" 
+          alt="Geoid" 
+          width={80} 
+          height={20} 
+          className="object-contain w-auto h-auto"
+        />
       </div>
 
       <div className="flex-1 flex justify-center px-8">

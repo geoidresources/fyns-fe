@@ -14,6 +14,8 @@ export const metadata: Metadata = {
 
 import { BackgroundShell } from "@/components/layout/BackgroundShell";
 
+import { Toaster } from "sonner";
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -28,6 +30,7 @@ export default function RootLayout({
         <BackgroundShell>
           {children}
         </BackgroundShell>
+        <Toaster theme="dark" position="top-right" richColors />
       </body>
     </html>
   );
