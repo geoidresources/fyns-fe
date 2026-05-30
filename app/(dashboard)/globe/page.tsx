@@ -3,8 +3,13 @@
 import React, { useState, useEffect } from "react";
 import { ActiveSitesPanel } from "@/components/dashboard/ActiveSitesPanel";
 import { SiteDetailPanel } from "@/components/dashboard/SiteDetailPanel";
-import { DashboardGlobe } from "@/components/dashboard/DashboardGlobe";
+import dynamic from "next/dynamic";
 import Cookies from "js-cookie";
+
+const DashboardGlobe = dynamic(
+  () => import("@/components/dashboard/DashboardGlobe").then((mod) => mod.DashboardGlobe),
+  { ssr: false, loading: () => <div className="w-full h-full bg-[#0A0D14]" /> }
+);
 
 export default function GlobeViewPage() {
   const [selectedSiteId, setSelectedSiteId] = useState<string>("");
