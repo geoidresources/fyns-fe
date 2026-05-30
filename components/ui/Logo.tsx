@@ -13,7 +13,7 @@ export function Logo({ className, imageClassName, href = "/" }: LogoProps) {
   const content = (
     <div className={cn("flex items-center gap-3", className)}>
       <Image 
-        src="/logo/geoid-logo-cropped.png" 
+        src="/geoid-logo-cropped.png" 
         alt="GEOID Logo" 
         width={120} 
         height={40} 

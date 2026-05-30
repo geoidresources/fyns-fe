@@ -32,11 +32,6 @@ export default function GlobeViewPage() {
         if (response.ok) {
           const data = await response.json();
           setProjects(data);
-          
-          // Select the first site automatically if none selected
-          if (data.length > 0) {
-            setSelectedSiteId(data[0].id);
-          }
         }
       } catch (err) {
         console.error("Failed to fetch projects:", err);

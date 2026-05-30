@@ -1,9 +1,36 @@
+"use client";
+
 import Image from "next/image";
-import { Search, Bell } from "lucide-react";
+import { Search, Bell, LogOut } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import Cookies from "js-cookie";
+import { useRouter } from "next/navigation";
 
 export function Topbar() {
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const router = useRouter();
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const handleSignOut = () => {
+    Cookies.remove("token");
+    localStorage.removeItem("user");
+    localStorage.removeItem("client");
+    router.push("/sign-in");
+  };
+
   return (
-    <div className="h-16 border-b border-[#1E2028] bg-[#0A0D14] flex items-center justify-between px-6 shrink-0 z-10 relative">
+    <div className="h-16 border-b border-[#1E2028] bg-[#0A0D14] flex items-center justify-between px-6 shrink-0 z-50 relative">
       <div className="flex items-center">
         <Image 
           src="/geoid-logo-cropped.png" 
@@ -29,9 +56,27 @@ export function Topbar() {
         <button className="text-gray-400 hover:text-gray-200 transition-colors">
           <Bell size={20} />
         </button>
-        <button className="w-8 h-8 rounded-full bg-[#2A2D35] flex items-center justify-center text-sm font-medium text-gray-200 hover:bg-[#343741] transition-colors">
-          PD
-        </button>
+        
+        <div className="relative" ref={dropdownRef}>
+          <button 
+            onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+            className="w-8 h-8 rounded-full bg-[#2A2D35] flex items-center justify-center text-sm font-medium text-gray-200 hover:bg-[#343741] transition-colors focus:outline-none focus:ring-2 focus:ring-[#C97A4E]"
+          >
+            PD
+          </button>
+          
+          {isDropdownOpen && (
+            <div className="absolute right-0 mt-2 w-48 bg-[#12141A] border border-[#1E2028] rounded-lg shadow-xl overflow-hidden py-1 z-50">
+              <button 
+                onClick={handleSignOut}
+                className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-[#1E2028] hover:text-white flex items-center gap-2 transition-colors"
+              >
+                <LogOut size={16} />
+                Sign Out
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
