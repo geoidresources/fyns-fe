@@ -1,53 +1,34 @@
 import React, { useState, useEffect } from "react";
 import { X, ChevronRight, Plus } from "lucide-react";
-import Cookies from "js-cookie";
+import { useRouter } from "next/navigation";
+import { getProject, type Project } from "@/lib/api/userSvc";
+import { listSurveys, type Survey } from "@/lib/api/assetSvc";
 
-interface Survey {
-  id: string;
-  date: string;
-  type: string;
-  version: string;
-  status: "approved" | "QA/QC";
-  author: string;
-  time: string;
+function formatSurveyDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
-const SURVEYS: Survey[] = [
-  { id: "1", date: "18 May 2026", type: "Drone + LIDAR", version: "v3", status: "approved", author: "Priya D.", time: "09:42" },
-  { id: "2", date: "14 May 2026", type: "Drone", version: "v2", status: "QA/QC", author: "Raj K.", time: "14:20" },
-  { id: "3", date: "10 May 2026", type: "LIDAR", version: "v1", status: "approved", author: "Amit S.", time: "11:15" },
-];
-
 export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onClose: () => void }) {
-  const [projectData, setProjectData] = useState<any>(null);
-  
+  const [projectData, setProjectData] = useState<Project | null>(null);
+  const [surveys, setSurveys] = useState<Survey[]>([]);
+  const router = useRouter();
+
   useEffect(() => {
-    async function fetchProjectDetails() {
-      const token = Cookies.get("token");
-      if (!token || !projectId) return;
-
-      const baseUrl = process.env.NEXT_PUBLIC_USER_SVC_BASE_URL || "https://api.development.geoidresources.com/user-svc";
-      
-      try {
-        const response = await fetch(`${baseUrl}/api/v1/project/${projectId}`, {
-          headers: {
-            "Authorization": `Bearer ${token}`
-          }
-        });
-        
-        if (response.ok) {
-          const data = await response.json();
-          setProjectData(data);
-        }
-      } catch (err) {
-        console.error("Failed to fetch project details:", err);
-      }
-    }
-
-    fetchProjectDetails();
+    if (!projectId) return;
+    getProject(projectId)
+      .then(setProjectData)
+      .catch((err) => console.error("Failed to fetch project details:", err));
+    listSurveys(projectId)
+      .then((res) => setSurveys(res.surveys || []))
+      .catch((err) => console.error("Failed to fetch surveys:", err));
   }, [projectId]);
 
   if (!projectData) return null;
+
+  const openViewer = (surveyId: string) => router.push(`/viewer/${surveyId}`);
+  const latestSurveyId = surveys[0]?.id;
 
   return (
     <div className="w-[360px] h-[calc(100%-2rem)] bg-[#12141A]/95 backdrop-blur-xl border border-[#1E2028] rounded-2xl absolute right-6 top-4 z-10 flex flex-col pointer-events-auto overflow-hidden shadow-2xl">
@@ -61,7 +42,7 @@ export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onC
 
         <div className="flex items-center gap-2 mb-3">
           <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${
-            projectData.lifecycle_status === 'active' 
+            projectData.lifecycle_status === 'active'
               ? 'bg-green-500/10 text-green-400 border border-green-500/20'
               : 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20'
           }`}>
@@ -79,9 +60,9 @@ export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onC
         </p>
 
         <div className="grid grid-cols-3 gap-2 mb-8">
-          <StatBox value="12" label="surveys" />
-          <StatBox value="8" label="stockpiles" />
-          <StatBox value="3" label="open issues" />
+          <StatBox value={String(surveys.length)} label="surveys" />
+          <StatBox value="-" label="stockpiles" />
+          <StatBox value="-" label="open issues" />
         </div>
 
         <div className="flex justify-between items-center mb-4">
@@ -93,26 +74,35 @@ export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onC
         </div>
 
         <div className="flex flex-col gap-3">
-          {SURVEYS.map((survey) => (
-            <div key={survey.id} className="flex items-center p-3 rounded-xl bg-[#1E2028]/50 border border-[#2A2D35] hover:border-[#3A3D45] transition-colors cursor-pointer group">
+          {surveys.length === 0 && (
+            <p className="text-xs text-gray-500">No surveys yet.</p>
+          )}
+          {surveys.map((survey) => (
+            <div
+              key={survey.id}
+              onClick={() => openViewer(survey.id)}
+              className="flex items-center p-3 rounded-xl bg-[#1E2028]/50 border border-[#2A2D35] hover:border-[#3A3D45] transition-colors cursor-pointer group"
+            >
               <div className="w-10 h-10 rounded-lg bg-[#2A2D35] shrink-0 mr-4" />
               <div className="flex-1 min-w-0">
                 <h4 className="text-sm font-medium text-gray-200 mb-1 group-hover:text-white transition-colors">
-                  {survey.date} - {survey.type}
+                  {formatSurveyDate(survey.survey_date)} - {survey.survey_type}
                 </h4>
                 <div className="flex items-center gap-2 text-xs">
-                  <span className="text-gray-500">{survey.version}</span>
+                  <span className="text-gray-500">{survey.working_crs}</span>
                   <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
-                    survey.status === 'approved' 
-                      ? 'bg-green-500/10 text-green-400 border border-green-500/20' 
+                    survey.status === 'completed' || survey.status === 'approved'
+                      ? 'bg-green-500/10 text-green-400 border border-green-500/20'
                       : 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20'
                   }`}>
                     {survey.status}
                   </span>
                 </div>
-                <div className="text-[11px] text-gray-500 mt-1">
-                  {survey.author} - {survey.status} {survey.time}
-                </div>
+                {typeof survey.metadata?.sensor === "string" && (
+                  <div className="text-[11px] text-gray-500 mt-1">
+                    {survey.metadata.sensor}
+                  </div>
+                )}
               </div>
               <ChevronRight size={16} className="text-gray-500 group-hover:text-gray-300 ml-2" />
             </div>
@@ -121,7 +111,11 @@ export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onC
       </div>
 
       <div className="p-6 border-t border-[#1E2028] bg-[#12141A] flex items-center gap-4">
-        <button className="flex-1 bg-[#C97A4E] hover:bg-[#b06941] text-[#0A0D14] font-medium py-2.5 rounded-lg transition-colors">
+        <button
+          onClick={() => latestSurveyId && openViewer(latestSurveyId)}
+          disabled={!latestSurveyId}
+          className="flex-1 bg-[#C97A4E] hover:bg-[#b06941] text-[#0A0D14] font-medium py-2.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
           Open viewer
         </button>
         <button className="text-sm font-medium text-gray-400 hover:text-gray-200 transition-colors">

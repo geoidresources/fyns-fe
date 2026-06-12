@@ -4,7 +4,7 @@ import React, { useState, useEffect } from "react";
 import { ActiveSitesPanel } from "@/components/dashboard/ActiveSitesPanel";
 import { SiteDetailPanel } from "@/components/dashboard/SiteDetailPanel";
 import dynamic from "next/dynamic";
-import Cookies from "js-cookie";
+import { listProjects, type Project } from "@/lib/api/userSvc";
 
 const DashboardGlobe = dynamic(
   () => import("@/components/dashboard/DashboardGlobe").then((mod) => mod.DashboardGlobe),
@@ -13,42 +13,22 @@ const DashboardGlobe = dynamic(
 
 export default function GlobeViewPage() {
   const [selectedSiteId, setSelectedSiteId] = useState<string>("");
-  const [projects, setProjects] = useState<any[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
 
   useEffect(() => {
-    async function fetchProjects() {
-      const token = Cookies.get("token");
-      if (!token) return;
-
-      const baseUrl = process.env.NEXT_PUBLIC_USER_SVC_BASE_URL || "https://api.development.geoidresources.com/user-svc";
-      
-      try {
-        const response = await fetch(`${baseUrl}/api/v1/project?lifecycle_status=active`, {
-          headers: {
-            "Authorization": `Bearer ${token}`
-          }
-        });
-        
-        if (response.ok) {
-          const data = await response.json();
-          setProjects(data);
-        }
-      } catch (err) {
-        console.error("Failed to fetch projects:", err);
-      }
-    }
-
-    fetchProjects();
+    listProjects()
+      .then(setProjects)
+      .catch((err) => console.error("Failed to fetch projects:", err));
   }, []);
 
   return (
     <div className="w-full h-full flex bg-[#0A0D14] overflow-hidden">
       {/* Left Panel: Active Sites */}
       <div className="w-72 shrink-0 z-10 border-r border-[#1E2028]">
-        <ActiveSitesPanel 
+        <ActiveSitesPanel
           projects={projects}
-          selectedSiteId={selectedSiteId} 
-          onSiteSelect={setSelectedSiteId} 
+          selectedSiteId={selectedSiteId}
+          onSiteSelect={setSelectedSiteId}
         />
       </div>
 

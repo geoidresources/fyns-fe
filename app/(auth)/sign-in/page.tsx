@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Eye } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import Cookies from "js-cookie";
+import { login } from "@/lib/api/userSvc";
+import { setSession } from "@/lib/auth";
 
 const signInSchema = z.object({
   email: z.string().email({ message: "Invalid email address" }),
@@ -32,34 +33,10 @@ export default function SignInPage() {
   const onSubmit = async (data: SignInFormValues) => {
     setIsLoading(true);
     try {
-      const baseUrl = process.env.NEXT_PUBLIC_USER_SVC_BASE_URL || "https://api.development.geoidresources.com/user-svc";
-      const response = await fetch(`${baseUrl}/api/v1/user/login`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email: data.email,
-          password: data.password,
-        }),
-      });
+      const result = await login(data.email, data.password);
 
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.message || "Failed to sign in. Please check your credentials.");
-      }
-
-      // Store token in cookies
-      if (data.remember) {
-        Cookies.set("token", result.token, { expires: new Date(result.expire_at * 1000) });
-      } else {
-        Cookies.set("token", result.token); // Session cookie
-      }
-      
-      // Store user and client info in localStorage
-      localStorage.setItem("user", JSON.stringify(result.user));
-      localStorage.setItem("client", JSON.stringify(result.client));
+      // Shared JWT for both user-svc and asset-svc clients
+      setSession(result, data.remember);
 
       toast.success("Successfully logged in!");
       router.push("/globe");
