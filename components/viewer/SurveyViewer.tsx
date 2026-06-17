@@ -44,6 +44,7 @@ import { getProject } from "@/lib/api/userSvc";
 import { ApiError } from "@/lib/api/client";
 import { LayerPanel, type LayerControl } from "@/components/viewer/LayerPanel";
 import { MeasurementPanel, type DrawMode } from "@/components/viewer/MeasurementPanel";
+import { CameraJoystick } from "@/components/viewer/CameraJoystick";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -425,7 +426,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           handles.set(key, { type: "tileset", tileset });
         })
         .catch((err) => console.error("Failed to load site model tileset:", err));
-      controls.push({ key, label: "Site model", category: "pointcloud", visible: false, opacity: 1, supportsOpacity: true });
+      controls.push({ key, label: "Site model", category: "pointcloud", visible: true, opacity: 1, supportsOpacity: true });
     });
 
     // Vectors — contours/boundaries. Registered lazily and OFF by default:
@@ -880,6 +881,9 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           )}
         </div>
       </div>
+
+      {/* Camera-angle joystick — hold and drag to orbit the view */}
+      <CameraJoystick viewerRef={viewerRef} ready={viewerReady} />
 
       {/* Name-the-measurement dialog */}
       {pendingDraw && (
