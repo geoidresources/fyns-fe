@@ -3,7 +3,7 @@
 import Image from "next/image";
 import { Search, Bell, LogOut } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
-import Cookies from "js-cookie";
+import { clearSession } from "@/lib/auth";
 import { useRouter } from "next/navigation";
 
 export function Topbar() {
@@ -23,9 +23,7 @@ export function Topbar() {
   }, []);
 
   const handleSignOut = () => {
-    Cookies.remove("token");
-    localStorage.removeItem("user");
-    localStorage.removeItem("client");
+    clearSession();
     router.push("/sign-in");
   };
 
