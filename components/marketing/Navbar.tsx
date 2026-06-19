@@ -1,42 +1,66 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
-import { Globe } from "lucide-react";
-import { Logo } from "@/components/ui/Logo";
+import Image from "next/image";
 import { ContactSalesModal } from "./ContactSalesModal";
 
 export function Navbar() {
   const [isContactModalOpen, setIsContactModalOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
+
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 20);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
 
   return (
     <>
-      <header className="sticky top-0 z-50 w-full border-b border-white/5 bg-black/80 backdrop-blur-md">
-        <div className="container mx-auto px-4 md:px-8 h-20 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Logo href="/" />
-          </div>
+      <nav
+        className="fixed top-0 left-0 right-0 z-[100] h-16 flex items-center justify-between px-8 transition-[background,backdrop-filter,border-color] duration-300"
+        style={{
+          background: scrolled ? "rgba(10,13,20,0.9)" : "transparent",
+          backdropFilter: scrolled ? "blur(16px)" : "none",
+          borderBottom: scrolled
+            ? "0.5px solid rgba(194,112,62,0.08)"
+            : "0.5px solid transparent",
+        }}
+      >
+        <Link href="/" className="flex items-center gap-3">
+          <Image
+            src="/geoid-logo-cropped.png"
+            alt="GEOID"
+            width={110}
+            height={28}
+            priority
+            className="h-7 w-auto object-contain"
+          />
+          <span className="text-[15px] text-[#71717A]">/</span>
+          <span className="text-[15px] text-[#71717A]">Digital Twyn</span>
+        </Link>
 
-          <nav className="hidden md:flex items-center gap-8 text-sm text-[#9CA3AF]">
-            <Link href="#" className="hover:text-white transition-colors">Solution</Link>
-            <Link href="#" className="hover:text-white transition-colors">Platform</Link>
-            <Link href="#" className="hover:text-white transition-colors">Modules</Link>
-            <Link href="#" className="hover:text-white transition-colors">Roadmap</Link>
-            <Link href="#" className="hover:text-white transition-colors">Contact</Link>
-          </nav>
-
-          <div className="flex items-center gap-4">
-            <Button variant="ghost" className="hidden sm:inline-flex" onClick={() => setIsContactModalOpen(true)}>
-              Request demo
-            </Button>
-            <Link href="/sign-in">
-              <Button variant="secondary">Sign in</Button>
-            </Link>
-          </div>
+        <div className="flex items-center gap-5">
+          <Link
+            href="/sign-in"
+            className="text-[13px] text-[#71717A] no-underline transition-colors hover:text-[#A1A1AA]"
+          >
+            Sign in
+          </Link>
+          <button
+            type="button"
+            onClick={() => setIsContactModalOpen(true)}
+            className="rounded-full border-[0.5px] border-white/15 px-5 py-2 text-[13px] text-[#F4F4F5] transition-[border-color,background] hover:border-white/30 hover:bg-white/5"
+          >
+            Request demo
+          </button>
         </div>
-      </header>
-      <ContactSalesModal isOpen={isContactModalOpen} onClose={() => setIsContactModalOpen(false)} />
+      </nav>
+      <ContactSalesModal
+        isOpen={isContactModalOpen}
+        onClose={() => setIsContactModalOpen(false)}
+      />
     </>
   );
 }

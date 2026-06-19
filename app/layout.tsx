@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Inter, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
 const inter = Inter({
@@ -7,9 +7,16 @@ const inter = Inter({
   subsets: ["latin"],
 });
 
+const ibmPlexMono = IBM_Plex_Mono({
+  variable: "--font-ibm-mono",
+  weight: ["400", "500", "600"],
+  subsets: ["latin"],
+});
+
 export const metadata: Metadata = {
-  title: "GEOID - The mine, mapped. The risk, visible.",
-  description: "Drone survey to decision platform for mining, quarrying, and civil works.",
+  title: "Twyn - GEOID",
+  description:
+    "Create living 3D replicas of any structure. Navigate floor by floor. Measure wall to wall. Track change over time.",
 };
 
 import { BackgroundShell } from "@/components/layout/BackgroundShell";
@@ -24,7 +31,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${inter.variable} h-full antialiased`}
+      className={`${inter.variable} ${ibmPlexMono.variable} h-full antialiased`}
     >
       <head>
         <link rel="stylesheet" href="/cesium/Widgets/widgets.css" />
