@@ -26,7 +26,7 @@ import {
   UrlTemplateImageryProvider,
   Viewer as CesiumViewer,
 } from "cesium";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { ArrowLeft, Loader2, Plus } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
 
@@ -42,11 +42,41 @@ import {
 } from "@/lib/api/assetSvc";
 import { getProject } from "@/lib/api/userSvc";
 import { ApiError } from "@/lib/api/client";
-import { LayerPanel, type LayerControl } from "@/components/viewer/LayerPanel";
+import {
+  LayerPanel,
+  type LayerControl,
+  type DesignControl,
+} from "@/components/viewer/LayerPanel";
 import { MeasurementPanel, type DrawMode } from "@/components/viewer/MeasurementPanel";
+import { MeasurePalette } from "@/components/viewer/MeasurePalette";
+import { FeatureInspector } from "@/components/viewer/FeatureInspector";
+import { ViewerToolRail } from "@/components/viewer/ViewerToolRail";
+import { SurveyList } from "@/components/viewer/SurveyList";
+import {
+  SAMPLE_DESIGNS,
+  SAMPLE_MEASUREMENTS,
+  type PanelMeasurement,
+} from "@/lib/viewer/sampleData";
 import { CameraJoystick } from "@/components/viewer/CameraJoystick";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+
+const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+/** "2026-05-18" → "18 MAY"; falls back to the raw string. */
+function shortDate(date?: string): string {
+  if (!date) return "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(date);
+  if (!m) return date;
+  const month = MONTHS[Number(m[2]) - 1] ?? "";
+  return `${Number(m[3])} ${month}`.trim();
+}
+
+/** A design's format determines whether we can draw it client-side. */
+function designIsGeoJson(format?: string, url?: string): boolean {
+  const f = (format || "").toLowerCase();
+  if (f.includes("geojson") || f.includes("json")) return true;
+  return !!url && /\.geojson(\?|$)/i.test(url);
+}
 
 // Default camera target (Kalinga Vihar) when neither layer bbox nor project
 // center is available yet.
@@ -158,13 +188,16 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const [viewerReady, setViewerReady] = useState(false);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [manifestError, setManifestError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"layers" | "surveys">("layers");
   const [layerControls, setLayerControls] = useState<LayerControl[]>([]);
+  const [designControls, setDesignControls] = useState<DesignControl[]>([]);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [drawMode, setDrawMode] = useState<DrawMode | null>(null);
-  const [pendingDraw, setPendingDraw] = useState<PendingDraw | null>(null);
-  const [pendingName, setPendingName] = useState("");
   const [saving, setSaving] = useState(false);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
+  const [rightPanel, setRightPanel] = useState<"measure" | "inspect" | null>(null);
+  const [selectedMeasurement, setSelectedMeasurement] = useState<Measurement | PanelMeasurement | null>(null);
+  const [isInspectingNew, setIsInspectingNew] = useState(false);
 
   const handlesRef = useRef<Map<string, LayerHandle>>(new Map());
   // Latest user-facing visibility per layer key. Tilesets resolve LONG after
@@ -179,6 +212,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const draftEntityRef = useRef<Entity | null>(null);
   const measurementDsRef = useRef<GeoJsonDataSource | null>(null);
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
+  const pendingDrawRef = useRef<PendingDraw | null>(null);
 
   const layersEmpty = manifestLayersEmpty(manifest);
 
@@ -447,8 +481,34 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       });
     });
 
-    visibleRef.current = new Map(controls.map((c) => [c.key, c.visible]));
+    // Designs — CAD overlays (DXF, LandXML, GeoJSON). Only GeoJSON-format
+    // designs can be drawn client-side; raw CAD is listed but not renderable
+    // until the backend tiles it, so its toggle is disabled.
+    const designs: DesignControl[] = [];
+    (manifest.layers.designs || []).forEach((d, i) => {
+      const key = `design-${i}`;
+      const renderable = designIsGeoJson(d.format, d.file_url);
+      if (renderable && d.file_url) {
+        handles.set(key, { type: "geojson-lazy", url: d.file_url });
+      }
+      designs.push({
+        key,
+        label: `${d.name}${d.format ? ` (${d.format})` : ""}`,
+        visible: false,
+        renderable,
+      });
+    });
+    // Backend serves no designs yet — show the design fixtures so the DESIGNS
+    // section is demonstrable. Drop this fallback once asset-svc populates
+    // manifest.layers.designs.
+    if (designs.length === 0) designs.push(...SAMPLE_DESIGNS.map((d) => ({ ...d })));
+
+    visibleRef.current = new Map([
+      ...controls.map((c) => [c.key, c.visible] as const),
+      ...designs.map((d) => [d.key, d.visible] as const),
+    ]);
     setLayerControls(controls);
+    setDesignControls(designs);
 
     return () => {
       cancelled = true;
@@ -561,6 +621,44 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     }
   }, []);
 
+  const handleToggleDesign = useCallback((key: string) => {
+    setDesignControls((prev) => {
+      const target = prev.find((d) => d.key === key);
+      if (!target || !target.renderable) return prev;
+      const nowVisible = !target.visible;
+      visibleRef.current.set(key, nowVisible);
+
+      // Sample/demo designs have no Cesium handle — they only flip visual
+      // state. Real GeoJSON designs lazy-load on first show (same path as
+      // contour vectors).
+      const handle = handlesRef.current.get(key);
+      if (handle?.type === "datasource") {
+        handle.ds.show = nowVisible;
+      } else if (handle?.type === "geojson-lazy" && nowVisible && !handle.loading) {
+        handle.loading = true;
+        const viewer = viewerRef.current;
+        GeoJsonDataSource.load(handle.url, {
+          clampToGround: true,
+          stroke: Color.fromCssColorString("#A78BFA"),
+          fill: Color.fromCssColorString("#A78BFA").withAlpha(0.15),
+          strokeWidth: 2,
+        })
+          .then((ds) => {
+            if (!viewer || viewer.isDestroyed()) return;
+            ds.show = visibleRef.current.get(key) ?? false;
+            viewer.dataSources.add(ds);
+            handlesRef.current.set(key, { type: "datasource", ds });
+          })
+          .catch((err) => {
+            handle.loading = false;
+            console.error("Failed to load design layer:", err);
+            toast.error("Failed to load design overlay");
+          });
+      }
+      return prev.map((d) => (d.key === key ? { ...d, visible: nowVisible } : d));
+    });
+  }, []);
+
   // -------------------------------------------------- measurement rendering
 
   useEffect(() => {
@@ -571,12 +669,12 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     const features = measurements
       .filter((m) => m.geometry)
       .map((m) => ({
-        type: "Feature",
-        properties: { name: m.name, kind: m.kind, status: m.status },
-        geometry: m.geometry,
+        type: "Feature" as const,
+        properties: { id: m.id, name: m.name, kind: m.kind, status: m.status },
+        geometry: m.geometry!,
       }));
 
-    const fc = { type: "FeatureCollection", features };
+    const fc = { type: "FeatureCollection" as const, features };
     GeoJsonDataSource.load(fc, {
       clampToGround: true,
       stroke: ACCENT,
@@ -596,7 +694,34 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [viewerReady, measurements]);
+  }, [viewerReady, measurements, ACCENT]);
+
+  // Handle clicking on map features (measurements)
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed()) return;
+
+    const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
+    handler.setInputAction((movement: ScreenSpaceEventHandler.PositionedEvent) => {
+      if (drawMode) return; // Don't select while drawing
+
+      const pickedObject = viewer.scene.pick(movement.position);
+      if (pickedObject?.id instanceof Entity) {
+        const entity = pickedObject.id;
+        const measurementId = entity.properties?.id?.getValue();
+        if (measurementId) {
+          const measurement = measurements.find((m) => m.id === measurementId);
+          if (measurement) {
+            setSelectedMeasurement(measurement);
+            setIsInspectingNew(false);
+            setRightPanel("inspect");
+          }
+        }
+      }
+    }, ScreenSpaceEventType.LEFT_CLICK);
+
+    return () => handler.destroy();
+  }, [viewerReady, drawMode, measurements]);
 
   // ------------------------------------------------------------- drawing
 
@@ -616,8 +741,9 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const cancelDraw = useCallback(() => {
     cleanupDraw();
     setDrawMode(null);
-    setPendingDraw(null);
-    setPendingName("");
+    pendingDrawRef.current = null;
+    setRightPanel(null);
+    setSelectedMeasurement(null);
   }, [cleanupDraw]);
 
   const startDraw = useCallback(
@@ -625,8 +751,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       const viewer = viewerRef.current;
       if (!viewer || viewer.isDestroyed()) return;
       cleanupDraw();
-      setPendingDraw(null);
-      setPendingName("");
+      pendingDrawRef.current = null;
       setDrawMode(mode);
       draftPositionsRef.current = [];
 
@@ -687,8 +812,22 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           drawHandlerRef.current.destroy();
           drawHandlerRef.current = null;
         }
+        const tempMeasurement: PanelMeasurement = {
+          id: `new-${Date.now()}`,
+          client_id: "",
+          survey_id: surveyId,
+          name: "",
+          kind: mode === "polygon" ? "volume" : "cross_section",
+          folder: "Stockpiles", // default
+          status: "draft",
+          created_at: "",
+          updated_at: "",
+        };
+        pendingDrawRef.current = { mode, coords };
         setDrawMode(null);
-        setPendingDraw({ mode, coords });
+        setSelectedMeasurement(tempMeasurement);
+        setIsInspectingNew(true);
+        setRightPanel("inspect");
       };
 
       const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
@@ -702,19 +841,20 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       handler.setInputAction(() => finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
       handler.setInputAction(() => finish(), ScreenSpaceEventType.RIGHT_CLICK);
       drawHandlerRef.current = handler;
+      setRightPanel("measure");
     },
-    [cleanupDraw]
+    [cleanupDraw, surveyId]
   );
 
   // ESC cancels an in-flight drawing.
   useEffect(() => {
-    if (!drawMode && !pendingDraw) return;
+    if (!drawMode && !rightPanel) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") cancelDraw();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [drawMode, pendingDraw, cancelDraw]);
+  }, [drawMode, rightPanel, cancelDraw]);
 
   useEffect(() => () => cleanupDraw(), [cleanupDraw]);
 
@@ -744,11 +884,11 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     [surveyId, refreshMeasurements]
   );
 
-  const saveMeasurement = useCallback(async () => {
-    if (!pendingDraw || !pendingName.trim()) return;
+  const saveMeasurement = useCallback(async (name: string) => {
+    if (!pendingDrawRef.current || !name.trim()) return;
     setSaving(true);
     try {
-      const { mode, coords } = pendingDraw;
+      const { mode, coords } = pendingDrawRef.current;
       const geometry =
         mode === "polygon"
           ? { type: "Polygon", coordinates: [[...coords, coords[0]]] }
@@ -757,14 +897,15 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
 
       const created = await createMeasurement(surveyId, {
         kind,
-        name: pendingName.trim(),
+        name: name.trim(),
         geometry,
         params: {},
       });
       toast.success(`Measurement "${created.name}" created`);
       cleanupDraw();
-      setPendingDraw(null);
-      setPendingName("");
+      pendingDrawRef.current = null;
+      setRightPanel(null);
+      setSelectedMeasurement(null);
       await refreshMeasurements();
       await triggerCompute(created.id);
     } catch (err) {
@@ -772,7 +913,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     } finally {
       setSaving(false);
     }
-  }, [pendingDraw, pendingName, surveyId, cleanupDraw, refreshMeasurements, triggerCompute]);
+  }, [surveyId, cleanupDraw, refreshMeasurements, triggerCompute]);
 
   const removeMeasurement = useCallback(
     async (id: string) => {
@@ -810,38 +951,41 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     return `Survey ${manifest.survey.survey_date}`;
   }, [manifest]);
 
+  // Section header label, e.g. "SURVEY V3 · 18 MAY".
+  const surveyLabel = useMemo(() => {
+    if (!manifest) return "SURVEY";
+    const v = manifest.survey.version?.number;
+    const parts = [v ? `SURVEY V${v}` : "SURVEY", shortDate(manifest.survey.survey_date)];
+    return parts.filter(Boolean).join(" · ");
+  }, [manifest]);
+
+  // Real measurements first, then the demo folder fixtures (display-only) so
+  // the grouped Measurements UI is demonstrable. Drop SAMPLE_MEASUREMENTS once
+  // asset-svc serves foldered measurements.
+  const panelMeasurements = useMemo<PanelMeasurement[]>(
+    () => [...measurements, ...SAMPLE_MEASUREMENTS],
+    [measurements]
+  );
+
   // ------------------------------------------------------------------ UI
 
   return (
     <div className="w-full h-full relative bg-[#0A0D14] overflow-hidden">
-      <div className="w-full h-full absolute inset-0 cesium-container">
-        <Viewer
-          ref={handleViewerRef}
-          full
-          timeline={false}
-          animation={false}
-          geocoder={false}
-          baseLayerPicker={false}
-          navigationHelpButton={false}
-          homeButton={false}
-          sceneModePicker={false}
-          fullscreenButton={false}
-          infoBox={false}
-          selectionIndicator={false}
-          style={{ width: "100%", height: "100%" }}
-        />
-      </div>
+      <div className="w-full h-full flex">
+        {/* Map-tools rail (48px) */}
+        <ViewerToolRail drawMode={drawMode} onStartDraw={startDraw} onCancelDraw={cancelDraw} />
 
-      {/* Side panel */}
-      <div className="absolute left-6 top-4 bottom-4 w-[300px] bg-[#12141A]/95 backdrop-blur-xl border border-[#1E2028] rounded-2xl z-10 flex flex-col overflow-hidden shadow-2xl">
-        <div className="px-4 pt-4 pb-3 border-b border-[#1E2028] flex items-center gap-3">
+        {/* Left Side panel */}
+        <div className="w-[240px] bg-[#111114]/95 backdrop-blur-xl border-r border-white/[0.08] z-10 flex flex-col shrink-0">
+        {/* Compact header: back + survey title */}
+        <div className="flex items-center gap-2.5 px-3 pt-4 pb-2 shrink-0">
           <Link href="/globe" className="text-gray-500 hover:text-gray-200 transition-colors shrink-0">
-            <ArrowLeft size={18} />
+            <ArrowLeft size={16} />
           </Link>
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-gray-100 truncate">{surveyTitle}</h2>
+            <h2 className="text-[13px] font-semibold text-gray-100 truncate">{surveyTitle}</h2>
             {manifest?.survey.working_crs && (
-              <p className="text-[11px] text-gray-500 truncate">
+              <p className="text-[10px] text-gray-500 truncate">
                 {manifest.survey.working_crs}
                 {manifest.survey.vertical_datum ? ` · ${manifest.survey.vertical_datum}` : ""}
               </p>
@@ -849,75 +993,104 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
-          {manifestError ? (
-            <div className="m-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
-              <p className="text-xs text-red-400">{manifestError}</p>
-            </div>
-          ) : !manifest ? (
-            <div className="flex items-center gap-2 p-4 text-gray-500 text-xs">
-              <Loader2 size={14} className="animate-spin" />
-              Loading manifest…
-            </div>
-          ) : (
-            <>
-              <LayerPanel
-                layers={layerControls}
-                processing={layersEmpty}
-                surveyStatus={manifest.survey.status}
-                onToggle={handleToggle}
-                onOpacity={handleOpacity}
-              />
-              <MeasurementPanel
-                measurements={measurements}
-                drawMode={drawMode}
-                busyIds={busyIds}
-                onStartDraw={startDraw}
-                onCancelDraw={cancelDraw}
-                onCompute={triggerCompute}
-                onDelete={removeMeasurement}
-              />
-            </>
-          )}
+        <Tabs
+          value={activeTab}
+          onValueChange={(v) => setActiveTab(v as "layers" | "surveys")}
+          className="flex flex-1 flex-col min-h-0"
+        >
+          <div className="px-3 pt-1 pb-2 shrink-0">
+            <TabsList className="w-full bg-transparent">
+              <TabsTrigger value="surveys">Surveys</TabsTrigger>
+              <TabsTrigger value="layers">Layers</TabsTrigger>
+            </TabsList>
+          </div>
+
+          <div className="flex-1 overflow-y-auto min-h-0">
+            {manifestError ? (
+              <div className="m-3 rounded-lg border border-red-500/20 bg-red-500/10 p-3">
+                <p className="text-xs text-red-400">{manifestError}</p>
+              </div>
+            ) : !manifest ? (
+              <div className="flex items-center gap-2 p-4 text-xs text-gray-500">
+                <Loader2 size={14} className="animate-spin" />
+                Loading manifest…
+              </div>
+            ) : (
+              <>
+                <TabsContent value="layers" className="mt-0">
+                  <LayerPanel
+                    surveyLabel={surveyLabel}
+                    layers={layerControls}
+                    designs={designControls}
+                    processing={layersEmpty}
+                    surveyStatus={manifest.survey.status}
+                    onToggle={handleToggle}
+                    onOpacity={handleOpacity}
+                    onToggleDesign={handleToggleDesign}
+                  />
+                  <MeasurementPanel
+                    measurements={panelMeasurements}
+                    drawMode={drawMode}
+                    busyIds={busyIds}
+                    onStartDraw={startDraw}
+                    onCancelDraw={cancelDraw}
+                    onCompute={triggerCompute}
+                    onDelete={removeMeasurement}
+                  />
+                </TabsContent>
+                <TabsContent value="surveys" className="mt-0">
+                  <SurveyList
+                    projectId={manifest.survey.project_id}
+                    currentSurveyId={surveyId}
+                  />
+                </TabsContent>
+              </>
+            )}
+          </div>
+        </Tabs>
+
+        {/* Footer */}
+        <div className="shrink-0 border-t border-white/[0.08] p-2">
+          <button
+            type="button"
+            onClick={() => toast.info("Layer upload is coming soon")}
+            className="flex h-8 w-full items-center justify-center gap-1.5 rounded-[4px] text-xs text-gray-400 transition-colors hover:bg-white/[0.03] hover:text-gray-200"
+          >
+            <Plus size={14} />
+            Add layer
+          </button>
         </div>
       </div>
-
-      {/* Camera-angle joystick — hold and drag to orbit the view */}
-      <CameraJoystick viewerRef={viewerRef} ready={viewerReady} />
-
-      {/* Name-the-measurement dialog */}
-      {pendingDraw && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div className="w-[360px] bg-[#12141A] border border-[#1E2028] rounded-2xl p-6 shadow-2xl">
-            <h3 className="text-base font-semibold text-gray-100 mb-1">
-              Name this {pendingDraw.mode === "polygon" ? "polygon" : "polyline"}
-            </h3>
-            <p className="text-xs text-gray-500 mb-4">
-              {pendingDraw.mode === "polygon"
-                ? "Saved as a volume measurement and computed against the survey DSM."
-                : "Saved as a cross-section measurement."}
-            </p>
-            <Input
-              autoFocus
-              placeholder="e.g. Stockpile SP-12"
-              value={pendingName}
-              onChange={(e) => setPendingName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") saveMeasurement();
-              }}
-              className="mb-4 bg-[#16181D] border-white/5"
-            />
-            <div className="flex gap-3">
-              <Button onClick={saveMeasurement} disabled={!pendingName.trim() || saving} className="flex-1">
-                {saving ? "Saving…" : "Save & compute"}
-              </Button>
-              <Button variant="secondary" onClick={cancelDraw} disabled={saving}>
-                Cancel
-              </Button>
-            </div>
-          </div>
+        {/* Center: 3D Viewer */}
+        <div className="flex-1 relative">
+          <Viewer
+            ref={handleViewerRef}
+            full
+            timeline={false}
+            animation={false}
+            geocoder={false}
+            baseLayerPicker={false}
+            navigationHelpButton={false}
+            homeButton={false}
+            sceneModePicker={false}
+            fullscreenButton={false}
+            infoBox={false}
+            selectionIndicator={false}
+            style={{ width: "100%", height: "100%" }}
+          />
+          <CameraJoystick viewerRef={viewerRef} ready={viewerReady} />
         </div>
-      )}
+
+        {/* Right contextual panel */}
+        {rightPanel && (
+          <div className="w-[280px] bg-[#111114]/95 backdrop-blur-xl border-l border-white/[0.08] z-10 flex flex-col shrink-0">
+            {rightPanel === "measure" && <MeasurePalette onClose={cancelDraw} />}
+            {rightPanel === "inspect" && (
+              <FeatureInspector measurement={selectedMeasurement} onClose={cancelDraw} onSave={saveMeasurement} isNew={isInspectingNew} saving={saving} />
+            )}
+          </div>
+        )}
+      </div>
 
       <style
         dangerouslySetInnerHTML={{

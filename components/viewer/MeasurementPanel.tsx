@@ -1,13 +1,38 @@
 "use client";
 
-import React from "react";
-import { Hexagon, Loader2, Play, Spline, Trash2, X } from "lucide-react";
-import type { Measurement } from "@/lib/api/assetSvc";
+import React, { useMemo, useState } from "react";
+import {
+  ArrowUpDown,
+  ChevronRight,
+  Filter,
+  Folder,
+  FoldVertical,
+  Hexagon,
+  Loader2,
+  Play,
+  Search,
+  Spline,
+  Trash2,
+} from "lucide-react";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 
 export type DrawMode = "polygon" | "polyline";
 
+const UNGROUPED = "Ungrouped";
+
 interface MeasurementPanelProps {
-  measurements: Measurement[];
+  measurements: PanelMeasurement[];
   drawMode: DrawMode | null;
   busyIds: Set<string>;
   onStartDraw: (mode: DrawMode) => void;
@@ -16,28 +41,68 @@ interface MeasurementPanelProps {
   onDelete: (id: string) => void;
 }
 
-const METRIC_LABELS: Record<string, string> = {
-  volume_m3: "Volume (m³)",
-  adjusted_volume_m3: "Adj. volume (m³)",
-  area_m2: "Area (m²)",
-  tonnage_t: "Tonnage (t)",
-  cut_volume_m3: "Cut (m³)",
-  fill_volume_m3: "Fill (m³)",
-  net_change_m3: "Net change (m³)",
-  length_m: "Length (m)",
-};
-
-function statusBadge(status: string) {
-  switch (status) {
-    case "completed":
-      return "bg-green-500/10 text-green-400 border border-green-500/20";
-    case "computing":
-      return "bg-blue-500/10 text-blue-400 border border-blue-500/20";
-    case "failed":
-      return "bg-red-500/10 text-red-400 border border-red-500/20";
-    default:
-      return "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20";
+/** Single-line row label, e.g. "SP-01 · limestone · 14,820 m³" (demo content
+ * is pre-formatted into the name) or "<name> · 14,820 m³" for real results. */
+function measurementLabel(m: PanelMeasurement): string {
+  if (m.demo) return m.name;
+  const r = m.result;
+  const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (r) {
+    if (typeof r.volume_m3 === "number") return `${m.name} · ${fmt(r.volume_m3)} m³`;
+    if (typeof r.adjusted_volume_m3 === "number") return `${m.name} · ${fmt(r.adjusted_volume_m3)} m³`;
+    if (typeof r.area_m2 === "number") return `${m.name} · ${fmt(r.area_m2)} m²`;
+    if (typeof r.length_m === "number") return `${m.name} · ${fmt(r.length_m)} m`;
   }
+  return m.name;
+}
+
+/** Small status dot reflecting compute state. */
+function StatusDot({ status }: { status: string }) {
+  const color =
+    status === "completed"
+      ? "bg-green-400"
+      : status === "computing"
+      ? "bg-blue-400"
+      : status === "failed"
+      ? "bg-red-400"
+      : "bg-gray-600";
+  if (status === "computing") {
+    return <Loader2 size={11} className="shrink-0 animate-spin text-blue-400" />;
+  }
+  return <span className={`size-1.5 shrink-0 rounded-full ${color}`} title={status} />;
+}
+
+function ToolbarButton({
+  label,
+  active,
+  onClick,
+  children,
+}: {
+  label: string;
+  active?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={onClick}
+          aria-label={label}
+          aria-pressed={active}
+          className={`flex size-7 items-center justify-center rounded-[4px] transition-colors ${
+            active
+              ? "bg-[#C97A4E] text-[#0A0D14]"
+              : "text-gray-400 hover:bg-white/5 hover:text-gray-200"
+          }`}
+        >
+          {children}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
 }
 
 export function MeasurementPanel({
@@ -49,116 +114,191 @@ export function MeasurementPanel({
   onCompute,
   onDelete,
 }: MeasurementPanelProps) {
+  const [query, setQuery] = useState("");
+  const [sortRecent, setSortRecent] = useState(false);
+  const [completedOnly, setCompletedOnly] = useState(false);
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
+
+  const groups = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let list = measurements;
+    if (q) list = list.filter((m) => m.name.toLowerCase().includes(q));
+    if (completedOnly) list = list.filter((m) => m.status === "completed");
+
+    const byFolder = new Map<string, PanelMeasurement[]>();
+    for (const m of list) {
+      const folder = m.folder?.trim() || UNGROUPED;
+      const arr = byFolder.get(folder);
+      if (arr) arr.push(m);
+      else byFolder.set(folder, [m]);
+    }
+    const entries = [...byFolder.entries()];
+    if (sortRecent) {
+      for (const [, arr] of entries) {
+        arr.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+      }
+    }
+    // Preserve first-appearance order (the source controls grouping order);
+    // Ungrouped always sinks to the bottom.
+    entries.sort(([a], [b]) => {
+      if (a === UNGROUPED) return 1;
+      if (b === UNGROUPED) return -1;
+      return 0;
+    });
+    return entries;
+  }, [measurements, query, completedOnly, sortRecent]);
+
+  const allCollapsed = groups.length > 0 && collapsedFolders.size >= groups.length;
+
+  const toggleAll = () => {
+    setCollapsedFolders(allCollapsed ? new Set() : new Set(groups.map(([f]) => f)));
+  };
+
+  const toggleFolder = (folder: string) => {
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(folder)) next.delete(folder);
+      else next.add(folder);
+      return next;
+    });
+  };
+
   return (
-    <div className="flex flex-col border-t border-[#1E2028]">
-      <div className="px-4 pt-3 pb-2 flex items-center justify-between">
-        <h3 className="text-xs font-semibold text-gray-500 tracking-wider uppercase">Measurements</h3>
-      </div>
+    <TooltipProvider delayDuration={300}>
+      <div className="flex flex-col px-2 pt-2">
+        <div className="px-2 pt-2 pb-1 text-[11px] uppercase tracking-[0.04em] text-[#71717a]">
+          Measurements
+        </div>
 
-      {/* Toolbar */}
-      <div className="px-4 pb-3 flex items-center gap-2">
-        <button
-          onClick={() => (drawMode === "polygon" ? onCancelDraw() : onStartDraw("polygon"))}
-          className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-1.5 rounded-lg border transition-colors ${
-            drawMode === "polygon"
-              ? "bg-[#C97A4E] text-[#0A0D14] border-[#C97A4E] font-medium"
-              : "bg-[#1E2028]/50 text-gray-300 border-[#2A2D35] hover:border-[#3A3D45]"
-          }`}
-        >
-          <Hexagon size={13} />
-          Polygon
-        </button>
-        <button
-          onClick={() => (drawMode === "polyline" ? onCancelDraw() : onStartDraw("polyline"))}
-          className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-1.5 rounded-lg border transition-colors ${
-            drawMode === "polyline"
-              ? "bg-[#C97A4E] text-[#0A0D14] border-[#C97A4E] font-medium"
-              : "bg-[#1E2028]/50 text-gray-300 border-[#2A2D35] hover:border-[#3A3D45]"
-          }`}
-        >
-          <Spline size={13} />
-          Polyline
-        </button>
-        {drawMode && (
-          <button
-            onClick={onCancelDraw}
-            className="text-gray-500 hover:text-gray-200 transition-colors"
-            title="Cancel drawing"
+        {/* Toolbar */}
+        <div className="flex items-center gap-1 px-1 pb-2">
+          <ToolbarButton
+            label="Draw polygon (area / volume)"
+            active={drawMode === "polygon"}
+            onClick={() => (drawMode === "polygon" ? onCancelDraw() : onStartDraw("polygon"))}
           >
-            <X size={16} />
-          </button>
-        )}
-      </div>
+            <Hexagon size={13} />
+          </ToolbarButton>
+          <ToolbarButton
+            label="Draw polyline (cross-section)"
+            active={drawMode === "polyline"}
+            onClick={() => (drawMode === "polyline" ? onCancelDraw() : onStartDraw("polyline"))}
+          >
+            <Spline size={13} />
+          </ToolbarButton>
+          <ToolbarButton
+            label={sortRecent ? "Sorting by recent" : "Sorting by name"}
+            active={sortRecent}
+            onClick={() => setSortRecent((v) => !v)}
+          >
+            <ArrowUpDown size={13} />
+          </ToolbarButton>
+          <ToolbarButton
+            label={completedOnly ? "Showing completed only" : "Filter: completed only"}
+            active={completedOnly}
+            onClick={() => setCompletedOnly((v) => !v)}
+          >
+            <Filter size={13} />
+          </ToolbarButton>
+          <ToolbarButton label={allCollapsed ? "Expand all" : "Collapse all"} onClick={toggleAll}>
+            <FoldVertical size={13} />
+          </ToolbarButton>
+        </div>
 
-      {drawMode && (
-        <p className="px-4 pb-3 text-[11px] text-gray-500">
-          Click on the globe to add vertices. Double-click or right-click to finish.
-        </p>
-      )}
+        {/* Search */}
+        <div className="relative mb-1 px-1">
+          <Search
+            size={12}
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-500"
+          />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search measurements..."
+            className="h-7 w-full rounded-[4px] border border-white/[0.08] bg-[#19191d] pl-7 pr-2 text-[11px] text-[#F3F4F6] placeholder:text-gray-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#C97A4E]"
+          />
+        </div>
 
-      <div className="flex flex-col gap-2 px-3 pb-4 overflow-y-auto">
-        {measurements.length === 0 && (
-          <p className="px-1 text-[11px] text-gray-600 italic">No measurements yet — draw one above.</p>
+        {drawMode && (
+          <p className="px-2 py-1.5 text-[11px] text-gray-500">
+            Click the globe to add vertices. Double-click or right-click to finish.
+          </p>
         )}
-        {measurements.map((m) => {
-          const busy = busyIds.has(m.id);
-          return (
-            <div key={m.id} className="p-2.5 rounded-lg bg-[#1E2028]/50 border border-[#2A2D35]">
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <span className="text-xs font-medium text-gray-200 truncate">{m.name}</span>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {(m.status === "draft" || m.status === "failed") && (
-                    <button
-                      onClick={() => onCompute(m.id)}
-                      disabled={busy}
-                      className="text-gray-500 hover:text-[#C97A4E] transition-colors disabled:opacity-50"
-                      title="Compute"
-                    >
-                      {busy ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
-                    </button>
-                  )}
-                  <button
-                    onClick={() => onDelete(m.id)}
-                    disabled={busy}
-                    className="text-gray-500 hover:text-red-400 transition-colors disabled:opacity-50"
-                    title="Delete"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-500">{m.kind}</span>
-                <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium uppercase ${statusBadge(m.status)}`}>
-                  {m.status === "computing" ? (
-                    <span className="inline-flex items-center gap-1">
-                      <Loader2 size={9} className="animate-spin" />
-                      computing
-                    </span>
-                  ) : (
-                    m.status
-                  )}
-                </span>
-              </div>
-              {m.status === "failed" && (
-                <p className="text-[10px] text-red-400/80 mt-1">Compute failed — retry or check inputs.</p>
-              )}
-              {m.result && Object.keys(m.result).length > 0 && (
-                <div className="mt-2 grid grid-cols-2 gap-1">
-                  {Object.entries(m.result).map(([k, v]) => (
-                    <div key={k} className="bg-[#12141A] rounded px-1.5 py-1">
-                      <div className="text-[9px] text-gray-500 truncate">{METRIC_LABELS[k] || k}</div>
-                      <div className="text-[11px] text-gray-200 font-medium">
-                        {typeof v === "number" ? v.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(v)}
+
+        {/* Folder groups */}
+        <div className="flex flex-col pb-2">
+          {groups.length === 0 && (
+            <p className="px-2 py-1 text-[11px] italic text-gray-600">
+              {query || completedOnly ? "No matching measurements." : "No measurements yet — draw one above."}
+            </p>
+          )}
+
+          {groups.map(([folder, items]) => {
+            const open = !collapsedFolders.has(folder);
+            return (
+              <Collapsible key={folder} open={open} onOpenChange={() => toggleFolder(folder)}>
+                <CollapsibleTrigger className="group flex h-8 w-full items-center gap-1.5 rounded-[4px] px-2 hover:bg-white/[0.03]">
+                  <ChevronRight
+                    size={14}
+                    className={`shrink-0 text-gray-500 transition-transform ${open ? "rotate-90" : ""}`}
+                  />
+                  <Folder size={14} className="shrink-0 text-gray-500" />
+                  <span className="min-w-0 flex-1 truncate text-left text-xs text-[#F3F4F6]">
+                    {folder}
+                  </span>
+                  <span className="shrink-0 text-[11px] text-[#71717a]">({items.length})</span>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="pl-6">
+                  {items.map((m) => {
+                    const busy = busyIds.has(m.id);
+                    const canCompute = m.status === "draft" || m.status === "failed";
+                    const showDot = !m.demo && m.status !== "completed";
+                    return (
+                      <div
+                        key={m.id}
+                        className="group flex h-7 items-center gap-2 rounded-[4px] px-2 hover:bg-white/[0.03]"
+                      >
+                        {showDot && <StatusDot status={m.status} />}
+                        <span className="min-w-0 flex-1 truncate text-[11px] text-[#a1a1aa]">
+                          {measurementLabel(m)}
+                        </span>
+                        {!m.demo && (
+                          <div className="hidden shrink-0 items-center gap-1 group-hover:flex">
+                            {canCompute && (
+                              <button
+                                type="button"
+                                onClick={() => onCompute(m.id)}
+                                disabled={busy}
+                                title="Compute"
+                                className="text-gray-500 transition-colors hover:text-[#C97A4E] disabled:opacity-50"
+                              >
+                                {busy ? (
+                                  <Loader2 size={12} className="animate-spin" />
+                                ) : (
+                                  <Play size={12} />
+                                )}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => onDelete(m.id)}
+                              disabled={busy}
+                              title="Delete"
+                              className="text-gray-500 transition-colors hover:text-red-400 disabled:opacity-50"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
+                    );
+                  })}
+                </CollapsibleContent>
+              </Collapsible>
+            );
+          })}
+        </div>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }
