@@ -51,6 +51,7 @@ import { MeasurementPanel, type DrawMode } from "@/components/viewer/Measurement
 import { MeasurePalette } from "@/components/viewer/MeasurePalette";
 import { FeatureInspector } from "@/components/viewer/FeatureInspector";
 import { ViewerToolRail } from "@/components/viewer/ViewerToolRail";
+import { ViewerDrawToolbar } from "@/components/viewer/ViewerDrawToolbar";
 import { SurveyList } from "@/components/viewer/SurveyList";
 import {
   SAMPLE_DESIGNS,
@@ -455,12 +456,20 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       Cesium3DTileset.fromUrl(l.tileset_url, tilesetBudget)
         .then((tileset) => {
           if (cancelled || viewer.isDestroyed()) return;
+          // The ortho-textured reality mesh already bakes in real capture
+          // lighting, so Cesium's directional shading double-darkens the
+          // sun-away faces vs the unlit base imagery. Lift the tileset light so
+          // the texture reads at full brightness while keeping some relief.
+          // (Harmless on the untextured grey fallback.)
+          tileset.lightColor = new Cartesian3(2.4, 2.4, 2.4);
           tileset.show = visibleRef.current.get(key) ?? false;
           viewer.scene.primitives.add(tileset);
           handles.set(key, { type: "tileset", tileset });
         })
         .catch((err) => console.error("Failed to load site model tileset:", err));
-      controls.push({ key, label: "Site model", category: "pointcloud", visible: true, opacity: 1, supportsOpacity: true });
+      // The textured reality mesh is the hero surface — on by default (terrain
+      // stays off), labelled for what it is.
+      controls.push({ key, label: "Reality mesh", category: "pointcloud", visible: true, opacity: 1, supportsOpacity: true });
     });
 
     // Vectors — contours/boundaries. Registered lazily and OFF by default:
@@ -1078,6 +1087,13 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
             selectionIndicator={false}
             style={{ width: "100%", height: "100%" }}
           />
+          {manifest && (
+            <ViewerDrawToolbar
+              drawMode={drawMode}
+              onStartDraw={startDraw}
+              onCancelDraw={cancelDraw}
+            />
+          )}
           <CameraJoystick viewerRef={viewerRef} ready={viewerReady} />
         </div>
 

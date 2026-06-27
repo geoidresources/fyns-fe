@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import { motion } from "framer-motion";
 import {
   ArrowUpDown,
   ChevronRight,
@@ -86,11 +87,14 @@ function ToolbarButton({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <button
+        <motion.button
           type="button"
           onClick={onClick}
           aria-label={label}
           aria-pressed={active}
+          whileHover={{ scale: 1.15 }}
+          whileTap={{ scale: 0.9 }}
+          transition={{ type: "spring", stiffness: 400, damping: 17 }}
           className={`flex size-7 items-center justify-center rounded-[4px] transition-colors ${
             active
               ? "bg-[#C97A4E] text-[#0A0D14]"
@@ -98,7 +102,7 @@ function ToolbarButton({
           }`}
         >
           {children}
-        </button>
+        </motion.button>
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>

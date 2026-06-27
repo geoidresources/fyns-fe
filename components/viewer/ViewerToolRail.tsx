@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { motion } from "framer-motion";
 import {
   Bomb,
   Download,
@@ -106,11 +107,14 @@ export function ViewerToolRail({ drawMode, onStartDraw, onCancelDraw }: ViewerTo
               {t.divider && <div className="my-0.5 h-px w-7 bg-white/[0.08]" />}
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <button
+                  <motion.button
                     type="button"
                     aria-label={t.label}
                     aria-pressed={active}
                     onClick={() => handle(t)}
+                    whileHover={{ scale: 1.15 }}
+                    whileTap={{ scale: 0.9 }}
+                    transition={{ type: "spring", stiffness: 400, damping: 17 }}
                     className={`flex size-9 items-center justify-center rounded-md border-l-2 transition-colors ${
                       active
                         ? "border-[#C97A4E] bg-[#C97A4E]/[0.12] text-[#C97A4E] shadow-[0_0_12px_0_rgba(194,112,62,0.25)]"
@@ -118,7 +122,7 @@ export function ViewerToolRail({ drawMode, onStartDraw, onCancelDraw }: ViewerTo
                     }`}
                   >
                     {t.icon}
-                  </button>
+                  </motion.button>
                 </TooltipTrigger>
                 <TooltipContent side="right">{t.label}</TooltipContent>
               </Tooltip>
