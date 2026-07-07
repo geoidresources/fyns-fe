@@ -284,16 +284,15 @@ The **Map Viewer panel** (§5) is implemented and wired in the survey viewer:
 | Primary nav rail (52px, §3) | `components/dashboard/Sidebar.tsx` | ✅ Built (dashboard shell) |
 | Map-tools rail (48px, §3) | `components/viewer/ViewerToolRail.tsx` | ✅ Built; Select/Distance/Cross-section wired to draw, rest scaffolded |
 | Right contextual panels (§7) | `MeasurePalette.tsx` + `FeatureInspector.tsx` | ⚙️ Built; analytics values still placeholder |
+| Floating draw toolbar (§6) | `components/viewer/ViewerDrawToolbar.tsx` | ✅ Built; Point/Line/Polygon/Section/Area/Slope/Volume wired to draw, rest scaffolded |
 
 **Both left rails are now present:** the primary nav rail (the dashboard
 `Sidebar`) and the 48px map-tools rail (`ViewerToolRail`), matching the design's
 two-rail left edge.
 
-**Not yet implemented** (future work): the in-canvas **floating draw toolbar**
-(§6 — draw tools currently live in the panel toolbar / tools rail instead), the
-**right 60px icon rail**, the **bottom status bar**, real analytics in the
-right inspector panels, and the companion screens (Globe View, Digital Twin,
-Reconcile Dashboard, Upload).
+**Not yet implemented** (future work): the **right 60px icon rail**, the
+**bottom status bar**, real analytics in the right inspector panels, and the
+companion screens (Globe View, Digital Twin, Reconcile Dashboard, Upload).
 
 > **Color reconciliation:** the implementation maps Figma's `#c2703e` accent and
 > grays to the project's existing theme tokens (`#C97A4E`, `#12141A`, `#1E2028`,

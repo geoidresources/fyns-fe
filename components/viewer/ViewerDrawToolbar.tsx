@@ -22,12 +22,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { DrawMode } from "@/components/viewer/MeasurementPanel";
+import type { DrawMode, DrawOptions } from "@/components/viewer/MeasurementPanel";
 
 // The floating in-canvas draw toolbar from the design — a top-center pill of
-// drawing tools. The active tool shows an icon + label with an accent glow.
-// Drawing primitives are wired to the live draw flow; the remaining actions are
-// scaffolded with tooltips + a "coming soon" toast.
+// drawing tools. Point/Elevation sample the surface (probe), the drawing
+// primitives carry presets into the live draw flow, Undo removes the last
+// placed vertex; the remaining actions stay scaffolded with a toast.
 
 type ToolId =
   | "point"
@@ -47,21 +47,22 @@ interface ToolDef {
   label: string;
   icon: React.ReactNode;
   draw?: DrawMode; // maps to a live draw mode
-  idle?: boolean; // returns to the idle/select state
+  opts?: DrawOptions; // preset carried into the draw
+  probe?: boolean; // samples a surface point instead of drawing
   divider?: boolean; // render a divider before this tool
 }
 
 const SZ = 18;
 
 const TOOLS: ToolDef[] = [
-  { id: "point", label: "Point", icon: <Crosshair size={SZ} />, idle: true },
-  { id: "line", label: "Line", icon: <Minus size={SZ} />, draw: "polyline" },
-  { id: "polygon", label: "Polygon", icon: <Pentagon size={SZ} />, draw: "polygon" },
-  { id: "section", label: "Section", icon: <Scissors size={SZ} />, draw: "polyline" },
-  { id: "area", label: "Area", icon: <Circle size={SZ} />, draw: "polygon" },
-  { id: "slope", label: "Slope", icon: <TrendingUp size={SZ} />, draw: "polyline" },
-  { id: "volume", label: "Volume", icon: <Box size={SZ} />, draw: "polygon", divider: true },
-  { id: "elevation", label: "Elevation", icon: <Triangle size={SZ} /> },
+  { id: "point", label: "Point", icon: <Crosshair size={SZ} />, probe: true },
+  { id: "line", label: "Line", icon: <Minus size={SZ} />, draw: "polyline", opts: { label: "Line" } },
+  { id: "polygon", label: "Polygon", icon: <Pentagon size={SZ} />, draw: "polygon", opts: { label: "Polygon" } },
+  { id: "section", label: "Section", icon: <Scissors size={SZ} />, draw: "polyline", opts: { label: "Section" } },
+  { id: "area", label: "Area", icon: <Circle size={SZ} />, draw: "polygon", opts: { label: "Area" } },
+  { id: "slope", label: "Slope", icon: <TrendingUp size={SZ} />, draw: "polyline", opts: { label: "Slope", slope: true } },
+  { id: "volume", label: "Volume", icon: <Box size={SZ} />, draw: "polygon", opts: { label: "Volume" }, divider: true },
+  { id: "elevation", label: "Elevation", icon: <Triangle size={SZ} />, probe: true },
   { id: "undo", label: "Undo", icon: <Undo2 size={SZ} /> },
   { id: "snap", label: "Snap to grid", icon: <Grid3x3 size={SZ} /> },
   { id: "more", label: "More", icon: <MoreHorizontal size={SZ} /> },
@@ -69,26 +70,51 @@ const TOOLS: ToolDef[] = [
 
 interface ViewerDrawToolbarProps {
   drawMode: DrawMode | null;
-  onStartDraw: (mode: DrawMode) => void;
+  probing: boolean;
+  onStartDraw: (mode: DrawMode, opts?: DrawOptions) => void;
+  onStartProbe: () => void;
   onCancelDraw: () => void;
+  onUndo: () => void;
 }
 
-export function ViewerDrawToolbar({ drawMode, onStartDraw, onCancelDraw }: ViewerDrawToolbarProps) {
+export function ViewerDrawToolbar({
+  drawMode,
+  probing,
+  onStartDraw,
+  onStartProbe,
+  onCancelDraw,
+  onUndo,
+}: ViewerDrawToolbarProps) {
   const [tool, setTool] = useState<ToolId>("point");
 
-  // While a draw is active the chosen tool stays lit; once it ends (drawMode
-  // null) fall back to Point — derived, so no effect/state-sync is needed.
-  const activeTool: ToolId = drawMode ? tool : "point";
+  // While a draw/probe is active the chosen tool stays lit; once it ends fall
+  // back to Point — derived, so no effect/state-sync is needed.
+  const activeTool: ToolId = drawMode || probing ? tool : "point";
 
   const handle = (t: ToolDef) => {
-    if (t.idle) {
-      setTool("point");
-      onCancelDraw();
+    if (t.probe) {
+      // Re-clicking the active probe tool ends it.
+      if (probing && activeTool === t.id) {
+        setTool("point");
+        onCancelDraw();
+        return;
+      }
+      setTool(t.id);
+      onStartProbe();
       return;
     }
     if (t.draw) {
+      if (drawMode && activeTool === t.id) {
+        setTool("point");
+        onCancelDraw();
+        return;
+      }
       setTool(t.id);
-      onStartDraw(t.draw);
+      onStartDraw(t.draw, t.opts);
+      return;
+    }
+    if (t.id === "undo") {
+      onUndo();
       return;
     }
     toast.info(`${t.label} — coming soon`);

@@ -5,26 +5,32 @@ import { Viewer } from "resium";
 import type { CesiumComponentRef } from "resium";
 import {
   CallbackProperty,
-  Cartesian2,
   Cartesian3,
   Cartographic,
+  Cesium3DTileFeature,
   Cesium3DTileset,
   Cesium3DTileStyle,
   CesiumTerrainProvider,
   ClassificationType,
   Color,
+  ConstantPositionProperty,
   EllipsoidTerrainProvider,
   Entity,
   GeoJsonDataSource,
   ImageryLayer,
+  Ion,
+  JulianDate,
   Math as CesiumMath,
   PolygonHierarchy,
   Rectangle,
   RequestScheduler,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
+  type TerrainProvider,
   UrlTemplateImageryProvider,
   Viewer as CesiumViewer,
+  createWorldTerrainAsync,
+  defined,
 } from "cesium";
 import { ArrowLeft, Loader2, Plus } from "lucide-react";
 import Link from "next/link";
@@ -39,6 +45,7 @@ import {
   type AssetLayer,
   type Manifest,
   type Measurement,
+  type SiteModelLayer,
 } from "@/lib/api/assetSvc";
 import { getProject } from "@/lib/api/userSvc";
 import { ApiError } from "@/lib/api/client";
@@ -47,17 +54,41 @@ import {
   type LayerControl,
   type DesignControl,
 } from "@/components/viewer/LayerPanel";
-import { MeasurementPanel, type DrawMode } from "@/components/viewer/MeasurementPanel";
-import { MeasurePalette } from "@/components/viewer/MeasurePalette";
+import {
+  MeasurementPanel,
+  type DrawMode,
+  type DrawOptions,
+} from "@/components/viewer/MeasurementPanel";
+import { MeasurePalette, type LiveReadout } from "@/components/viewer/MeasurePalette";
 import { FeatureInspector } from "@/components/viewer/FeatureInspector";
 import { ViewerToolRail } from "@/components/viewer/ViewerToolRail";
 import { ViewerDrawToolbar } from "@/components/viewer/ViewerDrawToolbar";
+import { ViewerStatusBar } from "@/components/viewer/ViewerStatusBar";
 import { SurveyList } from "@/components/viewer/SurveyList";
 import {
   SAMPLE_DESIGNS,
   SAMPLE_MEASUREMENTS,
   type PanelMeasurement,
 } from "@/lib/viewer/sampleData";
+import {
+  computeAreaSquareMeters,
+  computeDistanceMeters,
+  computeGrade,
+  computePerimeterMeters,
+  geometryToRectangle,
+  normalizeSelectedFeature,
+  pickScenePosition,
+  toLngLatHeight,
+  type LngLatHeight,
+} from "@/lib/viewer/measure";
+import {
+  DEFAULT_POINT_BUDGET,
+  applyDynamicEyeDomeLighting,
+  buildPointCloudStyle,
+  correctGeographicRootTransform,
+  pointBudgetToCacheBytes,
+  pointBudgetToMaximumScreenSpaceError,
+} from "@/lib/viewer/pointcloud";
 import { CameraJoystick } from "@/components/viewer/CameraJoystick";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -72,6 +103,13 @@ function shortDate(date?: string): string {
   return `${Number(m[3])} ${month}`.trim();
 }
 
+/** A thin DXF site model is a CAD surface (floats/cliffs, single-sided) — NOT a
+ * complete photogrammetry reality mesh. Everything else (3mx/osgb/obj/3tz/…, or
+ * unknown) is treated as a real mesh that renders crisp on terrain. */
+function isThinSurfaceMesh(sourceFormat?: string): boolean {
+  return (sourceFormat || "").trim().toLowerCase() === "dxf";
+}
+
 /** A design's format determines whether we can draw it client-side. */
 function designIsGeoJson(format?: string, url?: string): boolean {
   const f = (format || "").toLowerCase();
@@ -84,6 +122,14 @@ function designIsGeoJson(format?: string, url?: string): boolean {
 const DEFAULT_CENTER = { lat: 20.2587, lng: 85.7571, height: 3000 };
 
 const ACCENT = Color.fromCssColorString("#C97A4E");
+
+// Global terrain base. With a Cesium ion token set, the viewer uses Cesium World
+// Terrain as the base so a survey sits inside real surrounding elevation — the
+// textured reality mesh renders ON the ground (no floating/cliff), the
+// "digital-twin" look. Without a token it stays the flat ellipsoid + DSM-drape.
+const ION_TOKEN = (process.env.NEXT_PUBLIC_CESIUM_ION_TOKEN || "").trim();
+const USE_WORLD_TERRAIN = ION_TOKEN.length > 0;
+if (USE_WORLD_TERRAIN) Ion.defaultAccessToken = ION_TOKEN;
 
 // ------------------------------------------------------------- url helpers
 
@@ -180,6 +226,9 @@ type LayerHandle =
 interface PendingDraw {
   mode: DrawMode;
   coords: [number, number][]; // [lng, lat]
+  kind: "volume" | "cross_section";
+  folder?: string;
+  slope?: boolean;
 }
 
 export function SurveyViewer({ surveyId }: { surveyId: string }) {
@@ -199,6 +248,19 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const [rightPanel, setRightPanel] = useState<"measure" | "inspect" | null>(null);
   const [selectedMeasurement, setSelectedMeasurement] = useState<Measurement | PanelMeasurement | null>(null);
   const [isInspectingNew, setIsInspectingNew] = useState(false);
+  // Non-measurement map feature picked with the select tool (GeoJSON vector /
+  // design properties, 3D-tiles batch attributes) — ported feature inspection.
+  const [pickedFeature, setPickedFeature] = useState<Record<string, unknown> | null>(null);
+  // Probe tool: sample lng/lat/elevation at a clicked surface point.
+  const [probing, setProbing] = useState(false);
+  const [probePoint, setProbePoint] = useState<LngLatHeight | null>(null);
+  // Live draft geometry mirrored into state so the Measure palette readout
+  // updates as vertices are placed (spec §7.2); refs stay the render source.
+  const [draftPoints, setDraftPoints] = useState<Cartesian3[]>([]);
+  const [hoverPoint, setHoverPoint] = useState<Cartesian3 | null>(null);
+  const [activeDrawOpts, setActiveDrawOpts] = useState<DrawOptions | null>(null);
+  const [volumeMethod, setVolumeMethod] = useState("smart-base");
+  const [terrainExaggeration, setTerrainExaggeration] = useState(1);
 
   const handlesRef = useRef<Map<string, LayerHandle>>(new Map());
   // Latest user-facing visibility per layer key. Tilesets resolve LONG after
@@ -211,11 +273,24 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const drawHandlerRef = useRef<ScreenSpaceEventHandler | null>(null);
   const draftPositionsRef = useRef<Cartesian3[]>([]);
   const draftEntityRef = useRef<Entity | null>(null);
+  // Rubber-band vertex under the cursor while drawing (per-frame, read by the
+  // draft entity's CallbackProperty).
+  const hoverPositionRef = useRef<Cartesian3 | null>(null);
+  // Throttles the hover state mirror — the readout re-renders at ~10Hz while
+  // the draft entity itself tracks the ref every frame.
+  const hoverThrottleRef = useRef(0);
+  const probeEntityRef = useRef<Entity | null>(null);
   const measurementDsRef = useRef<GeoJsonDataSource | null>(null);
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
   const pendingDrawRef = useRef<PendingDraw | null>(null);
 
   const layersEmpty = manifestLayersEmpty(manifest);
+
+  // Updates a layer row's async meta (loading spinner / load error) once its
+  // tileset or vector fetch settles.
+  const patchControl = useCallback((key: string, patch: Partial<LayerControl>) => {
+    setLayerControls((prev) => prev.map((c) => (c.key === key ? { ...c, ...patch } : c)));
+  }, []);
 
   // ------------------------------------------------------------- data load
 
@@ -327,6 +402,36 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     };
   }, [viewerReady, manifest, flyToRectangle]);
 
+  // -------------------------------------------------------- scene setup
+
+  // One-time scene configuration ported from rendering-engine-fe's production
+  // viewer: depth-test clamped overlays against terrain (measurements should
+  // not bleed through hills), no fog, and a globe fallback color matching the
+  // app background. Without an ion token the default Ion imagery cannot load
+  // and the globe renders black — fall back to Carto's token-free dark
+  // basemap so the survey still has geographic context (the Viewer mounts
+  // with baseLayer={false} in that mode, so the slot is empty).
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed()) return;
+    viewer.scene.globe.depthTestAgainstTerrain = true;
+    viewer.scene.fog.enabled = false;
+    viewer.scene.globe.showGroundAtmosphere = false;
+    viewer.scene.globe.baseColor = Color.fromCssColorString("#0A0D14");
+    if (!USE_WORLD_TERRAIN && viewer.imageryLayers.length === 0) {
+      viewer.imageryLayers.addImageryProvider(
+        new UrlTemplateImageryProvider({
+          url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+          subdomains: "abcd",
+          minimumLevel: 0,
+          maximumLevel: 19,
+        }),
+        0
+      );
+    }
+    viewer.scene.requestRender();
+  }, [viewerReady]);
+
   // ------------------------------------------------------- layer building
 
   useEffect(() => {
@@ -350,6 +455,14 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     viewer.terrainProvider = new EllipsoidTerrainProvider();
 
     const controls: LayerControl[] = [];
+
+    // A complete photogrammetry reality mesh is the hero ONLY with a global
+    // terrain (World Terrain) under it — then it renders crisp, city-twin style.
+    // A thin DXF surface never qualifies (it floats/cliffs); those fall back to
+    // the DSM-draped ortho. Computed up-front so the DSM default below agrees.
+    const meshIsHero = (l: SiteModelLayer): boolean =>
+      USE_WORLD_TERRAIN && !isThinSurfaceMesh(l.source_format);
+    const anyMeshHero = (manifest.layers.site_models || []).some(meshIsHero);
 
     const addImagery = (key: string, label: string, category: LayerControl["category"], asset: AssetLayer, template: string, visible: boolean) => {
       const provider = new UrlTemplateImageryProvider({
@@ -387,7 +500,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       });
     });
 
-    // Terrain — quantized-mesh surfaces (exclusive; off by default).
+    // Terrain — quantized-mesh surfaces (exclusive). The DSM is ON by default so
+    // the ortho drapes on real relief: otherwise the globe is a flat ellipsoid
+    // at height 0 and the reality mesh (at its true ~150 m elevation) floats far
+    // above the imagery. DTM stays off.
     (manifest.layers.terrain || []).forEach((l, i) => {
       if (!l.tile_directory_url) return;
       const key = `terrain-${i}`;
@@ -396,7 +512,11 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         key,
         label: (l.surface_type || "terrain").toUpperCase(),
         category: "terrain",
-        visible: false,
+        // DSM is the default base only WITHOUT a global terrain: it drapes the
+        // ortho on relief so nothing floats. With World Terrain (ion token) the
+        // reality mesh is the hero instead and the DSM stays off (it would
+        // z-fight the mesh).
+        visible: (l.surface_type || "").toLowerCase() === "dsm" && !anyMeshHero,
         opacity: 1,
         supportsOpacity: false,
       });
@@ -433,20 +553,40 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       foveatedTimeDelay: 0.2,
     };
 
-    // Point clouds — 3D Tiles.
+    // Point clouds — 3D Tiles, with the point-cloud pipeline ported from
+    // rendering-engine-fe: the point budget maps to density (SSE) + cache
+    // size, eye-dome lighting keeps unlit points readable, and PDAL-written
+    // tilesets get their geographic root transform corrected to ECEF. fyns's
+    // crash guards (request culling while moving, overflow bound) stay on.
     (manifest.layers.pointcloud || []).forEach((l, i) => {
       const url = pickTilesetUrl(l.output_urls);
       if (!url) return;
       const key = `pointcloud-${i}`;
-      Cesium3DTileset.fromUrl(url, tilesetBudget)
+      Cesium3DTileset.fromUrl(url, {
+        ...tilesetBudget,
+        maximumScreenSpaceError: pointBudgetToMaximumScreenSpaceError(DEFAULT_POINT_BUDGET),
+        cacheBytes: pointBudgetToCacheBytes(DEFAULT_POINT_BUDGET),
+        pointCloudShading: {
+          attenuation: true,
+          eyeDomeLighting: true,
+          eyeDomeLightingStrength: 1.0,
+          maximumAttenuation: 4,
+          geometricErrorScale: 1.0,
+        },
+      })
         .then((tileset) => {
           if (cancelled || viewer.isDestroyed()) return;
+          correctGeographicRootTransform(tileset);
           tileset.show = visibleRef.current.get(key) ?? false;
           viewer.scene.primitives.add(tileset);
           handles.set(key, { type: "tileset", tileset });
+          patchControl(key, { loading: false });
         })
-        .catch((err) => console.error("Failed to load point cloud tileset:", err));
-      controls.push({ key, label: "Point cloud", category: "pointcloud", visible: false, opacity: 1, supportsOpacity: true });
+        .catch((err) => {
+          console.error("Failed to load point cloud tileset:", err);
+          patchControl(key, { loading: false, error: "Failed to load point cloud tiles" });
+        });
+      controls.push({ key, label: "Point cloud", category: "pointcloud", visible: false, opacity: 1, supportsOpacity: true, loading: true });
     });
 
     // Site models — georeferenced reality meshes (3D Tiles).
@@ -465,11 +605,17 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           tileset.show = visibleRef.current.get(key) ?? false;
           viewer.scene.primitives.add(tileset);
           handles.set(key, { type: "tileset", tileset });
+          patchControl(key, { loading: false });
         })
-        .catch((err) => console.error("Failed to load site model tileset:", err));
-      // The textured reality mesh is the hero surface — on by default (terrain
-      // stays off), labelled for what it is.
-      controls.push({ key, label: "Reality mesh", category: "pointcloud", visible: true, opacity: 1, supportsOpacity: true });
+        .catch((err) => {
+          console.error("Failed to load site model tileset:", err);
+          patchControl(key, { loading: false, error: "Failed to load reality mesh tiles" });
+        });
+      // Hero ON only with World Terrain (ion token): the mesh then sits on real
+      // surrounding terrain — crisp, no float/cliff (the digital-twin look).
+      // Without a token it stays OFF (the DSM-draped ortho is the hero) because
+      // the mesh + DSM are the same surface and z-fight/poke-through.
+      controls.push({ key, label: "Reality mesh", category: "pointcloud", visible: meshIsHero(l), opacity: 1, supportsOpacity: true, loading: true });
     });
 
     // Vectors — contours/boundaries. Registered lazily and OFF by default:
@@ -522,25 +668,106 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [viewerReady, manifest]);
+  }, [viewerReady, manifest, patchControl]);
+
+  // Camera-adaptive eye-dome lighting (ported): point outlines strengthen as
+  // the camera closes in on the cloud.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed()) return;
+    const updateEDL = () => {
+      const cameraHeight = viewer.camera.positionCartographic.height;
+      for (const [key, handle] of handlesRef.current) {
+        if (!key.startsWith("pointcloud-") || handle.type !== "tileset" || !handle.tileset.show) continue;
+        applyDynamicEyeDomeLighting(handle.tileset, cameraHeight);
+      }
+    };
+    viewer.scene.preRender.addEventListener(updateEDL);
+    return () => {
+      if (!viewer.isDestroyed()) viewer.scene.preRender.removeEventListener(updateEDL);
+    };
+  }, [viewerReady]);
+
+  // Terrain exaggeration (ported): scales heights around the ellipsoid so
+  // subtle relief reads at a glance. ×1 is true scale.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed()) return;
+    viewer.scene.verticalExaggeration = terrainExaggeration;
+    viewer.scene.verticalExaggerationRelativeHeight = 0;
+    viewer.scene.requestRender();
+  }, [viewerReady, terrainExaggeration]);
 
   // ----------------------------------------------------- layer interaction
 
-  const applyTerrain = useCallback(async (url: string | null) => {
-    const viewer = viewerRef.current;
-    if (!viewer || viewer.isDestroyed()) return;
-    if (!url) {
-      viewer.terrainProvider = new EllipsoidTerrainProvider();
-      return;
+  // The global base terrain the scene falls back to when no survey terrain (DSM)
+  // is active: Cesium World Terrain when an ion token is set (so the survey sits
+  // in real surrounding elevation), otherwise the flat ellipsoid. Resolved once
+  // and cached.
+  const baseTerrainRef = useRef<TerrainProvider | null>(null);
+  const ensureBaseTerrain = useCallback(async (): Promise<TerrainProvider> => {
+    if (baseTerrainRef.current) return baseTerrainRef.current;
+    if (USE_WORLD_TERRAIN) {
+      try {
+        baseTerrainRef.current = await createWorldTerrainAsync();
+        return baseTerrainRef.current;
+      } catch (err) {
+        console.error("Cesium World Terrain failed (check ion token); using ellipsoid:", err);
+      }
     }
-    try {
-      const provider = await CesiumTerrainProvider.fromUrl(url, { requestVertexNormals: true });
-      if (!viewer.isDestroyed()) viewer.terrainProvider = provider;
-    } catch (err) {
-      console.error("Failed to load terrain:", err);
-      toast.error("Failed to load terrain tiles");
-    }
+    baseTerrainRef.current = new EllipsoidTerrainProvider();
+    return baseTerrainRef.current;
   }, []);
+
+  // Monotonic guard (ported): terrain loads resolve async, and a rapid
+  // DSM→DTM→mesh-hero toggle sequence can finish out of order — a stale
+  // resolution must not overwrite the newest choice.
+  const terrainSeqRef = useRef(0);
+  const applyTerrain = useCallback(
+    async (url: string | null) => {
+      const viewer = viewerRef.current;
+      if (!viewer || viewer.isDestroyed()) return;
+      const seq = ++terrainSeqRef.current;
+      if (!url) {
+        const base = await ensureBaseTerrain();
+        if (!viewer.isDestroyed() && seq === terrainSeqRef.current) viewer.terrainProvider = base;
+        return;
+      }
+      try {
+        const provider = await CesiumTerrainProvider.fromUrl(url, { requestVertexNormals: true });
+        if (!viewer.isDestroyed() && seq === terrainSeqRef.current) viewer.terrainProvider = provider;
+      } catch (err) {
+        console.error("Failed to load terrain:", err);
+        toast.error("Failed to load terrain tiles");
+      }
+    },
+    [ensureBaseTerrain]
+  );
+
+  // Set the default terrain once per survey: the default-visible DSM (no-token
+  // mode, ortho drapes on relief) or the World Terrain base (token mode, so the
+  // reality mesh sits on the ground). handleToggle owns terrain after that; the
+  // ellipsoid guard keeps this from fighting a user toggle (the layer-build
+  // effect resets the provider to the ellipsoid before this runs).
+  const defaultTerrainSurveyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed() || !manifest) return;
+    const sig = manifest.survey.id;
+    if (defaultTerrainSurveyRef.current === sig) return;
+    if (!(viewer.terrainProvider instanceof EllipsoidTerrainProvider)) return;
+    const t = layerControls.find((c) => c.category === "terrain" && c.visible);
+    if (t) {
+      const h = handlesRef.current.get(t.key);
+      if (h?.type === "terrain") {
+        defaultTerrainSurveyRef.current = sig;
+        applyTerrain(h.url);
+      }
+    } else if (USE_WORLD_TERRAIN) {
+      defaultTerrainSurveyRef.current = sig;
+      applyTerrain(null); // resolves to the World Terrain base
+    }
+  }, [viewerReady, manifest, layerControls, applyTerrain]);
 
   const handleToggle = useCallback(
     (key: string) => {
@@ -594,6 +821,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           else if (handle.type === "datasource") handle.ds.show = nowVisible;
           else if (handle.type === "geojson-lazy" && nowVisible && !handle.loading) {
             handle.loading = true;
+            patchControl(key, { loading: true, error: null });
             const viewer = viewerRef.current;
             GeoJsonDataSource.load(handle.url, {
               clampToGround: true,
@@ -606,17 +834,19 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
                 ds.show = visibleRef.current.get(key) ?? false;
                 viewer.dataSources.add(ds);
                 handlesRef.current.set(key, { type: "datasource", ds });
+                patchControl(key, { loading: false });
               })
               .catch((err) => {
                 handle.loading = false;
                 console.error("Failed to load vector layer:", err);
+                patchControl(key, { loading: false, error: "Failed to load vector data" });
               });
           }
         }
         return next;
       });
     },
-    [applyTerrain]
+    [applyTerrain, patchControl]
   );
 
   const handleOpacity = useCallback((key: string, opacity: number) => {
@@ -626,7 +856,15 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     if (handle.type === "imagery") {
       handle.layer.alpha = opacity;
     } else if (handle.type === "tileset") {
-      handle.tileset.style = new Cesium3DTileStyle({ color: `color('white', ${opacity.toFixed(2)})` });
+      // Point clouds keep their RGB and fade via the ported point style (which
+      // also fixes the point size); textured meshes tint through white so the
+      // texture survives the alpha. At (near) full opacity drop the style
+      // entirely so the native materials render untouched.
+      handle.tileset.style = key.startsWith("pointcloud-")
+        ? buildPointCloudStyle(opacity)
+        : opacity >= 0.99
+          ? undefined
+          : new Cesium3DTileStyle({ color: `color('white', ${opacity.toFixed(2)})` });
     }
   }, []);
 
@@ -703,34 +941,77 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [viewerReady, measurements, ACCENT]);
+  }, [viewerReady, measurements]);
 
-  // Handle clicking on map features (measurements)
+  // Select tool: click a measurement overlay to inspect it, or any other map
+  // feature — GeoJSON property bags (contours, designs) and 3D-tiles batch
+  // attributes — via the picking flow ported from rendering-engine-fe.
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed()) return;
 
     const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
     handler.setInputAction((movement: ScreenSpaceEventHandler.PositionedEvent) => {
-      if (drawMode) return; // Don't select while drawing
+      if (drawMode || probing) return; // the draw/probe handlers own clicks
 
-      const pickedObject = viewer.scene.pick(movement.position);
-      if (pickedObject?.id instanceof Entity) {
-        const entity = pickedObject.id;
-        const measurementId = entity.properties?.id?.getValue();
-        if (measurementId) {
-          const measurement = measurements.find((m) => m.id === measurementId);
-          if (measurement) {
-            setSelectedMeasurement(measurement);
-            setIsInspectingNew(false);
-            setRightPanel("inspect");
-          }
+      const picked = viewer.scene.pick(movement.position);
+      if (!defined(picked)) {
+        // Clicking empty space dismisses a picked-feature inspection.
+        if (pickedFeature) {
+          setPickedFeature(null);
+          setRightPanel((p) => (p === "inspect" ? null : p));
+        }
+        return;
+      }
+
+      if (picked instanceof Cesium3DTileFeature) {
+        const ids = picked.getPropertyIds();
+        if (ids.length === 0) return; // untagged mesh surface — nothing to inspect
+        const props: Record<string, unknown> = { _source: "3dtiles" };
+        for (const id of ids) props[id] = picked.getProperty(id);
+        setSelectedMeasurement(null);
+        setIsInspectingNew(false);
+        setPickedFeature(normalizeSelectedFeature(props, { name: "3D Tiles feature" }));
+        setRightPanel("inspect");
+        return;
+      }
+
+      if (picked.id instanceof Entity) {
+        const entity = picked.id;
+        const props = entity.properties?.getValue(JulianDate.now()) as
+          | Record<string, unknown>
+          | undefined;
+
+        // Measurement overlays carry their measurement id in properties.
+        const measurement =
+          typeof props?.id === "string"
+            ? measurements.find((m) => m.id === props.id)
+            : undefined;
+        if (measurement) {
+          setPickedFeature(null);
+          setSelectedMeasurement(measurement);
+          setIsInspectingNew(false);
+          setRightPanel("inspect");
+          return;
+        }
+
+        if (props && Object.keys(props).length > 0) {
+          setSelectedMeasurement(null);
+          setIsInspectingNew(false);
+          setPickedFeature(
+            normalizeSelectedFeature(props, {
+              _source: "geojson",
+              _entityId: entity.id,
+              name: entity.name ?? "Region of interest",
+            })
+          );
+          setRightPanel("inspect");
         }
       }
     }, ScreenSpaceEventType.LEFT_CLICK);
 
     return () => handler.destroy();
-  }, [viewerReady, drawMode, measurements]);
+  }, [viewerReady, drawMode, probing, measurements, pickedFeature]);
 
   // ------------------------------------------------------------- drawing
 
@@ -745,32 +1026,97 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     }
     draftEntityRef.current = null;
     draftPositionsRef.current = [];
+    hoverPositionRef.current = null;
+    setDraftPoints([]);
+    setHoverPoint(null);
+  }, []);
+
+  const stopProbe = useCallback(() => {
+    setProbing(false);
+    setProbePoint(null);
+    const viewer = viewerRef.current;
+    if (viewer && !viewer.isDestroyed() && probeEntityRef.current) {
+      viewer.entities.remove(probeEntityRef.current);
+    }
+    probeEntityRef.current = null;
   }, []);
 
   const cancelDraw = useCallback(() => {
     cleanupDraw();
+    stopProbe();
     setDrawMode(null);
+    setActiveDrawOpts(null);
     pendingDrawRef.current = null;
     setRightPanel(null);
     setSelectedMeasurement(null);
+    setPickedFeature(null);
+  }, [cleanupDraw, stopProbe]);
+
+  // Probe tool: sample longitude/latitude/elevation at clicked surface points
+  // (the Point/Elevation/Probe tools). Readout lives in the Measure palette.
+  const startProbe = useCallback(() => {
+    cleanupDraw();
+    setDrawMode(null);
+    setActiveDrawOpts(null);
+    pendingDrawRef.current = null;
+    setSelectedMeasurement(null);
+    setIsInspectingNew(false);
+    setPickedFeature(null);
+    setProbing(true);
+    setRightPanel("measure");
   }, [cleanupDraw]);
 
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!probing || !viewerReady || !viewer || viewer.isDestroyed()) return;
+
+    const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
+    handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
+      const position = pickScenePosition(viewer, event.position);
+      if (!position) return;
+      setProbePoint(toLngLatHeight(position));
+      if (!probeEntityRef.current) {
+        probeEntityRef.current = viewer.entities.add({
+          position,
+          point: {
+            pixelSize: 9,
+            color: ACCENT,
+            outlineColor: Color.WHITE,
+            outlineWidth: 2,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        });
+      } else {
+        probeEntityRef.current.position = new ConstantPositionProperty(position);
+      }
+      viewer.scene.requestRender();
+    }, ScreenSpaceEventType.LEFT_CLICK);
+
+    return () => handler.destroy();
+  }, [probing, viewerReady]);
+
   const startDraw = useCallback(
-    (mode: DrawMode) => {
+    (mode: DrawMode, opts?: DrawOptions) => {
       const viewer = viewerRef.current;
       if (!viewer || viewer.isDestroyed()) return;
       cleanupDraw();
+      stopProbe();
       pendingDrawRef.current = null;
       setDrawMode(mode);
+      setActiveDrawOpts(opts ?? null);
+      setPickedFeature(null);
       draftPositionsRef.current = [];
 
-      // Draft entity rendered from the live vertex list.
+      // Draft entity rendered from the live vertex list plus the rubber-band
+      // vertex tracking the cursor.
       draftEntityRef.current = viewer.entities.add({
         polyline: {
           positions: new CallbackProperty(() => {
             const pts = draftPositionsRef.current;
-            if (pts.length < 2) return [];
-            return mode === "polygon" ? [...pts, pts[0]] : pts;
+            const hover = hoverPositionRef.current;
+            const all = hover ? [...pts, hover] : pts;
+            if (all.length < 2) return [];
+            return mode === "polygon" ? [...all, all[0]] : all;
           }, false),
           width: 3,
           material: ACCENT,
@@ -779,21 +1125,19 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         polygon:
           mode === "polygon"
             ? {
-                hierarchy: new CallbackProperty(
-                  () => new PolygonHierarchy(draftPositionsRef.current),
-                  false
-                ),
+                hierarchy: new CallbackProperty(() => {
+                  const pts = draftPositionsRef.current;
+                  const hover = hoverPositionRef.current;
+                  return new PolygonHierarchy(hover ? [...pts, hover] : pts);
+                }, false),
                 material: ACCENT.withAlpha(0.2),
                 classificationType: ClassificationType.BOTH,
               }
             : undefined,
       });
 
-      const pickPosition = (screen: Cartesian2): Cartesian3 | undefined => {
-        const ray = viewer.camera.getPickRay(screen);
-        const onGlobe = ray ? viewer.scene.globe.pick(ray, viewer.scene) : undefined;
-        return onGlobe || viewer.camera.pickEllipsoid(screen, viewer.scene.globe.ellipsoid) || undefined;
-      };
+      const kind: "volume" | "cross_section" =
+        opts?.kind ?? (mode === "polygon" ? "volume" : "cross_section");
 
       const finish = () => {
         const pts = draftPositionsRef.current;
@@ -821,19 +1165,40 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           drawHandlerRef.current.destroy();
           drawHandlerRef.current = null;
         }
+        hoverPositionRef.current = null;
+        setHoverPoint(null);
+
+        // Immediate plan stats from the drawn vertices (ported measurement
+        // math) — shown in the inspector while the shape is named; the
+        // backend compute replaces them with surface-true results.
+        const statPts = pts.slice(0, coords.length);
+        const localStats: Record<string, number> =
+          mode === "polygon"
+            ? {
+                area_m2: computeAreaSquareMeters(statPts),
+                perimeter_m: computePerimeterMeters(statPts),
+              }
+            : { length_m: computeDistanceMeters(statPts) };
+        if (mode === "polyline" && opts?.slope) {
+          const grade = computeGrade(statPts);
+          if (grade) localStats.grade_percent = Number(grade.percent.toFixed(2));
+        }
+
         const tempMeasurement: PanelMeasurement = {
           id: `new-${Date.now()}`,
           client_id: "",
           survey_id: surveyId,
           name: "",
-          kind: mode === "polygon" ? "volume" : "cross_section",
-          folder: "Stockpiles", // default
+          kind,
+          folder: opts?.folder,
           status: "draft",
           created_at: "",
           updated_at: "",
+          result: localStats,
         };
-        pendingDrawRef.current = { mode, coords };
+        pendingDrawRef.current = { mode, coords, kind, folder: opts?.folder, slope: opts?.slope };
         setDrawMode(null);
+        setActiveDrawOpts(null);
         setSelectedMeasurement(tempMeasurement);
         setIsInspectingNew(true);
         setRightPanel("inspect");
@@ -841,19 +1206,43 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
 
       const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
       handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
-        const pos = pickPosition(event.position);
+        const pos = pickScenePosition(viewer, event.position);
         if (pos) {
           draftPositionsRef.current = [...draftPositionsRef.current, pos];
+          setDraftPoints(draftPositionsRef.current);
           viewer.scene.requestRender();
         }
       }, ScreenSpaceEventType.LEFT_CLICK);
+      // Rubber-band + live readout tracking (state mirror is throttled; the
+      // draft entity reads the ref every frame).
+      handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
+        const pos = pickScenePosition(viewer, movement.endPosition);
+        hoverPositionRef.current = pos;
+        const now = performance.now();
+        if (now - hoverThrottleRef.current > 100) {
+          hoverThrottleRef.current = now;
+          setHoverPoint(pos);
+        }
+        viewer.scene.requestRender();
+      }, ScreenSpaceEventType.MOUSE_MOVE);
       handler.setInputAction(() => finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
       handler.setInputAction(() => finish(), ScreenSpaceEventType.RIGHT_CLICK);
       drawHandlerRef.current = handler;
       setRightPanel("measure");
     },
-    [cleanupDraw, surveyId]
+    [cleanupDraw, stopProbe, surveyId]
   );
+
+  // Undo the last placed vertex of the in-flight drawing.
+  const undoLastVertex = useCallback(() => {
+    if (!drawMode || draftPositionsRef.current.length === 0) {
+      toast.info("Nothing to undo — place a vertex first");
+      return;
+    }
+    draftPositionsRef.current = draftPositionsRef.current.slice(0, -1);
+    setDraftPoints(draftPositionsRef.current);
+    viewerRef.current?.scene.requestRender();
+  }, [drawMode]);
 
   // ESC cancels an in-flight drawing.
   useEffect(() => {
@@ -897,18 +1286,25 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     if (!pendingDrawRef.current || !name.trim()) return;
     setSaving(true);
     try {
-      const { mode, coords } = pendingDrawRef.current;
+      const { mode, coords, kind, folder, slope } = pendingDrawRef.current;
       const geometry =
         mode === "polygon"
           ? { type: "Polygon", coordinates: [[...coords, coords[0]]] }
           : { type: "LineString", coordinates: coords };
-      const kind = mode === "polygon" ? "volume" : "cross_section";
+
+      // params is stored verbatim by asset-svc; volume_method records the
+      // palette's base-surface choice (compute auto-resolves DSM−DTM today),
+      // slope marks a grade-focused polyline.
+      const params: Record<string, unknown> = {};
+      if (kind === "volume") params.volume_method = volumeMethod;
+      if (slope) params.slope = true;
 
       const created = await createMeasurement(surveyId, {
         kind,
         name: name.trim(),
+        folder,
         geometry,
-        params: {},
+        params,
       });
       toast.success(`Measurement "${created.name}" created`);
       cleanupDraw();
@@ -916,13 +1312,16 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       setRightPanel(null);
       setSelectedMeasurement(null);
       await refreshMeasurements();
-      await triggerCompute(created.id);
+      // Only volume/stockpile compute auto-resolves its inputs server-side;
+      // cross-section needs an explicit payload the backend doesn't build yet,
+      // so dispatching it would just 422.
+      if (kind === "volume") await triggerCompute(created.id);
     } catch (err) {
       if (err instanceof Error) toast.error(err.message);
     } finally {
       setSaving(false);
     }
-  }, [surveyId, cleanupDraw, refreshMeasurements, triggerCompute]);
+  }, [surveyId, volumeMethod, cleanupDraw, refreshMeasurements, triggerCompute]);
 
   const removeMeasurement = useCallback(
     async (id: string) => {
@@ -976,13 +1375,91 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     [measurements]
   );
 
+  // Live palette readout — the ported measurement math over the committed
+  // vertices plus the rubber-band vertex, so lengths/areas tick up while the
+  // cursor moves (draftPoints/hoverPoint mirror the refs at ~10Hz).
+  const readout = useMemo<LiveReadout>(() => {
+    if (probing) return { mode: "probe", vertexCount: 0, point: probePoint };
+    if (drawMode) {
+      const pts = hoverPoint ? [...draftPoints, hoverPoint] : draftPoints;
+      if (drawMode === "polygon") {
+        return {
+          mode: "polygon",
+          vertexCount: draftPoints.length,
+          areaSquareMeters: computeAreaSquareMeters(pts),
+          perimeterMeters: computePerimeterMeters(pts),
+        };
+      }
+      return {
+        mode: "polyline",
+        vertexCount: draftPoints.length,
+        lengthMeters: computeDistanceMeters(pts),
+        gradePercent: activeDrawOpts?.slope ? computeGrade(pts)?.percent : undefined,
+      };
+    }
+    return { mode: "idle", vertexCount: 0 };
+  }, [probing, probePoint, drawMode, draftPoints, hoverPoint, activeDrawOpts]);
+
+  // Panel row click: inspect the measurement and frame its geometry.
+  const selectMeasurement = useCallback(
+    (m: PanelMeasurement) => {
+      setPickedFeature(null);
+      setSelectedMeasurement(m);
+      setIsInspectingNew(false);
+      setRightPanel("inspect");
+      if (!m.demo && m.geometry) {
+        const rect = geometryToRectangle(m.geometry);
+        if (rect) flyToRectangle(rect);
+      }
+    },
+    [flyToRectangle]
+  );
+
+  // Export the survey's measurements as a GeoJSON FeatureCollection download.
+  const exportMeasurements = useCallback(() => {
+    const features = measurements
+      .filter((m) => m.geometry)
+      .map((m) => ({
+        type: "Feature" as const,
+        properties: {
+          id: m.id,
+          name: m.name,
+          kind: m.kind,
+          folder: m.folder ?? null,
+          status: m.status,
+          ...(m.result ?? {}),
+        },
+        geometry: m.geometry!,
+      }));
+    if (features.length === 0) {
+      toast.info("No measurements with geometry to export yet");
+      return;
+    }
+    const blob = new Blob(
+      [JSON.stringify({ type: "FeatureCollection", features }, null, 2)],
+      { type: "application/geo+json" }
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `survey-${surveyId}-measurements.geojson`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success(`Exported ${features.length} measurement${features.length === 1 ? "" : "s"}`);
+  }, [measurements, surveyId]);
+
   // ------------------------------------------------------------------ UI
 
   return (
     <div className="w-full h-full relative bg-[#0A0D14] overflow-hidden">
       <div className="w-full h-full flex">
         {/* Map-tools rail (48px) */}
-        <ViewerToolRail drawMode={drawMode} onStartDraw={startDraw} onCancelDraw={cancelDraw} />
+        <ViewerToolRail
+          drawMode={drawMode}
+          onStartDraw={startDraw}
+          onCancelDraw={cancelDraw}
+          onExport={exportMeasurements}
+        />
 
         {/* Left Side panel */}
         <div className="w-[240px] bg-[#111114]/95 backdrop-blur-xl border-r border-white/[0.08] z-10 flex flex-col shrink-0">
@@ -1033,9 +1510,11 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
                     designs={designControls}
                     processing={layersEmpty}
                     surveyStatus={manifest.survey.status}
+                    terrainExaggeration={terrainExaggeration}
                     onToggle={handleToggle}
                     onOpacity={handleOpacity}
                     onToggleDesign={handleToggleDesign}
+                    onTerrainExaggeration={setTerrainExaggeration}
                   />
                   <MeasurementPanel
                     measurements={panelMeasurements}
@@ -1045,6 +1524,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
                     onCancelDraw={cancelDraw}
                     onCompute={triggerCompute}
                     onDelete={removeMeasurement}
+                    onSelect={selectMeasurement}
                   />
                 </TabsContent>
                 <TabsContent value="surveys" className="mt-0">
@@ -1078,6 +1558,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
             timeline={false}
             animation={false}
             geocoder={false}
+            // Without an ion token the default Ion imagery just errors — mount
+            // with an empty imagery slot and let the scene-setup effect add
+            // the token-free Carto basemap instead.
+            baseLayer={USE_WORLD_TERRAIN ? undefined : false}
             baseLayerPicker={false}
             navigationHelpButton={false}
             homeButton={false}
@@ -1090,19 +1574,48 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           {manifest && (
             <ViewerDrawToolbar
               drawMode={drawMode}
+              probing={probing}
               onStartDraw={startDraw}
+              onStartProbe={startProbe}
               onCancelDraw={cancelDraw}
+              onUndo={undoLastVertex}
             />
           )}
           <CameraJoystick viewerRef={viewerRef} ready={viewerReady} />
+          <ViewerStatusBar
+            viewerRef={viewerRef}
+            ready={viewerReady}
+            surveyDate={manifest?.survey.survey_date}
+          />
         </div>
 
         {/* Right contextual panel */}
         {rightPanel && (
           <div className="w-[280px] bg-[#111114]/95 backdrop-blur-xl border-l border-white/[0.08] z-10 flex flex-col shrink-0">
-            {rightPanel === "measure" && <MeasurePalette onClose={cancelDraw} />}
+            {rightPanel === "measure" && (
+              <MeasurePalette
+                drawMode={drawMode}
+                probing={probing}
+                readout={readout}
+                volumeMethod={volumeMethod}
+                onVolumeMethod={setVolumeMethod}
+                onStartDraw={startDraw}
+                onStartProbe={startProbe}
+                onClose={cancelDraw}
+              />
+            )}
             {rightPanel === "inspect" && (
-              <FeatureInspector measurement={selectedMeasurement} onClose={cancelDraw} onSave={saveMeasurement} isNew={isInspectingNew} saving={saving} />
+              <FeatureInspector
+                measurement={selectedMeasurement}
+                feature={pickedFeature}
+                onClose={cancelDraw}
+                onSave={saveMeasurement}
+                onDelete={removeMeasurement}
+                onCompute={triggerCompute}
+                isNew={isInspectingNew}
+                saving={saving}
+                busy={selectedMeasurement ? busyIds.has(selectedMeasurement.id) : false}
+              />
             )}
           </div>
         )}

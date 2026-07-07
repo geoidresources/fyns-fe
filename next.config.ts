@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Dev-only: let other devices on the network (phone/laptop hitting the dev
+  // server by LAN IP) load dev assets + HMR. Next rejects a bare "*", so
+  // "*.*.*.*" — any IPv4-shaped host — is the broadest pattern it accepts;
+  // add mDNS/hostnames here explicitly if you use them.
+  allowedDevOrigins: ["*.*.*.*"],
   // Same-origin proxy for GCS-hosted tiles/tilesets/geojson. The bucket has
   // no CORS policy (and the worker service account lacks bucket-level perms
   // to add one); Cesium's WebGL loads hard-require CORS, so proxying makes

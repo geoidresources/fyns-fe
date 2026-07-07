@@ -78,6 +78,10 @@ export interface VectorLayer {
 export interface SiteModelLayer {
   asset_id: string;
   tileset_url?: string;
+  /** Source mesh format: photogrammetry (3mx/osgb/obj/3tz — renders crisp on
+   * terrain) vs `dxf` (a thin CAD surface that floats/cliffs). Drives the
+   * viewer's hero default. */
+  source_format?: string;
   anchor_lon: number;
   anchor_lat: number;
   anchor_height: number;

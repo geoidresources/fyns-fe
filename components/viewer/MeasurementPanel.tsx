@@ -30,29 +30,42 @@ import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 
 export type DrawMode = "polygon" | "polyline";
 
+/** Preset carried by a draw tool: backend kind, target folder, palette label,
+ * and whether the polyline readout should report a grade (slope tool). */
+export interface DrawOptions {
+  kind?: "volume" | "cross_section";
+  folder?: string;
+  label?: string;
+  slope?: boolean;
+}
+
 const UNGROUPED = "Ungrouped";
 
 interface MeasurementPanelProps {
   measurements: PanelMeasurement[];
   drawMode: DrawMode | null;
   busyIds: Set<string>;
-  onStartDraw: (mode: DrawMode) => void;
+  onStartDraw: (mode: DrawMode, opts?: DrawOptions) => void;
   onCancelDraw: () => void;
   onCompute: (id: string) => void;
   onDelete: (id: string) => void;
+  onSelect: (m: PanelMeasurement) => void;
 }
 
 /** Single-line row label, e.g. "SP-01 · limestone · 14,820 m³" (demo content
- * is pre-formatted into the name) or "<name> · 14,820 m³" for real results. */
+ * is pre-formatted into the name) or "<name> · 14,820 m³" for real results.
+ * total_* keys are what the stockpile compute actually emits; the bare keys
+ * cover client-side plan stats and future per-pile results. */
 function measurementLabel(m: PanelMeasurement): string {
   if (m.demo) return m.name;
   const r = m.result;
   const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 });
   if (r) {
-    if (typeof r.volume_m3 === "number") return `${m.name} · ${fmt(r.volume_m3)} m³`;
-    if (typeof r.adjusted_volume_m3 === "number") return `${m.name} · ${fmt(r.adjusted_volume_m3)} m³`;
+    const volume = r.total_volume_m3 ?? r.total_adjusted_volume_m3 ?? r.volume_m3 ?? r.adjusted_volume_m3;
+    if (typeof volume === "number") return `${m.name} · ${fmt(volume)} m³`;
     if (typeof r.area_m2 === "number") return `${m.name} · ${fmt(r.area_m2)} m²`;
-    if (typeof r.length_m === "number") return `${m.name} · ${fmt(r.length_m)} m`;
+    const length = r.profile_length_m ?? r.length_m;
+    if (typeof length === "number") return `${m.name} · ${fmt(length)} m`;
   }
   return m.name;
 }
@@ -117,6 +130,7 @@ export function MeasurementPanel({
   onCancelDraw,
   onCompute,
   onDelete,
+  onSelect,
 }: MeasurementPanelProps) {
   const [query, setQuery] = useState("");
   const [sortRecent, setSortRecent] = useState(false);
@@ -263,9 +277,14 @@ export function MeasurementPanel({
                         className="group flex h-7 items-center gap-2 rounded-[4px] px-2 hover:bg-white/[0.03]"
                       >
                         {showDot && <StatusDot status={m.status} />}
-                        <span className="min-w-0 flex-1 truncate text-[11px] text-[#a1a1aa]">
+                        <button
+                          type="button"
+                          onClick={() => onSelect(m)}
+                          title="Inspect measurement"
+                          className="min-w-0 flex-1 truncate text-left text-[11px] text-[#a1a1aa] transition-colors hover:text-[#F3F4F6]"
+                        >
                           {measurementLabel(m)}
-                        </span>
+                        </button>
                         {!m.demo && (
                           <div className="hidden shrink-0 items-center gap-1 group-hover:flex">
                             {canCompute && (

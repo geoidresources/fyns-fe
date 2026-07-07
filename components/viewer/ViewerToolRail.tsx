@@ -23,12 +23,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { DrawMode } from "@/components/viewer/MeasurementPanel";
+import type { DrawMode, DrawOptions } from "@/components/viewer/MeasurementPanel";
 
 // The 48px map-tools rail from the design — select + measurement/annotation
-// tools, then export/import. Tools that map to the live draw flow (select,
-// distance, cross-section) are wired; the domain tools are scaffolded with
-// tooltips + a "coming soon" toast, consistent with the +Add layer placeholder.
+// tools, then export/import. Draw-shaped tools carry a preset (backend kind +
+// target folder) into the live draw flow; Export downloads the survey's
+// measurements as GeoJSON; the rest stay scaffolded with a "coming soon"
+// toast, consistent with the +Add layer placeholder.
 
 type ToolId =
   | "select"
@@ -49,6 +50,7 @@ interface ToolDef {
   label: string;
   icon: React.ReactNode;
   draw?: DrawMode; // maps to a live draw mode
+  opts?: DrawOptions; // preset carried into the draw (kind/folder/label)
   divider?: boolean; // render a divider above this tool
 }
 
@@ -56,12 +58,12 @@ const SIZE = 18;
 
 const TOOLS: ToolDef[] = [
   { id: "select", label: "Select", icon: <MousePointer2 size={SIZE} /> },
-  { id: "distance", label: "Distance", icon: <Ruler size={SIZE} />, draw: "polyline" },
-  { id: "section", label: "Cross-section", icon: <Spline size={SIZE} />, draw: "polyline" },
-  { id: "route", label: "Route", icon: <Waypoints size={SIZE} />, draw: "polyline" },
-  { id: "hydro", label: "Hydrology", icon: <Droplet size={SIZE} /> },
-  { id: "alert", label: "Exclusion zone", icon: <ShieldAlert size={SIZE} /> },
-  { id: "blast", label: "Blast area", icon: <Bomb size={SIZE} /> },
+  { id: "distance", label: "Distance", icon: <Ruler size={SIZE} />, draw: "polyline", opts: { label: "Distance" } },
+  { id: "section", label: "Cross-section", icon: <Spline size={SIZE} />, draw: "polyline", opts: { label: "Cross-section" } },
+  { id: "route", label: "Route", icon: <Waypoints size={SIZE} />, draw: "polyline", opts: { label: "Route", folder: "Haul road analysis" } },
+  { id: "hydro", label: "Hydrology", icon: <Droplet size={SIZE} />, draw: "polygon", opts: { label: "Hydrology", folder: "Hydro" } },
+  { id: "alert", label: "Exclusion zone", icon: <ShieldAlert size={SIZE} />, draw: "polygon", opts: { label: "Exclusion zone", folder: "Blasting" } },
+  { id: "blast", label: "Blast area", icon: <Bomb size={SIZE} />, draw: "polygon", opts: { label: "Blast area", folder: "Blasting" } },
   { id: "detect", label: "Auto-detect", icon: <Sparkles size={SIZE} /> },
   { id: "annotate", label: "Annotate", icon: <Tag size={SIZE} /> },
   { id: "report", label: "Report", icon: <FileBarChart size={SIZE} /> },
@@ -71,11 +73,12 @@ const TOOLS: ToolDef[] = [
 
 interface ViewerToolRailProps {
   drawMode: DrawMode | null;
-  onStartDraw: (mode: DrawMode) => void;
+  onStartDraw: (mode: DrawMode, opts?: DrawOptions) => void;
   onCancelDraw: () => void;
+  onExport: () => void;
 }
 
-export function ViewerToolRail({ drawMode, onStartDraw, onCancelDraw }: ViewerToolRailProps) {
+export function ViewerToolRail({ drawMode, onStartDraw, onCancelDraw, onExport }: ViewerToolRailProps) {
   const [tool, setTool] = useState<ToolId>("select");
 
   // Highlight reflects the live draw state: while a draw is active, the chosen
@@ -90,8 +93,18 @@ export function ViewerToolRail({ drawMode, onStartDraw, onCancelDraw }: ViewerTo
       return;
     }
     if (t.draw) {
+      // Re-clicking the active draw tool cancels it.
+      if (drawMode && activeTool === t.id) {
+        setTool("select");
+        onCancelDraw();
+        return;
+      }
       setTool(t.id);
-      onStartDraw(t.draw);
+      onStartDraw(t.draw, t.opts);
+      return;
+    }
+    if (t.id === "export") {
+      onExport();
       return;
     }
     toast.info(`${t.label} — coming soon`);
