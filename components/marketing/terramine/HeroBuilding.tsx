@@ -1,4 +1,5 @@
 import React from "react";
+import { Building } from "lucide-react";
 
 /**
  * Isometric "Digital Twyn" building, ported faithfully from the TerraMine design
@@ -166,12 +167,7 @@ export function HeroBuilding() {
 
       {/* Structure icon: top left */}
       <div className="absolute left-0 top-[38px] flex items-center gap-2">
-        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="#C2703E" strokeWidth={1} opacity={0.6}>
-          <rect x="3" y="2" width="14" height="16" rx="1" />
-          <line x1="3" y1="6" x2="17" y2="6" />
-          <line x1="3" y1="10" x2="17" y2="10" />
-          <line x1="3" y1="14" x2="17" y2="14" />
-        </svg>
+        <Building size={20} strokeWidth={1} color="#C2703E" className="opacity-60" />
         <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-[#71717A]">
           Structure
         </span>

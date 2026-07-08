@@ -2,6 +2,28 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import {
+  ArrowDown,
+  ArrowRight,
+  ChevronDown,
+  Download,
+  History,
+  Info,
+  Layers,
+  Ruler,
+  ShieldCheck,
+} from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  Building04Icon,
+  City01Icon,
+  RoadIcon,
+  CheckmarkCircle01Icon,
+  DroneIcon,
+  CloudUploadIcon,
+  CpuIcon,
+  CompassIcon,
+} from "@hugeicons/core-free-icons";
 import { RevealOnScroll } from "@/components/marketing/terramine/RevealOnScroll";
 import { IsometricCity } from "@/components/marketing/terramine/IsometricCity";
 import { HeroBuilding } from "@/components/marketing/terramine/HeroBuilding";
@@ -26,128 +48,59 @@ const applications = [
   {
     title: "Buildings",
     desc: "Individual structures — commercial, residential, industrial. Navigate floor-by-floor, measure any surface, track construction progress.",
-    art: (
-      <svg width="120" height="160" viewBox="0 0 120 160" fill="none" style={{ animation: "cardRotate 20s infinite ease-in-out alternate" }}>
-        <rect x="25" y="10" width="70" height="140" stroke="rgba(194,112,62,0.25)" strokeWidth="1" />
-        {[28, 46, 64, 82, 100, 118, 136].map((y) => (
-          <line key={y} x1="25" y1={y} x2="95" y2={y} stroke="rgba(194,112,62,0.12)" />
-        ))}
-        <line x1="10" y1="150" x2="110" y2="150" stroke="rgba(194,112,62,0.06)" />
-      </svg>
-    ),
+    art: <HugeiconsIcon icon={Building04Icon} size={72} color="rgba(194,112,62,0.55)" strokeWidth={1} />,
   },
   {
     title: "City districts",
     desc: "Neighborhoods and zones — urban planning, smart city infrastructure, zoning compliance. See every block in context.",
-    art: (
-      <svg width="180" height="140" viewBox="0 0 180 140" fill="none" style={{ animation: "cardRotate 20s infinite ease-in-out alternate" }}>
-        <rect x="10" y="70" width="25" height="60" stroke="rgba(194,112,62,0.2)" strokeWidth="0.8" />
-        <rect x="40" y="40" width="30" height="90" stroke="rgba(194,112,62,0.25)" strokeWidth="0.8" />
-        <rect x="75" y="20" width="35" height="110" stroke="rgba(194,112,62,0.4)" strokeWidth="1" />
-        <rect x="115" y="50" width="28" height="80" stroke="rgba(194,112,62,0.22)" strokeWidth="0.8" />
-        <rect x="148" y="65" width="22" height="65" stroke="rgba(194,112,62,0.18)" strokeWidth="0.8" />
-        <rect x="28" y="80" width="18" height="50" stroke="rgba(194,112,62,0.15)" strokeWidth="0.8" />
-        <rect x="95" y="55" width="15" height="75" stroke="rgba(194,112,62,0.15)" strokeWidth="0.8" />
-        <line x1="0" y1="130" x2="180" y2="130" stroke="rgba(194,112,62,0.06)" />
-        <line x1="37" y1="0" x2="37" y2="130" stroke="rgba(194,112,62,0.04)" />
-        <line x1="112" y1="0" x2="112" y2="130" stroke="rgba(194,112,62,0.04)" />
-      </svg>
-    ),
+    art: <HugeiconsIcon icon={City01Icon} size={72} color="rgba(194,112,62,0.55)" strokeWidth={1} />,
   },
   {
     title: "Infrastructure",
     desc: "Roads, bridges, pipelines, power grids, mine sites. Monitor structural integrity and plan maintenance from your browser.",
-    art: (
-      <svg width="200" height="120" viewBox="0 0 200 120" fill="none" style={{ animation: "cardRotate 20s infinite ease-in-out alternate" }}>
-        <line x1="10" y1="50" x2="190" y2="50" stroke="rgba(194,112,62,0.3)" strokeWidth="1.5" />
-        <line x1="10" y1="54" x2="190" y2="54" stroke="rgba(194,112,62,0.15)" strokeWidth="0.5" />
-        <line x1="40" y1="50" x2="40" y2="110" stroke="rgba(194,112,62,0.25)" strokeWidth="1" />
-        <line x1="100" y1="50" x2="100" y2="110" stroke="rgba(194,112,62,0.25)" strokeWidth="1" />
-        <line x1="160" y1="50" x2="160" y2="110" stroke="rgba(194,112,62,0.25)" strokeWidth="1" />
-        <path d="M10 50 Q55 15 100 50" stroke="rgba(194,112,62,0.18)" strokeWidth="0.8" fill="none" />
-        <path d="M100 50 Q145 15 190 50" stroke="rgba(194,112,62,0.18)" strokeWidth="0.8" fill="none" />
-        <line x1="55" y1="32" x2="55" y2="50" stroke="rgba(194,112,62,0.1)" strokeWidth="0.5" />
-        <line x1="75" y1="25" x2="75" y2="50" stroke="rgba(194,112,62,0.1)" strokeWidth="0.5" />
-        <line x1="125" y1="25" x2="125" y2="50" stroke="rgba(194,112,62,0.1)" strokeWidth="0.5" />
-        <line x1="145" y1="32" x2="145" y2="50" stroke="rgba(194,112,62,0.1)" strokeWidth="0.5" />
-        <line x1="0" y1="110" x2="200" y2="110" stroke="rgba(194,112,62,0.06)" />
-      </svg>
-    ),
+    art: <HugeiconsIcon icon={RoadIcon} size={72} color="rgba(194,112,62,0.55)" strokeWidth={1} />,
   },
 ];
 
 const workflow = [
-  { title: "Capture", desc: "Fly your drone around the structure. Standard overlap, any DJI or LiDAR rig." },
-  { title: "Upload", desc: "Drag images into TerraMine. Select Digital Twyn as destination. We handle processing." },
-  { title: "Process", desc: "Cloud GPUs build your point cloud, mesh, and floor-segmented 3D model automatically." },
-  { title: "Explore", desc: "Navigate, measure, annotate, and share your Twyn from any browser." },
+  { title: "Capture", desc: "Fly your drone around the structure. Standard overlap, any DJI or LiDAR rig.", icon: DroneIcon },
+  { title: "Upload", desc: "Drag images into TerraMine. Select Digital Twyn as destination. We handle processing.", icon: CloudUploadIcon },
+  { title: "Process", desc: "Cloud GPUs build your point cloud, mesh, and floor-segmented 3D model automatically.", icon: CpuIcon },
+  { title: "Explore", desc: "Navigate, measure, annotate, and share your Twyn from any browser.", icon: CompassIcon },
 ];
+
+const CAP_ICON = { size: 24, strokeWidth: 1.5, color: "#C2703E" } as const;
 
 const capabilities = [
   {
     title: "Floor isolation",
     desc: "Toggle individual floors on/off. Inspect structural elements level by level.",
-    icon: (
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#C2703E" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 2L2 7l10 5 10-5-10-5z" />
-        <path d="M2 17l10 5 10-5" />
-        <path d="M2 12l10 5 10-5" />
-      </svg>
-    ),
+    icon: <Layers {...CAP_ICON} />,
   },
   {
     title: "3D measurement",
     desc: "Point-to-point distance, surface area, room volume — all in the browser.",
-    icon: (
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#C2703E" strokeWidth="1.5" strokeLinecap="round">
-        <path d="M2 12h20M12 2v20" />
-        <circle cx="12" cy="12" r="2" />
-      </svg>
-    ),
+    icon: <Ruler {...CAP_ICON} />,
   },
   {
     title: "Temporal comparison",
     desc: "Overlay Twyns from different dates. Detect settlement, deformation, or construction progress.",
-    icon: (
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#C2703E" strokeWidth="1.5" strokeLinecap="round">
-        <path d="M16 3h5v5" />
-        <path d="M4 20L21 3" />
-        <path d="M21 16v5h-5" />
-        <path d="M14 14l7 7" />
-      </svg>
-    ),
+    icon: <History {...CAP_ICON} />,
   },
   {
     title: "Attribute query",
     desc: "Click any element to see height, area, material, classification, and metadata.",
-    icon: (
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#C2703E" strokeWidth="1.5" strokeLinecap="round">
-        <circle cx="12" cy="12" r="10" />
-        <line x1="12" y1="8" x2="12" y2="12" />
-        <line x1="12" y1="16" x2="12.01" y2="16" />
-        <path d="M22 12h-4M6 12H2M12 6V2M12 22v-4" />
-      </svg>
-    ),
+    icon: <Info {...CAP_ICON} />,
   },
   {
     title: "Export",
     desc: "Download and share via link with view-state preserved.",
-    icon: (
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#C2703E" strokeWidth="1.5" strokeLinecap="round">
-        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-        <polyline points="7 10 12 15 17 10" />
-        <line x1="12" y1="15" x2="12" y2="3" />
-      </svg>
-    ),
+    icon: <Download {...CAP_ICON} />,
   },
   {
     title: "Compliance",
     desc: "Check building heights against zoning limits. Flag violations automatically.",
-    icon: (
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#C2703E" strokeWidth="1.5" strokeLinecap="round">
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      </svg>
-    ),
+    icon: <ShieldCheck {...CAP_ICON} />,
   },
 ];
 
@@ -254,13 +207,16 @@ export default function LandingPage() {
           </p>
           <Link
             href="/sign-up"
-            className="mt-8 inline-flex items-center rounded-full px-8 py-3.5 text-[14px] font-medium no-underline transition-[transform,box-shadow] hover:-translate-y-0.5"
+            className="mt-8 inline-flex items-center gap-2 rounded-full px-8 py-3.5 text-[14px] font-medium no-underline transition-[transform,box-shadow] hover:-translate-y-0.5"
             style={ctaButtonStyle}
           >
-            Get started →
+            Get started <ArrowRight size={16} strokeWidth={2} />
           </Link>
-          <a href="#concept" className="mt-4 text-[13px] text-[#71717A] no-underline">
-            See it in action ↓
+          <a
+            href="#concept"
+            className="mt-4 inline-flex items-center gap-1 text-[13px] text-[#71717A] no-underline"
+          >
+            See it in action <ArrowDown size={14} strokeWidth={1.5} />
           </a>
         </div>
 
@@ -268,9 +224,7 @@ export default function LandingPage() {
           className="absolute bottom-8 left-1/2 -translate-x-1/2"
           style={{ animation: "chevBounce 2s infinite ease-in-out" }}
         >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="#71717A" strokeWidth="1.5">
-            <path d="M5 8l5 5 5-5" />
-          </svg>
+          <ChevronDown size={20} strokeWidth={1.5} color="#71717A" />
         </div>
       </section>
 
@@ -295,7 +249,7 @@ export default function LandingPage() {
                   delay={0.3 + i * 0.1}
                   className="flex items-start gap-3.5"
                 >
-                  <div className="mt-[5px] h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ background: "#C2703E" }} />
+                  <HugeiconsIcon icon={CheckmarkCircle01Icon} size={18} color="#C2703E" strokeWidth={1.5} className="mt-[2px] flex-shrink-0" />
                   <div>
                     <div className="text-[16px] font-medium text-[#F4F4F5]">{point.title}</div>
                     <div className="mt-1 text-[14px] text-[#A1A1AA]">{point.desc}</div>
@@ -364,10 +318,10 @@ export default function LandingPage() {
               className="relative flex flex-1 flex-col items-center px-3 text-center"
             >
               <div
-                className="relative z-[1] flex h-8 w-8 items-center justify-center rounded-full font-mono text-[14px] font-medium text-[#C2703E]"
+                className="relative z-[1] flex h-10 w-10 items-center justify-center rounded-full"
                 style={{ border: "1.5px solid rgba(194,112,62,0.3)", background: "#111318" }}
               >
-                {i + 1}
+                <HugeiconsIcon icon={step.icon} size={20} color="#C2703E" strokeWidth={1.5} />
               </div>
               <div className="mt-5 text-[18px] font-medium text-[#F4F4F5]">{step.title}</div>
               <div className="mt-2 max-w-[200px] text-[13px] leading-[1.5] text-[#A1A1AA]">
@@ -431,10 +385,10 @@ export default function LandingPage() {
           <RevealOnScroll delay={0.2}>
             <Link
               href="/sign-up"
-              className="mt-8 inline-flex items-center rounded-full px-8 py-3.5 text-[14px] font-medium no-underline transition-[transform,box-shadow] hover:-translate-y-0.5"
+              className="mt-8 inline-flex items-center gap-2 rounded-full px-8 py-3.5 text-[14px] font-medium no-underline transition-[transform,box-shadow] hover:-translate-y-0.5"
               style={ctaButtonStyle}
             >
-              Get started →
+              Get started <ArrowRight size={16} strokeWidth={2} />
             </Link>
           </RevealOnScroll>
           <RevealOnScroll delay={0.3} className="mt-4 text-[13px] text-[#71717A]">

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   Box,
   Circle,
@@ -16,18 +16,13 @@ import {
   Undo2,
 } from "lucide-react";
 import { toast } from "sonner";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import type { DrawMode, DrawOptions } from "@/components/viewer/MeasurementPanel";
 
 // The floating in-canvas draw toolbar from the design — a top-center pill of
 // drawing tools. Point/Elevation sample the surface (probe), the drawing
 // primitives carry presets into the live draw flow, Undo removes the last
 // placed vertex; the remaining actions stay scaffolded with a toast.
+// Every tool collapses to its icon at rest and pops out its label on hover.
 
 type ToolId =
   | "point"
@@ -77,6 +72,67 @@ interface ViewerDrawToolbarProps {
   onUndo: () => void;
 }
 
+/** Icon-only pill that pops its label out on hover and collapses back on leave. */
+function ToolPill({
+  tool,
+  active,
+  onClick,
+}: {
+  tool: ToolDef;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <motion.button
+      type="button"
+      aria-label={tool.label}
+      aria-pressed={active}
+      onClick={onClick}
+      onHoverStart={() => setHovered(true)}
+      onHoverEnd={() => setHovered(false)}
+      whileTap={{ scale: 0.94 }}
+      layout
+      transition={{ type: "spring", stiffness: 400, damping: 26 }}
+      className={`flex h-8 items-center overflow-hidden rounded-2xl transition-colors ${
+        active ? "" : hovered ? "bg-white/5" : ""
+      }`}
+    >
+      <motion.span
+        layout
+        animate={{ scale: hovered ? 1.12 : 1 }}
+        transition={{ type: "spring", stiffness: 400, damping: 17 }}
+        className={`flex size-8 shrink-0 items-center justify-center rounded-2xl ${
+          active
+            ? "bg-[#C97A4E]/[0.15] text-[#C97A4E] shadow-[0_0_8px_0_rgba(194,112,62,0.2)]"
+            : hovered
+            ? "text-white"
+            : "text-gray-300"
+        }`}
+      >
+        {tool.icon}
+      </motion.span>
+      <AnimatePresence initial={false}>
+        {hovered && (
+          <motion.span
+            key="label"
+            initial={{ width: 0, opacity: 0, scale: 0.8 }}
+            animate={{ width: "auto", opacity: 1, scale: 1 }}
+            exit={{ width: 0, opacity: 0, scale: 0.8 }}
+            transition={{ type: "spring", stiffness: 400, damping: 30 }}
+            className={`whitespace-nowrap text-[11px] font-medium ${
+              active ? "text-[#C97A4E]" : "text-[#f4f4f5]"
+            }`}
+          >
+            <span className="pl-1 pr-2">{tool.label}</span>
+          </motion.span>
+        )}
+      </AnimatePresence>
+    </motion.button>
+  );
+}
+
 export function ViewerDrawToolbar({
   drawMode,
   probing,
@@ -121,51 +177,13 @@ export function ViewerDrawToolbar({
   };
 
   return (
-    <TooltipProvider delayDuration={300}>
-      <div className="pointer-events-auto absolute left-1/2 top-4 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full border border-white/[0.06] bg-[#111114]/85 p-[7px] shadow-[0_4px_24px_0_rgba(0,0,0,0.5)] backdrop-blur-md">
-        {TOOLS.map((t) => {
-          const active = activeTool === t.id;
-          return (
-            <React.Fragment key={t.id}>
-              {t.divider && <div className="mx-1 h-5 w-px bg-white/[0.08]" />}
-              {active ? (
-                <motion.button
-                  type="button"
-                  aria-label={t.label}
-                  aria-pressed
-                  onClick={() => handle(t)}
-                  whileHover={{ scale: 1.06 }}
-                  whileTap={{ scale: 0.97 }}
-                  transition={{ type: "spring", stiffness: 400, damping: 17 }}
-                  className="flex items-center gap-1 rounded-2xl pr-2"
-                >
-                  <span className="flex size-8 items-center justify-center rounded-2xl bg-[#C97A4E]/[0.15] text-[#C97A4E] shadow-[0_0_8px_0_rgba(194,112,62,0.2)]">
-                    {t.icon}
-                  </span>
-                  <span className="text-[11px] font-medium text-[#f4f4f5]">{t.label}</span>
-                </motion.button>
-              ) : (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <motion.button
-                      type="button"
-                      aria-label={t.label}
-                      onClick={() => handle(t)}
-                      whileHover={{ scale: 1.15 }}
-                      whileTap={{ scale: 0.9 }}
-                      transition={{ type: "spring", stiffness: 400, damping: 17 }}
-                      className="flex size-8 items-center justify-center rounded-2xl text-gray-300 transition-colors hover:bg-white/5 hover:text-white"
-                    >
-                      {t.icon}
-                    </motion.button>
-                  </TooltipTrigger>
-                  <TooltipContent>{t.label}</TooltipContent>
-                </Tooltip>
-              )}
-            </React.Fragment>
-          );
-        })}
-      </div>
-    </TooltipProvider>
+    <div className="pointer-events-auto absolute left-1/2 top-4 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full border border-white/[0.06] bg-[#111114]/85 p-[7px] shadow-[0_4px_24px_0_rgba(0,0,0,0.5)] backdrop-blur-md">
+      {TOOLS.map((t) => (
+        <React.Fragment key={t.id}>
+          {t.divider && <div className="mx-1 h-5 w-px bg-white/[0.08]" />}
+          <ToolPill tool={t} active={activeTool === t.id} onClick={() => handle(t)} />
+        </React.Fragment>
+      ))}
+    </div>
   );
 }

@@ -2,12 +2,14 @@
 
 import React from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Eye } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { EyeIcon, EyeOffIcon } from "@hugeicons/core-free-icons";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { login } from "@/lib/api/userSvc";
@@ -81,7 +83,7 @@ export default function SignInPage() {
             onClick={() => setShowPassword(!showPassword)}
             className="absolute right-4 top-1/2 -translate-y-1/2 text-[#6B7280] hover:text-[#9CA3AF]"
           >
-            <Eye className="w-5 h-5" />
+            <HugeiconsIcon icon={EyeIcon} altIcon={EyeOffIcon} showAlt={showPassword} size={20} color="#6B7280" />
           </button>
           {errors.password && <p className="text-red-400 text-sm mt-1">{errors.password.message}</p>}
         </div>
@@ -107,10 +109,12 @@ export default function SignInPage() {
 
       <div className="flex gap-4">
         <Button variant="secondary" className="flex-1 h-12 gap-2 bg-[#16181D]">
-          <div className="w-4 h-4 bg-[#4285F4] rounded-sm" /> Google
+          <Image src="/icons/google.svg" width={16} height={16} alt="Google" />
+          Google
         </Button>
         <Button variant="secondary" className="flex-1 h-12 gap-2 bg-[#16181D]">
-          <div className="w-4 h-4 bg-[#00A4EF] rounded-sm" /> Microsoft
+          <Image src="/icons/microsoft.svg" width={16} height={16} alt="Microsoft" />
+          Microsoft
         </Button>
       </div>
 

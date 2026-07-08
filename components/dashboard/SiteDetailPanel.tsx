@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from "react";
-import { X, ChevronRight, Plus } from "lucide-react";
+import { X, ChevronRight } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Upload01Icon, SatelliteIcon } from "@hugeicons/core-free-icons";
 import { useRouter } from "next/navigation";
 import { getProject, type Project } from "@/lib/api/userSvc";
 import { listSurveys, type Survey } from "@/lib/api/assetSvc";
@@ -68,7 +70,7 @@ export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onC
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-sm font-semibold text-gray-300">Surveys</h3>
           <button className="flex items-center gap-1 bg-[#C97A4E] hover:bg-[#b06941] text-[#0A0D14] font-medium text-xs px-3 py-1.5 rounded-full transition-colors">
-            <Plus size={14} />
+            <HugeiconsIcon icon={Upload01Icon} size={14} color="#0A0D14" strokeWidth={2} />
             Upload
           </button>
         </div>
@@ -83,7 +85,9 @@ export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onC
               onClick={() => openViewer(survey.id)}
               className="flex items-center p-3 rounded-xl bg-[#1E2028]/50 border border-[#2A2D35] hover:border-[#3A3D45] transition-colors cursor-pointer group"
             >
-              <div className="w-10 h-10 rounded-lg bg-[#2A2D35] shrink-0 mr-4" />
+              <div className="w-10 h-10 rounded-lg bg-[#2A2D35] shrink-0 mr-4 flex items-center justify-center">
+                <HugeiconsIcon icon={SatelliteIcon} size={20} color="#6B7280" strokeWidth={1.5} />
+              </div>
               <div className="flex-1 min-w-0">
                 <h4 className="text-sm font-medium text-gray-200 mb-1 group-hover:text-white transition-colors">
                   {formatSurveyDate(survey.survey_date)} - {survey.survey_type}

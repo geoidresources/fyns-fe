@@ -5,6 +5,8 @@ import { Search, Bell, LogOut } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { clearSession } from "@/lib/auth";
 import { useRouter } from "next/navigation";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { UserCircleIcon } from "@hugeicons/core-free-icons";
 
 export function Topbar() {
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -58,9 +60,9 @@ export function Topbar() {
         <div className="relative" ref={dropdownRef}>
           <button 
             onClick={() => setIsDropdownOpen(!isDropdownOpen)}
-            className="w-8 h-8 rounded-full bg-[#2A2D35] flex items-center justify-center text-sm font-medium text-gray-200 hover:bg-[#343741] transition-colors focus:outline-none focus:ring-2 focus:ring-[#C97A4E]"
+            className="w-8 h-8 rounded-full bg-[#2A2D35] flex items-center justify-center hover:bg-[#343741] transition-colors focus:outline-none focus:ring-2 focus:ring-[#C97A4E]"
           >
-            PD
+            <HugeiconsIcon icon={UserCircleIcon} size={20} color="#9CA3AF" strokeWidth={1.5} />
           </button>
           
           {isDropdownOpen && (
