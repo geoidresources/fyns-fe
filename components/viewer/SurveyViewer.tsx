@@ -406,7 +406,8 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
 
   // One-time scene configuration ported from rendering-engine-fe's production
   // viewer: depth-test clamped overlays against terrain (measurements should
-  // not bleed through hills), no fog, and a globe fallback color matching the
+  // not bleed through hills; the point-cloud visibility effect below owns
+  // this flag afterwards), no fog, and a globe fallback color matching the
   // app background. Without an ion token the default Ion imagery cannot load
   // and the globe renders black — fall back to Carto's token-free dark
   // basemap so the survey still has geographic context (the Viewer mounts
@@ -687,6 +688,26 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       if (!viewer.isDestroyed()) viewer.scene.preRender.removeEventListener(updateEDL);
     };
   }, [viewerReady]);
+
+  // The globe's terrain depth test buries point clouds: a drone cloud sits
+  // largely BELOW the base surface (World Terrain bakes in tree canopy and
+  // pre-dates the excavation; a survey DSM is the very surface the points
+  // scatter ± around), so with the test on most points z-fail against the
+  // globe and the cloud degrades to sparse confetti. Suspend the test while
+  // any point cloud is shown — points then always draw over the globe, while
+  // primitive-vs-primitive depth (the mesh occluding coincident points)
+  // still applies — and restore it otherwise so measurement overlays keep
+  // clamping against hills instead of bleeding through them. Matched by key
+  // prefix, not category: the reality mesh shares the "pointcloud" category.
+  const anyPointCloudVisible = layerControls.some(
+    (c) => c.key.startsWith("pointcloud-") && c.visible
+  );
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed()) return;
+    viewer.scene.globe.depthTestAgainstTerrain = !anyPointCloudVisible;
+    viewer.scene.requestRender();
+  }, [viewerReady, anyPointCloudVisible]);
 
   // Terrain exaggeration (ported): scales heights around the ellipsoid so
   // subtle relief reads at a glance. ×1 is true scale.
