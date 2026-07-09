@@ -22,6 +22,7 @@ export interface Survey {
   survey_date: string;
   survey_type: string;
   status: string;
+  version_number?: number;
   working_crs: string;
   vertical_datum: string;
   metadata: Record<string, unknown> | null;
@@ -45,6 +46,19 @@ export interface ManifestSurvey {
   version?: { id: string; number: number; status: string };
 }
 
+/** Elevation statistics the terrain processor computes from the surface raster
+ * (terrain_surfaces.metadata->'stats'). Elevations are meters in the layer's
+ * vertical datum; histogram spans [histogram_min, histogram_max]. */
+export interface TerrainStats {
+  min_elevation: number;
+  max_elevation: number;
+  mean: number;
+  std_dev: number;
+  histogram?: number[];
+  histogram_min?: number;
+  histogram_max?: number;
+}
+
 /** bbox is [west, south, east, north] in degrees. */
 export interface TerrainLayer {
   surface_type: string; // dsm | dtm
@@ -55,6 +69,7 @@ export interface TerrainLayer {
   max_zoom?: number;
   crs?: string;
   vertical_datum?: string;
+  stats?: TerrainStats;
 }
 
 export interface AssetLayer {
@@ -73,6 +88,8 @@ export interface VectorLayer {
   format?: string;
   feature_count: number;
   crs?: string;
+  interval_m?: number;
+  properties?: Record<string, unknown>;
 }
 
 export interface SiteModelLayer {

@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Viewer } from "resium";
 import type { CesiumComponentRef } from "resium";
 import {
+  BoundingSphere,
   CallbackProperty,
   Cartesian3,
   Cartographic,
@@ -12,11 +13,14 @@ import {
   Cesium3DTileStyle,
   CesiumTerrainProvider,
   ClassificationType,
+  ClippingPolygon,
+  ClippingPolygonCollection,
   Color,
   ConstantPositionProperty,
   EllipsoidTerrainProvider,
   Entity,
   GeoJsonDataSource,
+  HeadingPitchRange,
   ImageryLayer,
   Ion,
   JulianDate,
@@ -89,19 +93,9 @@ import {
   pointBudgetToCacheBytes,
   pointBudgetToMaximumScreenSpaceError,
 } from "@/lib/viewer/pointcloud";
+import { computeTilesetFootprint } from "@/lib/viewer/footprint";
 import { CameraJoystick } from "@/components/viewer/CameraJoystick";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-
-const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-
-/** "2026-05-18" → "18 MAY"; falls back to the raw string. */
-function shortDate(date?: string): string {
-  if (!date) return "";
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(date);
-  if (!m) return date;
-  const month = MONTHS[Number(m[2]) - 1] ?? "";
-  return `${Number(m[3])} ${month}`.trim();
-}
 
 /** A thin DXF site model is a CAD surface (floats/cliffs, single-sided) — NOT a
  * complete photogrammetry reality mesh. Everything else (3mx/osgb/obj/3tz/…, or
@@ -154,11 +148,44 @@ function pickTilesetUrl(urls?: Record<string, string>): string | null {
   return null;
 }
 
+/** Token-free XYZ imagery providers for the base-map selector. Esri World
+ * Imagery uses {z}/{y}/{x} tile order; Carto uses {z}/{x}/{y} + subdomains. */
+function makeBaseImageryProvider(id: string): UrlTemplateImageryProvider {
+  if (id === "satellite") {
+    return new UrlTemplateImageryProvider({
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      minimumLevel: 0,
+      maximumLevel: 19,
+    });
+  }
+  const style = id === "streets" ? "light_all" : "dark_all";
+  return new UrlTemplateImageryProvider({
+    url: `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}.png`,
+    subdomains: "abcd",
+    minimumLevel: 0,
+    maximumLevel: 19,
+  });
+}
+
 /** lens_slope_tiles -> "Slope" */
 function lensLabel(key: string): string {
   const name = key.replace(/^lens_/, "").replace(/_tiles$/, "").replace(/_/g, " ");
   return name.charAt(0).toUpperCase() + name.slice(1);
 }
+
+/** lens_elevation_viridis_tiles -> viridis; lens_hillshade_tiles -> hillshade */
+function parseLensRamp(outputKey: string): string | undefined {
+  const m = outputKey.match(/^lens_elevation_(\w+)_tiles$/);
+  if (m) return m[1];
+  if (outputKey === "lens_hillshade_tiles") return "hillshade";
+  return undefined;
+}
+
+function contourVectorRole(role: string): boolean {
+  return role === "contours" || role.startsWith("contours_");
+}
+
+const ELEVATION_RAMPS = ["viridis", "terrain", "plasma", "grayscale"] as const;
 
 // proxyGcsUrls deep-rewrites storage.googleapis.com URLs onto the app's /gcs
 // same-origin proxy (next.config.ts rewrites) — the bucket has no CORS policy
@@ -261,7 +288,18 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const [activeDrawOpts, setActiveDrawOpts] = useState<DrawOptions | null>(null);
   const [volumeMethod, setVolumeMethod] = useState("smart-base");
   const [terrainExaggeration, setTerrainExaggeration] = useState(1);
+  const [baseMap, setBaseMap] = useState("dark");
+  const [rotating, setRotating] = useState(false);
+  const [colorMap, setColorMap] = useState("None");
+  const [shading, setShading] = useState("None");
+  const [contourIntervalM, setContourIntervalM] = useState<number | null>(null);
+  const [digitalTwinEnabled, setDigitalTwinEnabled] = useState(false);
+  const [sunLightingEnabled, setSunLightingEnabled] = useState(false);
+  const [sunHour, setSunHour] = useState(12);
 
+  // The token-free base imagery layer (index 0). Kept in a ref so the base-map
+  // selector can swap it without disturbing the survey ortho layers on top.
+  const baseImageryRef = useRef<ImageryLayer | null>(null);
   const handlesRef = useRef<Map<string, LayerHandle>>(new Map());
   // Latest user-facing visibility per layer key. Tilesets resolve LONG after
   // the user may have toggled them (a 1.4GB reality mesh takes a while) — the
@@ -269,7 +307,9 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   // hardcoded default, or the layer can never be turned on.
   const visibleRef = useRef<Map<string, boolean>>(new Map());
   const layersSignatureRef = useRef<string>("");
-  const cameraTargetRef = useRef<"none" | "center" | "bbox">("none");
+  // Camera-framing precedence: real layer bboxes > loaded tileset bounds >
+  // project-center guess. "tileset" and "bbox" are terminal; "center" yields.
+  const cameraTargetRef = useRef<"none" | "center" | "tileset" | "bbox">("none");
   const drawHandlerRef = useRef<ScreenSpaceEventHandler | null>(null);
   const draftPositionsRef = useRef<Cartesian3[]>([]);
   const draftEntityRef = useRef<Entity | null>(null);
@@ -283,13 +323,122 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const measurementDsRef = useRef<GeoJsonDataSource | null>(null);
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
   const pendingDrawRef = useRef<PendingDraw | null>(null);
+  // Data footprints (lon/lat rings as Cartesian3) per survey tileset, computed
+  // from each tileset's leaf occupancy once it loads; drives terrain clipping.
+  // A mesh may only clip after initialTilesLoaded — demonstrated full cover.
+  // A mesh without a proper LOD pyramid (leaf-only content bigger than the
+  // anti-OOM cache budget) NEVER reaches full cover: it must keep the globe
+  // under it as visual filler, so it never enters meshReadyRef and never
+  // clips. The waiver set separately releases the cloud-preload hold for
+  // such meshes. The version counter re-runs the clipping effect when an
+  // async input (footprint, initial load) resolves.
+  const footprintsRef = useRef<Map<string, Cartesian3[]>>(new Map());
+  const meshReadyRef = useRef<Set<string>>(new Set());
+  const meshPreloadWaiverRef = useRef<Set<string>>(new Set());
+  const [clipInputsVersion, setClipInputsVersion] = useState(0);
+  const clipCollectionRef = useRef<ClippingPolygonCollection | null>(null);
+  // Union of loaded survey tileset bounds — the camera target of last resort.
+  const surveyBoundsRef = useRef<BoundingSphere | null>(null);
+  const tilesetFramedRef = useRef(false);
 
   const layersEmpty = manifestLayersEmpty(manifest);
+
+  const availableColorMaps = useMemo(() => {
+    const ramps = new Set<string>();
+    for (const l of layerControls) {
+      if (l.lensRamp && (ELEVATION_RAMPS as readonly string[]).includes(l.lensRamp)) {
+        ramps.add(l.lensRamp.charAt(0).toUpperCase() + l.lensRamp.slice(1));
+      }
+    }
+    return Array.from(ramps);
+  }, [layerControls]);
+
+  const hasHillshade = useMemo(
+    () => layerControls.some((l) => l.lensRamp === "hillshade"),
+    [layerControls]
+  );
+
+  const availableContourIntervals = useMemo(() => {
+    const seen = new Set<number>();
+    const out: number[] = [];
+    for (const l of layerControls) {
+      if (l.vectorRole && contourVectorRole(l.vectorRole) && l.intervalM && l.intervalM > 0) {
+        if (!seen.has(l.intervalM)) {
+          seen.add(l.intervalM);
+          out.push(l.intervalM);
+        }
+      }
+    }
+    return out.sort((a, b) => a - b);
+  }, [layerControls]);
+
+  const imageVector = useMemo(
+    () => layerControls.find((l) => l.vectorRole === "image_positions"),
+    [layerControls]
+  );
+  const gcpVector = useMemo(
+    () => layerControls.find((l) => l.vectorRole === "gcps"),
+    [layerControls]
+  );
+  const imageCount = manifest?.layers.vectors?.find((v) => v.role === "image_positions")?.feature_count;
+  const gcpCount = manifest?.layers.vectors?.find((v) => v.role === "gcps")?.feature_count;
+
+  useEffect(() => {
+    if (availableContourIntervals.length === 0) return;
+    setContourIntervalM((prev) => (prev == null ? availableContourIntervals[0] : prev));
+  }, [availableContourIntervals]);
 
   // Updates a layer row's async meta (loading spinner / load error) once its
   // tileset or vector fetch settles.
   const patchControl = useCallback((key: string, patch: Partial<LayerControl>) => {
     setLayerControls((prev) => prev.map((c) => (c.key === key ? { ...c, ...patch } : c)));
+  }, []);
+
+  // Hidden point clouds preload for an instant toggle, but only once every
+  // visible reality mesh has its initial cover: pnts tiles are small and
+  // fast-turnover, and letting them stream during the mesh's initial load
+  // starves the landing view's large b3dm requests on constrained networks
+  // (observed as the mesh stalling at a handful of tiles). One-way ratchet —
+  // once preloading, a cloud keeps its tiles warm.
+  const updateCloudPreload = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) return;
+    for (const [key, vis] of visibleRef.current) {
+      if (
+        key.startsWith("sitemodel-") &&
+        vis &&
+        !meshReadyRef.current.has(key) &&
+        !meshPreloadWaiverRef.current.has(key)
+      ) {
+        return;
+      }
+    }
+    for (const [key, handle] of handlesRef.current) {
+      if (key.startsWith("pointcloud-") && handle.type === "tileset") {
+        handle.tileset.preloadWhenHidden = true;
+      }
+    }
+  }, []);
+
+  // Camera fallback from real tileset bounds: the manifest's pointcloud bbox
+  // is degenerate ([0,0,0,0]), so a survey without ortho/terrain bboxes would
+  // otherwise land on the project-center guess at 3km. Frame the first loaded
+  // survey tileset instead, obliquely — the "3D site" view, not a flat map.
+  // A bbox flight (real layer bboxes existed) always wins over this.
+  const registerSurveyBounds = useCallback((tileset: Cesium3DTileset) => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) return;
+    surveyBoundsRef.current = surveyBoundsRef.current
+      ? BoundingSphere.union(surveyBoundsRef.current, tileset.boundingSphere, new BoundingSphere())
+      : BoundingSphere.clone(tileset.boundingSphere);
+    if (cameraTargetRef.current === "bbox" || tilesetFramedRef.current) return;
+    tilesetFramedRef.current = true;
+    cameraTargetRef.current = "tileset";
+    const sphere = surveyBoundsRef.current;
+    viewer.camera.flyToBoundingSphere(sphere, {
+      duration: 1.8,
+      offset: new HeadingPitchRange(0, CesiumMath.toRadians(-45), sphere.radius * 2.8),
+    });
   }, []);
 
   // ------------------------------------------------------------- data load
@@ -380,9 +529,13 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     if (cameraTargetRef.current !== "none") return;
     cameraTargetRef.current = "center";
     let cancelled = false;
+    // The center guess resolves against a live API while survey tilesets load
+    // in parallel; whichever real tileset frames first must not be overwritten
+    // by this weaker fallback landing later.
+    const centerSuperseded = () => cameraTargetRef.current === "tileset";
     getProject(manifest.survey.project_id)
       .then((p) => {
-        if (cancelled || !viewer || viewer.isDestroyed()) return;
+        if (cancelled || !viewer || viewer.isDestroyed() || centerSuperseded()) return;
         const lat = p.center_lat ?? DEFAULT_CENTER.lat;
         const lng = p.center_lng ?? DEFAULT_CENTER.lng;
         viewer.camera.flyTo({
@@ -391,7 +544,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         });
       })
       .catch(() => {
-        if (cancelled || !viewer || viewer.isDestroyed()) return;
+        if (cancelled || !viewer || viewer.isDestroyed() || centerSuperseded()) return;
         viewer.camera.flyTo({
           destination: Cartesian3.fromDegrees(DEFAULT_CENTER.lng, DEFAULT_CENTER.lat, DEFAULT_CENTER.height),
           duration: 2.0,
@@ -418,20 +571,49 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     viewer.scene.globe.depthTestAgainstTerrain = true;
     viewer.scene.fog.enabled = false;
     viewer.scene.globe.showGroundAtmosphere = false;
+    // The atmosphere shell reads as a white glare through any gap in the
+    // globe (terrain clipping opens such gaps under the survey while mesh
+    // tiles stream in); the app's horizon is space-dark anyway.
+    if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = false;
     viewer.scene.globe.baseColor = Color.fromCssColorString("#0A0D14");
     if (!USE_WORLD_TERRAIN && viewer.imageryLayers.length === 0) {
-      viewer.imageryLayers.addImageryProvider(
-        new UrlTemplateImageryProvider({
-          url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-          subdomains: "abcd",
-          minimumLevel: 0,
-          maximumLevel: 19,
-        }),
+      baseImageryRef.current = viewer.imageryLayers.addImageryProvider(
+        makeBaseImageryProvider("dark"),
         0
       );
     }
     viewer.scene.requestRender();
   }, [viewerReady]);
+
+  // Base-map selector: swap the bottom imagery layer, keeping survey ortho
+  // pyramids (added on top) undisturbed. No-op in World Terrain mode, where
+  // the Ion base owns the slot.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed() || USE_WORLD_TERRAIN) return;
+    const layers = viewer.imageryLayers;
+    const next = layers.addImageryProvider(makeBaseImageryProvider(baseMap), 0);
+    layers.lowerToBottom(next);
+    if (baseImageryRef.current) layers.remove(baseImageryRef.current, true);
+    baseImageryRef.current = next;
+    viewer.scene.requestRender();
+  }, [viewerReady, baseMap]);
+
+  // Rotate: orbit the camera around the current view center once per ~30s
+  // while enabled. Cleared on stop/unmount.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed() || !rotating) return;
+    const onTick = () => {
+      viewer.camera.rotateRight(0.002);
+      viewer.scene.requestRender();
+    };
+    viewer.clock.onTick.addEventListener(onTick);
+    viewer.clock.shouldAnimate = true;
+    return () => {
+      if (!viewer.isDestroyed()) viewer.clock.onTick.removeEventListener(onTick);
+    };
+  }, [viewerReady, rotating]);
 
   // ------------------------------------------------------- layer building
 
@@ -454,6 +636,15 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     }
     handles.clear();
     viewer.terrainProvider = new EllipsoidTerrainProvider();
+    // Footprints/bounds belong to the outgoing tilesets; the version bump
+    // makes the clipping effect drop stale rings even when the visibility
+    // booleans it also depends on don't change across the rebuild.
+    footprintsRef.current.clear();
+    meshReadyRef.current.clear();
+    meshPreloadWaiverRef.current.clear();
+    setClipInputsVersion((v) => v + 1);
+    surveyBoundsRef.current = null;
+    tilesetFramedRef.current = false;
 
     const controls: LayerControl[] = [];
 
@@ -465,7 +656,15 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       USE_WORLD_TERRAIN && !isThinSurfaceMesh(l.source_format);
     const anyMeshHero = (manifest.layers.site_models || []).some(meshIsHero);
 
-    const addImagery = (key: string, label: string, category: LayerControl["category"], asset: AssetLayer, template: string, visible: boolean) => {
+    const addImagery = (
+      key: string,
+      label: string,
+      category: LayerControl["category"],
+      asset: AssetLayer,
+      template: string,
+      visible: boolean,
+      extra?: Partial<LayerControl>
+    ) => {
       const provider = new UrlTemplateImageryProvider({
         url: template, // gdal2tiles XYZ scheme — {z}/{x}/{y} top-origin, no reverseY
         rectangle: bboxToRectangle(asset.bbox),
@@ -480,7 +679,15 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       layer.show = visible;
       layer.alpha = 1;
       handles.set(key, { type: "imagery", layer });
-      controls.push({ key, label, category, visible, opacity: 1, supportsOpacity: true });
+      controls.push({
+        key,
+        label,
+        category,
+        visible,
+        opacity: 1,
+        supportsOpacity: true,
+        ...extra,
+      });
     };
 
     // Ortho — XYZ tile pyramids over the base imagery.
@@ -497,7 +704,8 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       );
       entries.forEach(([k, v]) => {
         const template = v.includes("{z}") ? v : v.replace(/\/+$/, "") + "/{z}/{x}/{y}.png";
-        addImagery(`lens-${i}-${k}`, lensLabel(k), "lens", l, template, false);
+        const ramp = parseLensRamp(k);
+        addImagery(`lens-${i}-${k}`, lensLabel(k), "lens", l, template, false, { lensRamp: ramp });
       });
     });
 
@@ -519,7 +727,8 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         // z-fight the mesh).
         visible: (l.surface_type || "").toLowerCase() === "dsm" && !anyMeshHero,
         opacity: 1,
-        supportsOpacity: false,
+        supportsOpacity: true,
+        stats: l.stats,
       });
     });
 
@@ -559,6 +768,11 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     // size, eye-dome lighting keeps unlit points readable, and PDAL-written
     // tilesets get their geographic root transform corrected to ECEF. fyns's
     // crash guards (request culling while moving, overflow bound) stay on.
+    // When the survey has no other 3D surface (no reality mesh, no DSM/DTM —
+    // the LiDAR-first case) the cloud IS the site: it lands visible instead
+    // of leaving the default view a bare basemap.
+    const pointCloudIsHero =
+      !anyMeshHero && !(manifest.layers.terrain || []).some((t) => !!t.tile_directory_url);
     (manifest.layers.pointcloud || []).forEach((l, i) => {
       const url = pickTilesetUrl(l.output_urls);
       if (!url) return;
@@ -567,6 +781,8 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         ...tilesetBudget,
         maximumScreenSpaceError: pointBudgetToMaximumScreenSpaceError(DEFAULT_POINT_BUDGET),
         cacheBytes: pointBudgetToCacheBytes(DEFAULT_POINT_BUDGET),
+        // preloadWhenHidden is deliberately NOT set here — updateCloudPreload
+        // turns it on once the hero mesh has streamed its initial cover.
         pointCloudShading: {
           attenuation: true,
           eyeDomeLighting: true,
@@ -581,20 +797,23 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           tileset.show = visibleRef.current.get(key) ?? false;
           viewer.scene.primitives.add(tileset);
           handles.set(key, { type: "tileset", tileset });
+          registerSurveyBounds(tileset);
+          updateCloudPreload();
           patchControl(key, { loading: false });
         })
         .catch((err) => {
           console.error("Failed to load point cloud tileset:", err);
           patchControl(key, { loading: false, error: "Failed to load point cloud tiles" });
         });
-      controls.push({ key, label: "Point cloud", category: "pointcloud", visible: false, opacity: 1, supportsOpacity: true, loading: true });
+      controls.push({ key, label: "Point cloud", category: "pointcloud", visible: pointCloudIsHero, opacity: 1, supportsOpacity: true, loading: true });
     });
 
     // Site models — georeferenced reality meshes (3D Tiles).
     (manifest.layers.site_models || []).forEach((l, i) => {
       if (!l.tileset_url) return;
       const key = `sitemodel-${i}`;
-      Cesium3DTileset.fromUrl(l.tileset_url, tilesetBudget)
+      const tilesetUrl = l.tileset_url;
+      Cesium3DTileset.fromUrl(tilesetUrl, tilesetBudget)
         .then((tileset) => {
           if (cancelled || viewer.isDestroyed()) return;
           // The ortho-textured reality mesh already bakes in real capture
@@ -606,7 +825,42 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           tileset.show = visibleRef.current.get(key) ?? false;
           viewer.scene.primitives.add(tileset);
           handles.set(key, { type: "tileset", tileset });
+          registerSurveyBounds(tileset);
           patchControl(key, { loading: false });
+          // Clipping only engages once the mesh has demonstrated a full
+          // cover of the view (initialTilesLoaded) — cutting the globe any
+          // earlier exposes the void where tiles haven't streamed in. No
+          // timer override: a mesh whose leaf tiles exceed the cache budget
+          // (no LOD pyramid) never reaches full cover and must keep the
+          // globe rendering under it. It does stop holding the hidden-cloud
+          // preload hostage after 30s — only clipping demands real cover.
+          const markMeshReady = () => {
+            if (cancelled || meshReadyRef.current.has(key)) return;
+            meshReadyRef.current.add(key);
+            setClipInputsVersion((v) => v + 1);
+            updateCloudPreload();
+          };
+          if (tileset.tilesLoaded) markMeshReady();
+          else {
+            tileset.initialTilesLoaded.addEventListener(markMeshReady);
+            setTimeout(() => {
+              if (cancelled || meshPreloadWaiverRef.current.has(key)) return;
+              meshPreloadWaiverRef.current.add(key);
+              updateCloudPreload();
+            }, 30_000);
+          }
+          // Data footprint for terrain clipping — resolved from the tileset's
+          // own tile tree; null means "never clip", handled by the effect.
+          computeTilesetFootprint(new URL(tilesetUrl, window.location.href).toString()).then(
+            (ring) => {
+              if (cancelled || !ring) return;
+              footprintsRef.current.set(
+                key,
+                ring.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat))
+              );
+              setClipInputsVersion((v) => v + 1);
+            }
+          );
         })
         .catch((err) => {
           console.error("Failed to load site model tileset:", err);
@@ -634,6 +888,8 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         visible: false,
         opacity: 1,
         supportsOpacity: false,
+        intervalM: l.interval_m,
+        vectorRole: l.role,
       });
     });
 
@@ -669,7 +925,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [viewerReady, manifest, patchControl]);
+  }, [viewerReady, manifest, patchControl, registerSurveyBounds, updateCloudPreload]);
 
   // Camera-adaptive eye-dome lighting (ported): point outlines strengthen as
   // the camera closes in on the cloud.
@@ -709,6 +965,43 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     viewer.scene.requestRender();
   }, [viewerReady, anyPointCloudVisible]);
 
+  // Terrain isolation: World Terrain (~30m, canopy baked in, pre-excavation)
+  // disagrees with the survey wherever the drone flew, so parts of the reality
+  // mesh sit below it and z-fail into draped-terrain geometry. Clip the globe
+  // out under each visible mesh's data footprint — the survey owns the ground
+  // there. Only under the opaque mesh: clipping under sparse points would open
+  // see-through gaps between them (clouds keep the depth-test suspension
+  // above), and only while the World Terrain base is active (a survey DSM/DTM
+  // provider IS survey truth; the flat ellipsoid never occludes). No footprint
+  // yet (or none derivable) → leave the globe intact: over-clipping shows the
+  // void behind the globe, which is worse than the z-fight it would fix.
+  const anySiteMeshVisible = layerControls.some(
+    (c) => c.key.startsWith("sitemodel-") && c.visible
+  );
+  const anySurveyTerrainVisible = layerControls.some(
+    (c) => c.category === "terrain" && c.visible
+  );
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed()) return;
+    if (!USE_WORLD_TERRAIN || !ClippingPolygonCollection.isSupported(viewer.scene)) return;
+    if (!clipCollectionRef.current) {
+      clipCollectionRef.current = new ClippingPolygonCollection({ enabled: false });
+      viewer.scene.globe.clippingPolygons = clipCollectionRef.current;
+    }
+    const collection = clipCollectionRef.current;
+    collection.removeAll();
+    if (anySiteMeshVisible && !anySurveyTerrainVisible) {
+      for (const [key, positions] of footprintsRef.current) {
+        if (visibleRef.current.get(key) && meshReadyRef.current.has(key)) {
+          collection.add(new ClippingPolygon({ positions }));
+        }
+      }
+    }
+    collection.enabled = collection.length > 0;
+    viewer.scene.requestRender();
+  }, [viewerReady, anySiteMeshVisible, anySurveyTerrainVisible, clipInputsVersion]);
+
   // Terrain exaggeration (ported): scales heights around the ellipsoid so
   // subtle relief reads at a glance. ×1 is true scale.
   useEffect(() => {
@@ -718,6 +1011,19 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     viewer.scene.verticalExaggerationRelativeHeight = 0;
     viewer.scene.requestRender();
   }, [viewerReady, terrainExaggeration]);
+
+  // Sun position: globe lighting + clock time-of-day slider.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed()) return;
+    viewer.scene.globe.enableLighting = sunLightingEnabled;
+    if (sunLightingEnabled) {
+      const d = JulianDate.toDate(JulianDate.now());
+      d.setUTCHours(sunHour, 0, 0, 0);
+      viewer.clock.currentTime = JulianDate.fromDate(d);
+    }
+    viewer.scene.requestRender();
+  }, [viewerReady, sunLightingEnabled, sunHour]);
 
   // ----------------------------------------------------- layer interaction
 
@@ -818,6 +1124,8 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         const handle = handlesRef.current.get(key);
         const nowVisible = !target.visible;
         visibleRef.current.set(key, nowVisible);
+        // Hiding a still-streaming mesh unblocks hidden-cloud preloading.
+        updateCloudPreload();
         // Apply the mesh↔terrain exclusion side effects on the scene objects.
         if (nowVisible && isSiteModel) {
           for (const l of prev) {
@@ -867,7 +1175,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         return next;
       });
     },
-    [applyTerrain, patchControl]
+    [applyTerrain, patchControl, updateCloudPreload]
   );
 
   const handleOpacity = useCallback((key: string, opacity: number) => {
@@ -886,7 +1194,164 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         : opacity >= 0.99
           ? undefined
           : new Cesium3DTileStyle({ color: `color('white', ${opacity.toFixed(2)})` });
+    } else if (handle.type === "terrain") {
+      // Terrain (DSM/DTM) is globe geometry with no per-layer alpha — fade it
+      // via globe translucency. Terrain surfaces are mutually exclusive, so the
+      // active one owns the globe's front-face alpha. Fully opaque disables
+      // translucency so the surface renders untouched (and cheapest).
+      const viewer = viewerRef.current;
+      if (viewer && !viewer.isDestroyed()) {
+        const t = viewer.scene.globe.translucency;
+        t.enabled = opacity < 0.99;
+        t.frontFaceAlpha = opacity;
+        t.backFaceAlpha = opacity;
+        viewer.scene.requestRender();
+      }
     }
+  }, []);
+
+  const applyLensVisibility = useCallback(
+    (ramp: string | null, show: boolean) => {
+      setLayerControls((prev) =>
+        prev.map((l) => {
+          if (l.lensRamp !== ramp) return l;
+          const handle = handlesRef.current.get(l.key);
+          if (handle?.type === "imagery") handle.layer.show = show;
+          visibleRef.current.set(l.key, show);
+          return { ...l, visible: show };
+        })
+      );
+    },
+    []
+  );
+
+  const handleColorMapChange = useCallback(
+    (value: string) => {
+      setColorMap(value);
+      setLayerControls((prev) => {
+        const selected = value.toLowerCase();
+        return prev.map((l) => {
+          if (!l.lensRamp || !(ELEVATION_RAMPS as readonly string[]).includes(l.lensRamp)) return l;
+          const show = value !== "None" && l.lensRamp === selected;
+          const handle = handlesRef.current.get(l.key);
+          if (handle?.type === "imagery") handle.layer.show = show;
+          visibleRef.current.set(l.key, show);
+          return { ...l, visible: show };
+        });
+      });
+    },
+    []
+  );
+
+  const handleShadingChange = useCallback(
+    (value: string) => {
+      setShading(value);
+      applyLensVisibility("hillshade", value === "Hillshade");
+    },
+    [applyLensVisibility]
+  );
+
+  const handleContourIntervalChange = useCallback((intervalM: number) => {
+    setContourIntervalM(intervalM);
+    setLayerControls((prev) =>
+      prev.map((l) => {
+        if (!l.vectorRole || !contourVectorRole(l.vectorRole)) return l;
+        const show = l.intervalM === intervalM;
+        const handle = handlesRef.current.get(l.key);
+        if (handle?.type === "datasource") {
+          handle.ds.show = show;
+        } else if (handle?.type === "geojson-lazy" && show && !handle.loading) {
+          const viewer = viewerRef.current;
+          handle.loading = true;
+          patchControl(l.key, { loading: true, error: null });
+          GeoJsonDataSource.load(handle.url, {
+            clampToGround: true,
+            stroke: Color.fromCssColorString("#7DD3FC"),
+            fill: Color.fromCssColorString("#7DD3FC").withAlpha(0.15),
+            strokeWidth: 2,
+          })
+            .then((ds) => {
+              if (!viewer || viewer.isDestroyed()) return;
+              ds.show = visibleRef.current.get(l.key) ?? false;
+              viewer.dataSources.add(ds);
+              handlesRef.current.set(l.key, { type: "datasource", ds });
+              patchControl(l.key, { loading: false });
+            })
+            .catch((err) => {
+              handle.loading = false;
+              console.error("Failed to load contour layer:", err);
+              patchControl(l.key, { loading: false, error: "Failed to load contour data" });
+            });
+        }
+        visibleRef.current.set(l.key, show);
+        return { ...l, visible: show };
+      })
+    );
+  }, [patchControl]);
+
+  const handleToggleDigitalTwin = useCallback(() => {
+    if (!USE_WORLD_TERRAIN) return;
+    setDigitalTwinEnabled((prev) => {
+      const next = !prev;
+      if (next) {
+        applyTerrain(null);
+        setLayerControls((layers) =>
+          layers.map((l) => {
+            if (l.category === "terrain" && l.visible) {
+              visibleRef.current.set(l.key, false);
+              return { ...l, visible: false };
+            }
+            if (l.key.startsWith("sitemodel-")) {
+              const hero = manifest?.layers.site_models?.some(
+                (sm, i) => `sitemodel-${i}` === l.key && !isThinSurfaceMesh(sm.source_format)
+              );
+              if (hero) {
+                const h = handlesRef.current.get(l.key);
+                if (h?.type === "tileset") h.tileset.show = true;
+                visibleRef.current.set(l.key, true);
+                return { ...l, visible: true };
+              }
+            }
+            return l;
+          })
+        );
+      } else {
+        const dsm = layerControls.find(
+          (l) => l.category === "terrain" && l.label.toLowerCase() === "dsm"
+        );
+        if (dsm) {
+          const h = handlesRef.current.get(dsm.key);
+          if (h?.type === "terrain") applyTerrain(h.url);
+          visibleRef.current.set(dsm.key, true);
+          setLayerControls((layers) =>
+            layers.map((l) => {
+              if (l.key === dsm.key) return { ...l, visible: true };
+              if (l.key.startsWith("sitemodel-") && l.visible) {
+                const h2 = handlesRef.current.get(l.key);
+                if (h2?.type === "tileset") h2.tileset.show = false;
+                visibleRef.current.set(l.key, false);
+                return { ...l, visible: false };
+              }
+              return l;
+            })
+          );
+        }
+      }
+      return next;
+    });
+  }, [applyTerrain, layerControls, manifest?.layers.site_models]);
+
+  const handleToggleImages = useCallback(() => {
+    if (imageVector) handleToggle(imageVector.key);
+  }, [imageVector, handleToggle]);
+
+  const handleToggleGcps = useCallback(() => {
+    if (gcpVector) handleToggle(gcpVector.key);
+  }, [gcpVector, handleToggle]);
+
+  const handleSunLightingChange = useCallback((enabled: boolean, hour: number) => {
+    setSunLightingEnabled(enabled);
+    setSunHour(hour);
   }, []);
 
   const handleToggleDesign = useCallback((key: string) => {
@@ -1380,14 +1845,6 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     return `Survey ${manifest.survey.survey_date}`;
   }, [manifest]);
 
-  // Section header label, e.g. "SURVEY V3 · 18 MAY".
-  const surveyLabel = useMemo(() => {
-    if (!manifest) return "SURVEY";
-    const v = manifest.survey.version?.number;
-    const parts = [v ? `SURVEY V${v}` : "SURVEY", shortDate(manifest.survey.survey_date)];
-    return parts.filter(Boolean).join(" · ");
-  }, [manifest]);
-
   // Real measurements first, then the demo folder fixtures (display-only) so
   // the grouped Measurements UI is demonstrable. Drop SAMPLE_MEASUREMENTS once
   // asset-svc serves foldered measurements.
@@ -1526,16 +1983,48 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
               <>
                 <TabsContent value="layers" className="mt-0">
                   <LayerPanel
-                    surveyLabel={surveyLabel}
                     layers={layerControls}
                     designs={designControls}
                     processing={layersEmpty}
                     surveyStatus={manifest.survey.status}
                     terrainExaggeration={terrainExaggeration}
+                    baseMap={baseMap}
+                    rotating={rotating}
+                    imageCount={imageCount}
+                    gcpCount={gcpCount}
+                    hasImageLayer={!!imageVector}
+                    hasGcpLayer={!!gcpVector}
+                    imagesVisible={imageVector?.visible ?? false}
+                    gcpsVisible={gcpVector?.visible ?? false}
+                    colorMap={colorMap}
+                    shading={shading}
+                    availableColorMaps={availableColorMaps}
+                    hasHillshade={hasHillshade}
+                    contourIntervalM={contourIntervalM}
+                    availableContourIntervals={availableContourIntervals}
+                    digitalTwinEnabled={digitalTwinEnabled}
+                    digitalTwinAvailable={USE_WORLD_TERRAIN}
+                    sunLightingEnabled={sunLightingEnabled}
+                    sunHour={sunHour}
                     onToggle={handleToggle}
                     onOpacity={handleOpacity}
                     onToggleDesign={handleToggleDesign}
                     onTerrainExaggeration={setTerrainExaggeration}
+                    onSetBaseMap={setBaseMap}
+                    onToggleRotate={() => setRotating((v) => !v)}
+                    onColorMapChange={handleColorMapChange}
+                    onShadingChange={handleShadingChange}
+                    onContourIntervalChange={handleContourIntervalChange}
+                    onToggleImages={handleToggleImages}
+                    onToggleGcps={handleToggleGcps}
+                    onToggleDigitalTwin={handleToggleDigitalTwin}
+                    onSunLightingChange={handleSunLightingChange}
+                  />
+                </TabsContent>
+                <TabsContent value="surveys" className="mt-0">
+                  <SurveyList
+                    projectId={manifest.survey.project_id}
+                    currentSurveyId={surveyId}
                   />
                   <MeasurementPanel
                     measurements={panelMeasurements}
@@ -1546,12 +2035,6 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
                     onCompute={triggerCompute}
                     onDelete={removeMeasurement}
                     onSelect={selectMeasurement}
-                  />
-                </TabsContent>
-                <TabsContent value="surveys" className="mt-0">
-                  <SurveyList
-                    projectId={manifest.survey.project_id}
-                    currentSurveyId={surveyId}
                   />
                 </TabsContent>
               </>
