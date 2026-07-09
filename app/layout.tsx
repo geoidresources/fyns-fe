@@ -23,6 +23,8 @@ import { BackgroundShell } from "@/components/layout/BackgroundShell";
 
 import { Toaster } from "sonner";
 
+const cesiumIonToken = (process.env.NEXT_PUBLIC_CESIUM_ION_TOKEN || "").trim();
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -35,8 +37,15 @@ export default function RootLayout({
     >
       <head>
         <link rel="stylesheet" href="/cesium/Widgets/widgets.css" />
-        <script src="/cesium/Cesium.js" />
         <script dangerouslySetInnerHTML={{ __html: `window.CESIUM_BASE_URL = "/cesium/";` }} />
+        <script src="/cesium/Cesium.js" />
+        {cesiumIonToken ? (
+          <script
+            dangerouslySetInnerHTML={{
+              __html: `if (typeof Cesium !== "undefined") Cesium.Ion.defaultAccessToken = ${JSON.stringify(cesiumIonToken)};`,
+            }}
+          />
+        ) : null}
       </head>
       <body className="min-h-full flex flex-col font-sans">
         <BackgroundShell>

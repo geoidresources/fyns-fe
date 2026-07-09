@@ -22,7 +22,6 @@ import {
   GeoJsonDataSource,
   HeadingPitchRange,
   ImageryLayer,
-  Ion,
   JulianDate,
   Math as CesiumMath,
   PolygonHierarchy,
@@ -94,6 +93,9 @@ import {
   pointBudgetToMaximumScreenSpaceError,
 } from "@/lib/viewer/pointcloud";
 import { computeTilesetFootprint } from "@/lib/viewer/footprint";
+import { USE_WORLD_TERRAIN } from "@/lib/viewer/cesiumIon";
+import { configureCesiumScene, makeBaseImageryProvider } from "@/lib/viewer/cesiumScene";
+import { useCesiumReady } from "@/hooks/useCesiumReady";
 import { CameraJoystick } from "@/components/viewer/CameraJoystick";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -121,9 +123,7 @@ const ACCENT = Color.fromCssColorString("#C97A4E");
 // Terrain as the base so a survey sits inside real surrounding elevation — the
 // textured reality mesh renders ON the ground (no floating/cliff), the
 // "digital-twin" look. Without a token it stays the flat ellipsoid + DSM-drape.
-const ION_TOKEN = (process.env.NEXT_PUBLIC_CESIUM_ION_TOKEN || "").trim();
-const USE_WORLD_TERRAIN = ION_TOKEN.length > 0;
-if (USE_WORLD_TERRAIN) Ion.defaultAccessToken = ION_TOKEN;
+// Ion token is applied in app/layout.tsx + useCesiumReady before the viewer mounts.
 
 // ------------------------------------------------------------- url helpers
 
@@ -146,25 +146,6 @@ function pickTilesetUrl(urls?: Record<string, string>): string | null {
     if (typeof v === "string" && v.includes("tileset.json")) return v;
   }
   return null;
-}
-
-/** Token-free XYZ imagery providers for the base-map selector. Esri World
- * Imagery uses {z}/{y}/{x} tile order; Carto uses {z}/{x}/{y} + subdomains. */
-function makeBaseImageryProvider(id: string): UrlTemplateImageryProvider {
-  if (id === "satellite") {
-    return new UrlTemplateImageryProvider({
-      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-      minimumLevel: 0,
-      maximumLevel: 19,
-    });
-  }
-  const style = id === "streets" ? "light_all" : "dark_all";
-  return new UrlTemplateImageryProvider({
-    url: `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}.png`,
-    subdomains: "abcd",
-    minimumLevel: 0,
-    maximumLevel: 19,
-  });
 }
 
 /** lens_slope_tiles -> "Slope" */
@@ -259,6 +240,7 @@ interface PendingDraw {
 }
 
 export function SurveyViewer({ surveyId }: { surveyId: string }) {
+  const cesiumReady = useCesiumReady();
   // The Cesium viewer is a mutable external object — keep it in a ref and use
   // a ready flag to (re)run the effects that depend on it.
   const viewerRef = useRef<CesiumViewer | null>(null);
@@ -288,11 +270,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const [activeDrawOpts, setActiveDrawOpts] = useState<DrawOptions | null>(null);
   const [volumeMethod, setVolumeMethod] = useState("smart-base");
   const [terrainExaggeration, setTerrainExaggeration] = useState(1);
-  const [baseMap, setBaseMap] = useState("dark");
-  const [rotating, setRotating] = useState(false);
+  const [baseMap, setBaseMap] = useState("satellite");
   const [colorMap, setColorMap] = useState("None");
   const [shading, setShading] = useState("None");
-  const [contourIntervalM, setContourIntervalM] = useState<number | null>(null);
+  const [selectedContourIntervalM, setSelectedContourIntervalM] = useState<number | null>(null);
   const [digitalTwinEnabled, setDigitalTwinEnabled] = useState(false);
   const [sunLightingEnabled, setSunLightingEnabled] = useState(false);
   const [sunHour, setSunHour] = useState(12);
@@ -372,6 +353,8 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     return out.sort((a, b) => a - b);
   }, [layerControls]);
 
+  const contourIntervalM = selectedContourIntervalM ?? availableContourIntervals[0] ?? null;
+
   const imageVector = useMemo(
     () => layerControls.find((l) => l.vectorRole === "image_positions"),
     [layerControls]
@@ -382,11 +365,6 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   );
   const imageCount = manifest?.layers.vectors?.find((v) => v.role === "image_positions")?.feature_count;
   const gcpCount = manifest?.layers.vectors?.find((v) => v.role === "gcps")?.feature_count;
-
-  useEffect(() => {
-    if (availableContourIntervals.length === 0) return;
-    setContourIntervalM((prev) => (prev == null ? availableContourIntervals[0] : prev));
-  }, [availableContourIntervals]);
 
   // Updates a layer row's async meta (loading spinner / load error) once its
   // tileset or vector fetch settles.
@@ -557,28 +535,17 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
 
   // -------------------------------------------------------- scene setup
 
-  // One-time scene configuration ported from rendering-engine-fe's production
-  // viewer: depth-test clamped overlays against terrain (measurements should
-  // not bleed through hills; the point-cloud visibility effect below owns
-  // this flag afterwards), no fog, and a globe fallback color matching the
-  // app background. Without an ion token the default Ion imagery cannot load
-  // and the globe renders black — fall back to Carto's token-free dark
-  // basemap so the survey still has geographic context (the Viewer mounts
-  // with baseLayer={false} in that mode, so the slot is empty).
+  // One-time scene configuration: space-dark background (no starfield), no fog,
+  // and a token-free Carto basemap at layer 0 so geographic context survives
+  // Ion imagery timeouts (common after hard refresh). World Terrain still
+  // comes from Ion when a token is set; survey ortho/pyramids stack on top.
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed()) return;
-    viewer.scene.globe.depthTestAgainstTerrain = true;
-    viewer.scene.fog.enabled = false;
-    viewer.scene.globe.showGroundAtmosphere = false;
-    // The atmosphere shell reads as a white glare through any gap in the
-    // globe (terrain clipping opens such gaps under the survey while mesh
-    // tiles stream in); the app's horizon is space-dark anyway.
-    if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = false;
-    viewer.scene.globe.baseColor = Color.fromCssColorString("#0A0D14");
-    if (!USE_WORLD_TERRAIN && viewer.imageryLayers.length === 0) {
+    configureCesiumScene(viewer);
+    if (viewer.imageryLayers.length === 0) {
       baseImageryRef.current = viewer.imageryLayers.addImageryProvider(
-        makeBaseImageryProvider("dark"),
+        makeBaseImageryProvider("satellite"),
         0
       );
     }
@@ -586,11 +553,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   }, [viewerReady]);
 
   // Base-map selector: swap the bottom imagery layer, keeping survey ortho
-  // pyramids (added on top) undisturbed. No-op in World Terrain mode, where
-  // the Ion base owns the slot.
+  // pyramids (added on top) undisturbed.
   useEffect(() => {
     const viewer = viewerRef.current;
-    if (!viewerReady || !viewer || viewer.isDestroyed() || USE_WORLD_TERRAIN) return;
+    if (!viewerReady || !viewer || viewer.isDestroyed()) return;
     const layers = viewer.imageryLayers;
     const next = layers.addImageryProvider(makeBaseImageryProvider(baseMap), 0);
     layers.lowerToBottom(next);
@@ -598,22 +564,6 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     baseImageryRef.current = next;
     viewer.scene.requestRender();
   }, [viewerReady, baseMap]);
-
-  // Rotate: orbit the camera around the current view center once per ~30s
-  // while enabled. Cleared on stop/unmount.
-  useEffect(() => {
-    const viewer = viewerRef.current;
-    if (!viewerReady || !viewer || viewer.isDestroyed() || !rotating) return;
-    const onTick = () => {
-      viewer.camera.rotateRight(0.002);
-      viewer.scene.requestRender();
-    };
-    viewer.clock.onTick.addEventListener(onTick);
-    viewer.clock.shouldAnimate = true;
-    return () => {
-      if (!viewer.isDestroyed()) viewer.clock.onTick.removeEventListener(onTick);
-    };
-  }, [viewerReady, rotating]);
 
   // ------------------------------------------------------- layer building
 
@@ -1252,7 +1202,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   );
 
   const handleContourIntervalChange = useCallback((intervalM: number) => {
-    setContourIntervalM(intervalM);
+    setSelectedContourIntervalM(intervalM);
     setLayerControls((prev) =>
       prev.map((l) => {
         if (!l.vectorRole || !contourVectorRole(l.vectorRole)) return l;
@@ -1833,9 +1783,17 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
 
   const handleViewerRef = useCallback((e: CesiumComponentRef<CesiumViewer> | null) => {
     if (e?.cesiumElement && !e.cesiumElement.isDestroyed()) {
+      const viewer = e.cesiumElement;
       // Default double-click (track entity) conflicts with finish-drawing.
-      e.cesiumElement.screenSpaceEventHandler.removeInputAction(ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
-      viewerRef.current = e.cesiumElement;
+      viewer.screenSpaceEventHandler.removeInputAction(ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+      configureCesiumScene(viewer);
+      if (viewer.imageryLayers.length === 0) {
+        baseImageryRef.current = viewer.imageryLayers.addImageryProvider(
+          makeBaseImageryProvider("satellite"),
+          0
+        );
+      }
+      viewerRef.current = viewer;
       setViewerReady(true);
     }
   }, []);
@@ -1989,7 +1947,6 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
                     surveyStatus={manifest.survey.status}
                     terrainExaggeration={terrainExaggeration}
                     baseMap={baseMap}
-                    rotating={rotating}
                     imageCount={imageCount}
                     gcpCount={gcpCount}
                     hasImageLayer={!!imageVector}
@@ -2011,7 +1968,6 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
                     onToggleDesign={handleToggleDesign}
                     onTerrainExaggeration={setTerrainExaggeration}
                     onSetBaseMap={setBaseMap}
-                    onToggleRotate={() => setRotating((v) => !v)}
                     onColorMapChange={handleColorMapChange}
                     onShadingChange={handleShadingChange}
                     onContourIntervalChange={handleContourIntervalChange}
@@ -2055,17 +2011,16 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         </div>
       </div>
         {/* Center: 3D Viewer */}
-        <div className="flex-1 relative">
+        <div className="flex-1 relative min-h-0">
+          <div className="absolute inset-0 cesium-container">
+          {cesiumReady ? (
           <Viewer
             ref={handleViewerRef}
             full
             timeline={false}
             animation={false}
             geocoder={false}
-            // Without an ion token the default Ion imagery just errors — mount
-            // with an empty imagery slot and let the scene-setup effect add
-            // the token-free Carto basemap instead.
-            baseLayer={USE_WORLD_TERRAIN ? undefined : false}
+            baseLayer={false}
             baseLayerPicker={false}
             navigationHelpButton={false}
             homeButton={false}
@@ -2075,6 +2030,13 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
             selectionIndicator={false}
             style={{ width: "100%", height: "100%" }}
           />
+          ) : (
+            <div className="flex h-full items-center justify-center text-xs text-gray-500">
+              <Loader2 size={14} className="mr-2 animate-spin" />
+              Loading viewer…
+            </div>
+          )}
+          </div>
           {manifest && (
             <ViewerDrawToolbar
               drawMode={drawMode}
@@ -2091,38 +2053,38 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
             ready={viewerReady}
             surveyDate={manifest?.survey.survey_date}
           />
-        </div>
 
-        {/* Right contextual panel */}
-        {rightPanel && (
-          <div className="w-[280px] bg-[#111114]/95 backdrop-blur-xl border-l border-white/[0.08] z-10 flex flex-col shrink-0">
-            {rightPanel === "measure" && (
-              <MeasurePalette
-                drawMode={drawMode}
-                probing={probing}
-                readout={readout}
-                volumeMethod={volumeMethod}
-                onVolumeMethod={setVolumeMethod}
-                onStartDraw={startDraw}
-                onStartProbe={startProbe}
-                onClose={cancelDraw}
-              />
-            )}
-            {rightPanel === "inspect" && (
-              <FeatureInspector
-                measurement={selectedMeasurement}
-                feature={pickedFeature}
-                onClose={cancelDraw}
-                onSave={saveMeasurement}
-                onDelete={removeMeasurement}
-                onCompute={triggerCompute}
-                isNew={isInspectingNew}
-                saving={saving}
-                busy={selectedMeasurement ? busyIds.has(selectedMeasurement.id) : false}
-              />
-            )}
-          </div>
-        )}
+          {/* Right contextual panel — floats over the map */}
+          {rightPanel && (
+            <div className="pointer-events-auto absolute right-4 top-4 bottom-8 z-20 flex w-[280px] flex-col overflow-y-auto rounded-xl border border-white/[0.06] bg-[#111114]/85 shadow-[0_4px_24px_0_rgba(0,0,0,0.5)] backdrop-blur-md">
+              {rightPanel === "measure" && (
+                <MeasurePalette
+                  drawMode={drawMode}
+                  probing={probing}
+                  readout={readout}
+                  volumeMethod={volumeMethod}
+                  onVolumeMethod={setVolumeMethod}
+                  onStartDraw={startDraw}
+                  onStartProbe={startProbe}
+                  onClose={cancelDraw}
+                />
+              )}
+              {rightPanel === "inspect" && (
+                <FeatureInspector
+                  measurement={selectedMeasurement}
+                  feature={pickedFeature}
+                  onClose={cancelDraw}
+                  onSave={saveMeasurement}
+                  onDelete={removeMeasurement}
+                  onCompute={triggerCompute}
+                  isNew={isInspectingNew}
+                  saving={saving}
+                  busy={selectedMeasurement ? busyIds.has(selectedMeasurement.id) : false}
+                />
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       <style
@@ -2130,6 +2092,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           __html: `
         .cesium-container .cesium-viewer {
           background-color: #0A0D14;
+        }
+        .cesium-container .cesium-widget,
+        .cesium-container .cesium-widget canvas {
+          background-color: #0A0D14 !important;
         }
         .cesium-container .cesium-viewer-bottom {
           display: none !important;

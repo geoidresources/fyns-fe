@@ -11,7 +11,6 @@ import {
   Loader2,
   Map as MapIcon,
   Minus,
-  RotateCw,
   Settings2,
   Sparkles,
   Sun,
@@ -76,7 +75,6 @@ interface LayerPanelProps {
   surveyStatus?: string;
   terrainExaggeration: number;
   baseMap: string;
-  rotating: boolean;
   imageCount?: number;
   gcpCount?: number;
   hasImageLayer?: boolean;
@@ -98,7 +96,6 @@ interface LayerPanelProps {
   onToggleDesign: (key: string) => void;
   onTerrainExaggeration: (value: number) => void;
   onSetBaseMap: (value: string) => void;
-  onToggleRotate: () => void;
   onColorMapChange: (value: string) => void;
   onShadingChange: (value: string) => void;
   onContourIntervalChange: (intervalM: number) => void;
@@ -552,7 +549,6 @@ export function LayerPanel({
   surveyStatus,
   terrainExaggeration,
   baseMap,
-  rotating,
   imageCount,
   gcpCount,
   hasImageLayer = false,
@@ -574,7 +570,6 @@ export function LayerPanel({
   onToggleDesign,
   onTerrainExaggeration,
   onSetBaseMap,
-  onToggleRotate,
   onColorMapChange,
   onShadingChange,
   onContourIntervalChange,
@@ -739,30 +734,6 @@ export function LayerPanel({
               ))}
             </SelectContent>
           </Select>
-        </div>
-
-        <div className="flex h-9 items-center gap-2.5 px-2">
-          <RotateCw size={16} className={`shrink-0 ${rotating ? "text-[#C97A4E]" : "text-gray-500"}`} />
-          <span className="min-w-0 flex-1 text-[13px] text-gray-300">Rotate</span>
-          <button
-            type="button"
-            onClick={onToggleRotate}
-            className={`flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors ${
-              rotating
-                ? "border-[#C97A4E]/60 bg-[#C97A4E]/[0.12] text-[#C97A4E]"
-                : "border-white/[0.08] bg-[#19191d] text-gray-200 hover:border-white/20"
-            }`}
-          >
-            {rotating ? "Stop" : "Start"}
-          </button>
-          <button
-            type="button"
-            aria-label="Rotation settings"
-            onClick={() => toast.info("Rotation settings — coming soon")}
-            className="shrink-0 text-gray-500 transition-colors hover:text-gray-300"
-          >
-            <Settings2 size={14} />
-          </button>
         </div>
 
         <SunPositionRow
