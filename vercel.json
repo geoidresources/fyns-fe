@@ -1,5 +1,5 @@
 {
   "framework": "nextjs",
-  "installCommand": "npm install --ignore-scripts && npm run postinstall",
-  "buildCommand": "npm run build"
+  "installCommand": "pnpm install --frozen-lockfile",
+  "buildCommand": "pnpm run build"
 }

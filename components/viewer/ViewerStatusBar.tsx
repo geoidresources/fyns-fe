@@ -8,7 +8,7 @@ import {
   type Cartesian2,
   type Viewer as CesiumViewer,
 } from "cesium";
-import { Navigation } from "lucide-react";
+import { Navigation2 } from "lucide-react";
 
 import { pickScenePosition, toLngLatHeight, type LngLatHeight } from "@/lib/viewer/measure";
 
@@ -106,7 +106,10 @@ export function ViewerStatusBar({ viewerRef, ready, surveyDate }: ViewerStatusBa
       <div className="flex shrink-0 items-center gap-3">
         {camera && <span>ALT {formatAltitude(camera.heightMeters)}</span>}
         <span className="flex items-center gap-1" title="North">
-          <Navigation
+          {/* Navigation2 is a symmetric north-pointing arrowhead (points
+              straight up at 0°); plain Navigation points up-RIGHT, so its
+              rotation misreads the heading by ~45°. */}
+          <Navigation2
             size={10}
             className="text-[#C97A4E]"
             style={{ transform: `rotate(${-heading}deg)` }}

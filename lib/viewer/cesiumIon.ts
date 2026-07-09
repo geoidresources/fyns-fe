@@ -6,6 +6,8 @@ export const USE_WORLD_TERRAIN = CESIUM_ION_TOKEN.length > 0;
 declare global {
   interface Window {
     Cesium?: typeof import("cesium");
+    /** Read by Cesium.js at eval time to locate workers/assets — set by loadCesium(). */
+    CESIUM_BASE_URL?: string;
   }
 }
 

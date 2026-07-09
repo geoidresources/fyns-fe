@@ -23,8 +23,6 @@ import { BackgroundShell } from "@/components/layout/BackgroundShell";
 
 import { Toaster } from "sonner";
 
-const cesiumIonToken = (process.env.NEXT_PUBLIC_CESIUM_ION_TOKEN || "").trim();
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -35,18 +33,8 @@ export default function RootLayout({
       lang="en"
       className={`${inter.variable} ${ibmPlexMono.variable} h-full antialiased`}
     >
-      <head>
-        <link rel="stylesheet" href="/cesium/Widgets/widgets.css" />
-        <script dangerouslySetInnerHTML={{ __html: `window.CESIUM_BASE_URL = "/cesium/";` }} />
-        <script src="/cesium/Cesium.js" />
-        {cesiumIonToken ? (
-          <script
-            dangerouslySetInnerHTML={{
-              __html: `if (typeof Cesium !== "undefined") Cesium.Ion.defaultAccessToken = ${JSON.stringify(cesiumIonToken)};`,
-            }}
-          />
-        ) : null}
-      </head>
+      {/* Cesium loads on demand via lib/viewer/loadCesium.ts on routes that
+          render a viewer — keep the ~5MB script out of every page's head. */}
       <body className="min-h-full flex flex-col font-sans">
         <BackgroundShell>
           {children}

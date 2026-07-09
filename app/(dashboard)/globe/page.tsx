@@ -4,6 +4,8 @@ import React, { useState, useEffect } from "react";
 import { ActiveSitesPanel } from "@/components/dashboard/ActiveSitesPanel";
 import { SiteDetailPanel } from "@/components/dashboard/SiteDetailPanel";
 import dynamic from "next/dynamic";
+import { Loader2 } from "lucide-react";
+import { useCesiumReady } from "@/hooks/useCesiumReady";
 import { listProjects, type Project } from "@/lib/api/userSvc";
 
 const DashboardGlobe = dynamic(
@@ -14,6 +16,9 @@ const DashboardGlobe = dynamic(
 export default function GlobeViewPage() {
   const [selectedSiteId, setSelectedSiteId] = useState<string>("");
   const [projects, setProjects] = useState<Project[]>([]);
+  // DashboardGlobe's chunk resolves the `cesium` external at eval time, so
+  // the dynamic import must not start until window.Cesium exists.
+  const cesiumReady = useCesiumReady();
 
   useEffect(() => {
     listProjects()
@@ -34,11 +39,22 @@ export default function GlobeViewPage() {
 
       {/* Right Canvas */}
       <div className="flex-1 relative">
-        <DashboardGlobe projects={projects} selectedSiteId={selectedSiteId} />
+        {cesiumReady ? (
+          <DashboardGlobe projects={projects} selectedSiteId={selectedSiteId} />
+        ) : (
+          <div className="absolute inset-0 flex items-center justify-center bg-[#0A0D14] text-xs text-gray-500">
+            <Loader2 size={14} className="mr-2 animate-spin" />
+            Loading globe…
+          </div>
+        )}
 
         {/* Right Panel: Site Details */}
         {selectedSiteId && (
-          <SiteDetailPanel projectId={selectedSiteId} onClose={() => setSelectedSiteId("")} />
+          <SiteDetailPanel
+            key={selectedSiteId}
+            projectId={selectedSiteId}
+            onClose={() => setSelectedSiteId("")}
+          />
         )}
       </div>
     </div>

@@ -43,20 +43,28 @@ export function Topbar() {
 
       <div className="flex-1 flex justify-center px-8">
         <div className="relative w-full max-w-lg">
-          <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+          <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600" />
+          {/* Global search isn't wired to a backend yet — disabled honestly
+              rather than accepting input that goes nowhere. */}
           <input
             type="text"
-            placeholder="Search sites, surveys, features... ⌘K"
-            className="w-full bg-[#12141A] border border-[#1E2028] rounded-full py-2 pl-10 pr-4 text-sm text-gray-300 placeholder-gray-500 focus:outline-none focus:border-[#C97A4E] transition-colors"
+            disabled
+            title="Search coming soon"
+            placeholder="Search (coming soon)"
+            className="w-full bg-[#12141A] border border-[#1E2028] rounded-full py-2 pl-10 pr-4 text-sm text-gray-300 placeholder-gray-600 focus:outline-none focus:border-[#C97A4E] transition-colors disabled:cursor-not-allowed"
           />
         </div>
       </div>
 
       <div className="flex items-center gap-4">
-        <button className="text-gray-400 hover:text-gray-200 transition-colors">
+        <button
+          disabled
+          title="Notifications coming soon"
+          className="text-gray-600 cursor-not-allowed transition-colors"
+        >
           <Bell size={20} />
         </button>
-        
+
         <div className="relative" ref={dropdownRef}>
           <button 
             onClick={() => setIsDropdownOpen(!isDropdownOpen)}

@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { EyeIcon, EyeOffIcon } from "@hugeicons/core-free-icons";
+import { toast } from "sonner";
 
 const signUpSchema = z.object({
   fullName: z.string().min(2, { message: "Name must be at least 2 characters" }),
@@ -27,8 +28,13 @@ export default function SignUpPage() {
     resolver: zodResolver(signUpSchema),
   });
 
-  const onSubmit = (data: SignUpFormValues) => {
-    console.log("Sign Up:", data);
+  // No self-serve signup exists: user-svc has no public register endpoint
+  // (/user/signup returns 401 "Authorization is required" — invite/admin only).
+  // Never log the form (it holds a plaintext password); tell the user the truth.
+  const onSubmit = () => {
+    toast.info(
+      "Self-serve signup isn't available yet — contact your GEOID administrator or sales to get an account."
+    );
   };
 
   return (
@@ -38,11 +44,17 @@ export default function SignUpPage() {
         <p className="text-[#9CA3AF]">Start your 14-day free trial.</p>
       </div>
 
+      <div className="rounded-lg border border-[#C97A4E]/30 bg-[#C97A4E]/10 px-4 py-3 text-sm text-[#E5B99A]">
+        Accounts are provisioned by invitation. Contact your GEOID administrator
+        or sales to get access — self-serve signup isn&apos;t available yet.
+      </div>
+
       <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5">
         <div>
-          <Input 
-            type="text" 
-            placeholder="Your full name" 
+          <Input
+            type="text"
+            placeholder="Your full name"
+            autoComplete="name"
             {...register("fullName")}
             className="h-14 bg-[#16181D] border-white/5 placeholder:text-[#6B7280]"
           />
@@ -50,9 +62,10 @@ export default function SignUpPage() {
         </div>
 
         <div>
-          <Input 
-            type="email" 
-            placeholder="you@company.com" 
+          <Input
+            type="email"
+            placeholder="you@company.com"
+            autoComplete="email"
             {...register("email")}
             className="h-14 bg-[#16181D] border-white/5 placeholder:text-[#6B7280]"
           />
@@ -60,9 +73,10 @@ export default function SignUpPage() {
         </div>
 
         <div>
-          <Input 
-            type="text" 
-            placeholder="Company or organization name" 
+          <Input
+            type="text"
+            placeholder="Company or organization name"
+            autoComplete="organization"
             {...register("company")}
             className="h-14 bg-[#16181D] border-white/5 placeholder:text-[#6B7280]"
           />
@@ -70,9 +84,10 @@ export default function SignUpPage() {
         </div>
 
         <div className="relative">
-          <Input 
-            type={showPassword ? "text" : "password"} 
-            placeholder="Minimum 8 characters" 
+          <Input
+            type={showPassword ? "text" : "password"}
+            placeholder="Minimum 8 characters"
+            autoComplete="new-password"
             {...register("password")}
             className="h-14 bg-[#16181D] border-white/5 placeholder:text-[#6B7280] pr-12"
           />
@@ -95,12 +110,13 @@ export default function SignUpPage() {
         <div className="flex-grow border-t border-white/5"></div>
       </div>
 
+      {/* SSO isn't wired up yet — disabled rather than dead. */}
       <div className="flex gap-4">
-        <Button variant="secondary" className="flex-1 h-12 gap-2 bg-[#16181D]">
+        <Button variant="secondary" disabled title="SSO coming soon" className="flex-1 h-12 gap-2 bg-[#16181D]">
           <Image src="/icons/google.svg" width={16} height={16} alt="Google" />
           Google
         </Button>
-        <Button variant="secondary" className="flex-1 h-12 gap-2 bg-[#16181D]">
+        <Button variant="secondary" disabled title="SSO coming soon" className="flex-1 h-12 gap-2 bg-[#16181D]">
           <Image src="/icons/microsoft.svg" width={16} height={16} alt="Microsoft" />
           Microsoft
         </Button>

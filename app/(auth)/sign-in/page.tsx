@@ -41,7 +41,12 @@ export default function SignInPage() {
       setSession(result, data.remember);
 
       toast.success("Successfully logged in!");
-      router.push("/globe");
+      // Return the user to where they were sent from (proxy/redirectToSignIn set
+      // ?next=). Only accept same-origin absolute paths — reject "//host" and
+      // absolute URLs so a crafted ?next= can't open-redirect off-site.
+      const nextParam = new URLSearchParams(window.location.search).get("next");
+      const dest = nextParam && /^\/(?!\/)/.test(nextParam) ? nextParam : "/globe";
+      router.push(dest);
     } catch (error) {
       if (error instanceof Error) {
         toast.error(error.message);
@@ -62,9 +67,10 @@ export default function SignInPage() {
 
       <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5">
         <div>
-          <Input 
-            type="email" 
-            placeholder="you@company.com" 
+          <Input
+            type="email"
+            placeholder="you@company.com"
+            autoComplete="email"
             {...register("email")}
             className="h-14 bg-[#16181D] border-white/5 placeholder:text-[#6B7280]"
           />
@@ -72,9 +78,10 @@ export default function SignInPage() {
         </div>
 
         <div className="relative">
-          <Input 
-            type={showPassword ? "text" : "password"} 
-            placeholder="Enter your password" 
+          <Input
+            type={showPassword ? "text" : "password"}
+            placeholder="Enter your password"
+            autoComplete="current-password"
             {...register("password")}
             className="h-14 bg-[#16181D] border-white/5 placeholder:text-[#6B7280] pr-12"
           />
@@ -107,19 +114,20 @@ export default function SignInPage() {
         <div className="flex-grow border-t border-white/5"></div>
       </div>
 
+      {/* SSO isn't wired up yet — disabled rather than dead so the buttons don't
+          silently do nothing on click. */}
       <div className="flex gap-4">
-        <Button variant="secondary" className="flex-1 h-12 gap-2 bg-[#16181D]">
+        <Button variant="secondary" disabled title="SSO coming soon" className="flex-1 h-12 gap-2 bg-[#16181D]">
           <Image src="/icons/google.svg" width={16} height={16} alt="Google" />
           Google
         </Button>
-        <Button variant="secondary" className="flex-1 h-12 gap-2 bg-[#16181D]">
+        <Button variant="secondary" disabled title="SSO coming soon" className="flex-1 h-12 gap-2 bg-[#16181D]">
           <Image src="/icons/microsoft.svg" width={16} height={16} alt="Microsoft" />
           Microsoft
         </Button>
       </div>
 
       <div className="text-center mt-4">
-        <Link href="#" className="text-sm text-[#818CF8] hover:text-[#A5B4FC] transition-colors mb-6 inline-block">Forgot password?</Link>
         <p className="text-sm text-[#9CA3AF]">
           Don&apos;t have an account? <Link href="/sign-up" className="text-[#818CF8] hover:text-[#A5B4FC] transition-colors">Start free trial</Link>
         </p>

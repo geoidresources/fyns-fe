@@ -7,8 +7,6 @@ import * as THREE from "three";
 
 function GlobeModel() {
   const globeRef = useRef<THREE.Group>(null);
-  const pointsRef = useRef<THREE.Points>(null);
-
   const timeRef = useRef(0);
 
   useFrame((state, delta) => {

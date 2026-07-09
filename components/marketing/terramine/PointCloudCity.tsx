@@ -30,6 +30,9 @@ export function PointCloudCity() {
     let sy = 520;
 
     const init = () => {
+      // Re-init (on resize) restarts the draw loop — cancel the running one
+      // first so we don't stack a second requestAnimationFrame loop.
+      if (raf) cancelAnimationFrame(raf);
       const parent = canvas.parentElement;
       if (!parent) return;
       const W = parent.offsetWidth;
@@ -112,8 +115,22 @@ export function PointCloudCity() {
     );
     io.observe(canvas);
 
+    // Rebuild the scene when the parent width changes (window resize, sidebar
+    // toggle). Debounced so a drag-resize doesn't re-init on every frame, and
+    // width-gated so height-only notifications are ignored.
+    let resizeTimer = 0;
+    const ro = new ResizeObserver(() => {
+      if (!started) return;
+      if (canvas.parentElement?.offsetWidth === cW) return;
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(init, 150);
+    });
+    if (canvas.parentElement) ro.observe(canvas.parentElement);
+
     return () => {
       io.disconnect();
+      ro.disconnect();
+      window.clearTimeout(resizeTimer);
       if (raf) cancelAnimationFrame(raf);
     };
   }, []);

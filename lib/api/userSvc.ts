@@ -1,11 +1,15 @@
-import { apiFetch } from "@/lib/api/client";
+import { apiFetch, resolveServiceBase } from "@/lib/api/client";
 import type { AuthClient, AuthUser } from "@/lib/auth";
 
 // user-svc client — identity + projects. Base URL is env-driven; routes live
 // under /user-svc/api/v1.
 
-const BASE =
-  (process.env.NEXT_PUBLIC_USER_SVC_URL || "http://localhost:8081") + "/user-svc/api/v1";
+const BASE = resolveServiceBase(
+  process.env.NEXT_PUBLIC_USER_SVC_URL,
+  "/user-svc/api/v1",
+  "NEXT_PUBLIC_USER_SVC_URL",
+  "http://localhost:8081"
+);
 
 export interface LoginResponse {
   token: string;

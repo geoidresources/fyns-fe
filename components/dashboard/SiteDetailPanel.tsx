@@ -5,12 +5,7 @@ import { Upload01Icon, SatelliteIcon } from "@hugeicons/core-free-icons";
 import { useRouter } from "next/navigation";
 import { getProject, type Project } from "@/lib/api/userSvc";
 import { listSurveys, type Survey } from "@/lib/api/assetSvc";
-
-function formatSurveyDate(dateStr: string): string {
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return dateStr;
-  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
-}
+import { formatSurveyDate } from "@/lib/utils";
 
 export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onClose: () => void }) {
   const [projectData, setProjectData] = useState<Project | null>(null);
@@ -19,12 +14,22 @@ export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onC
 
   useEffect(() => {
     if (!projectId) return;
+    // Guard against out-of-order resolution: a fast project switch could let an
+    // earlier request's response overwrite the current project's data.
+    let cancelled = false;
     getProject(projectId)
-      .then(setProjectData)
+      .then((p) => {
+        if (!cancelled) setProjectData(p);
+      })
       .catch((err) => console.error("Failed to fetch project details:", err));
     listSurveys(projectId)
-      .then((res) => setSurveys(res.surveys || []))
+      .then((res) => {
+        if (!cancelled) setSurveys(res.surveys || []);
+      })
       .catch((err) => console.error("Failed to fetch surveys:", err));
+    return () => {
+      cancelled = true;
+    };
   }, [projectId]);
 
   if (!projectData) return null;

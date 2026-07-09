@@ -2,9 +2,10 @@ import React from "react";
 import { ChevronRight, Plus } from "lucide-react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Search01Icon } from "@hugeicons/core-free-icons";
+import type { Project } from "@/lib/api/userSvc";
 
 interface ActiveSitesPanelProps {
-  projects: any[];
+  projects: Project[];
   onSiteSelect: (id: string) => void;
   selectedSiteId: string;
 }

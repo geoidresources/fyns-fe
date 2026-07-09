@@ -4,8 +4,6 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Viewer, Entity, PointGraphics } from "resium";
 import type { CesiumComponentRef } from "resium";
 import { Cartesian3, Color, Viewer as CesiumViewer } from "cesium";
-import { Loader2 } from "lucide-react";
-import { useCesiumReady } from "@/hooks/useCesiumReady";
 import type { Project } from "@/lib/api/userSvc";
 import {
   projectWgs84Center,
@@ -24,7 +22,6 @@ export function DashboardGlobe({
   const centersRef = useRef<Map<string, Wgs84Center>>(new Map());
   const [viewerReady, setViewerReady] = useState(false);
   const [markerCenters, setMarkerCenters] = useState<Record<string, Wgs84Center>>({});
-  const cesiumReady = useCesiumReady();
 
   const handleViewerRef = useCallback((ref: CesiumComponentRef<CesiumViewer> | null) => {
     viewerRef.current = ref;
@@ -100,15 +97,6 @@ export function DashboardGlobe({
     };
   }, [viewerReady, selectedSiteId, projects]);
 
-  if (!cesiumReady) {
-    return (
-      <div className="absolute inset-0 flex items-center justify-center bg-[#0A0D14] text-xs text-gray-500">
-        <Loader2 size={14} className="mr-2 animate-spin" />
-        Loading globe…
-      </div>
-    );
-  }
-
   return (
     <div className="w-full h-full absolute inset-0">
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-[#C97A4E]/10 rounded-full blur-[120px] pointer-events-none z-0" />
@@ -117,6 +105,8 @@ export function DashboardGlobe({
         <Viewer
           ref={handleViewerRef}
           full
+          requestRenderMode
+          maximumRenderTimeChange={Infinity}
           timeline={false}
           animation={false}
           geocoder={false}

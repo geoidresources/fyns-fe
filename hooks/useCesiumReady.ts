@@ -1,37 +1,30 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { configureCesiumIon, isCesiumLoaded } from "@/lib/viewer/cesiumIon";
+import { loadCesium } from "@/lib/viewer/loadCesium";
 
 /**
- * Hard refresh clears cache and can let React hydrate before /cesium/Cesium.js
- * finishes — gate any resium <Viewer> on this so we never mount into a broken
- * global.
+ * Kick off the on-demand Cesium load and report readiness. Gate RENDERING of
+ * any component that imports "cesium" (SurveyViewer, DashboardGlobe) on this —
+ * those modules resolve the `cesium` external at chunk-eval time, so mounting
+ * them before window.Cesium exists throws.
  */
 export function useCesiumReady(): boolean {
-  const [ready, setReady] = useState(() => {
-    if (!isCesiumLoaded()) return false;
-    configureCesiumIon();
-    return true;
-  });
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    if (ready) return;
-
     let cancelled = false;
-    const poll = window.setInterval(() => {
-      if (!isCesiumLoaded()) return;
-      window.clearInterval(poll);
-      if (cancelled) return;
-      configureCesiumIon();
-      setReady(true);
-    }, 50);
-
+    loadCesium()
+      .then(() => {
+        if (!cancelled) setReady(true);
+      })
+      .catch((err) => {
+        console.error("Cesium failed to load:", err);
+      });
     return () => {
       cancelled = true;
-      window.clearInterval(poll);
     };
-  }, [ready]);
+  }, []);
 
   return ready;
 }

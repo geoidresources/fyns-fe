@@ -31,12 +31,15 @@ import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 export type DrawMode = "polygon" | "polyline";
 
 /** Preset carried by a draw tool: backend kind, target folder, palette label,
- * and whether the polyline readout should report a grade (slope tool). */
+ * whether the polyline readout should report a grade (slope tool), and the
+ * namespaced key of the toolbar button that launched it (so exactly that one
+ * button highlights — multiple toolbars are on screen at once). */
 export interface DrawOptions {
   kind?: "volume" | "cross_section";
   folder?: string;
   label?: string;
   slope?: boolean;
+  toolKey?: string;
 }
 
 const UNGROUPED = "Ungrouped";
@@ -151,10 +154,15 @@ export function MeasurementPanel({
       else byFolder.set(folder, [m]);
     }
     const entries = [...byFolder.entries()];
-    if (sortRecent) {
-      for (const [, arr] of entries) {
-        arr.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-      }
+    // Default ("Sorting by name") sorts alphabetically; the toggle switches to
+    // most-recently-updated first. Without the name branch the default just
+    // preserved source order, so the "by name" label was a lie.
+    for (const [, arr] of entries) {
+      arr.sort((a, b) =>
+        sortRecent
+          ? b.updated_at.localeCompare(a.updated_at)
+          : a.name.localeCompare(b.name)
+      );
     }
     // Preserve first-appearance order (the source controls grouping order);
     // Ungrouped always sinks to the bottom.
@@ -285,6 +293,14 @@ export function MeasurementPanel({
                         >
                           {measurementLabel(m)}
                         </button>
+                        {m.demo && (
+                          <span
+                            title="Sample data — not from this survey"
+                            className="shrink-0 rounded-[3px] border border-white/10 px-1 text-[9px] uppercase tracking-wide text-gray-500"
+                          >
+                            demo
+                          </span>
+                        )}
                         {!m.demo && (
                           <div className="hidden shrink-0 items-center gap-1 group-hover:flex">
                             {canCompute && (

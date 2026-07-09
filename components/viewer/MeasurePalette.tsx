@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -62,15 +62,18 @@ const TOOLS: PaletteTool[] = [
 ];
 
 interface MeasurePaletteProps {
-  drawMode: DrawMode | null;
-  probing: boolean;
+  activeToolKey: string | null;
   readout: LiveReadout;
   volumeMethod: string;
   onVolumeMethod: (method: string) => void;
   onStartDraw: (mode: DrawMode, opts?: DrawOptions) => void;
-  onStartProbe: () => void;
+  onStartProbe: (toolKey?: string) => void;
   onClose: () => void;
 }
+
+// Namespaced so this palette's buttons never collide with the tool rail or the
+// top draw toolbar in the shared activeToolKey.
+const keyFor = (id: PaletteToolId) => `palette:${id}`;
 
 function ReadoutRow({ label, value }: { label: string; value: string }) {
   return (
@@ -82,8 +85,7 @@ function ReadoutRow({ label, value }: { label: string; value: string }) {
 }
 
 export function MeasurePalette({
-  drawMode,
-  probing,
+  activeToolKey,
   readout,
   volumeMethod,
   onVolumeMethod,
@@ -91,15 +93,15 @@ export function MeasurePalette({
   onStartProbe,
   onClose,
 }: MeasurePaletteProps) {
-  // Which grid card is lit — local, like the tool rails: falls back once the
-  // live draw/probe ends, so no state-sync effect is needed.
-  const [tool, setTool] = useState<PaletteToolId | null>(null);
-  const activeTool = drawMode || probing ? tool : null;
-
   const handle = (t: PaletteTool) => {
-    setTool(t.id);
-    if (t.probe) onStartProbe();
-    else if (t.draw) onStartDraw(t.draw, t.opts);
+    // Re-clicking the active tool cancels it — starting the same draw again
+    // would call startDraw and discard the in-progress vertices.
+    if (activeToolKey === keyFor(t.id)) {
+      onClose();
+      return;
+    }
+    if (t.probe) onStartProbe(keyFor(t.id));
+    else if (t.draw) onStartDraw(t.draw, { ...t.opts, toolKey: keyFor(t.id) });
   };
 
   return (
@@ -113,7 +115,7 @@ export function MeasurePalette({
 
       <div className="grid grid-cols-2 gap-2">
         {TOOLS.map((t) => {
-          const active = activeTool === t.id;
+          const active = activeToolKey === keyFor(t.id);
           return (
             <button
               key={t.id}

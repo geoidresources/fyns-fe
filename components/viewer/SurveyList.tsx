@@ -11,12 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { listSurveys, type Survey } from "@/lib/api/assetSvc";
-
-function formatSurveyDate(dateStr: string): string {
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return dateStr;
-  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
-}
+import { formatSurveyDate } from "@/lib/utils";
 
 /** Human-readable status label from asset-svc survey lifecycle enum. */
 function formatStatus(status: string): string {
@@ -53,6 +48,17 @@ export function SurveyList({
   const router = useRouter();
   const [surveys, setSurveys] = useState<Survey[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Reset to the loading state the moment projectId changes, so switching
+  // projects never briefly shows the previous list or a stale error. Done as a
+  // render-phase adjustment (React's documented pattern) rather than in the
+  // effect, which would trigger a cascading-render lint error.
+  const [loadedProjectId, setLoadedProjectId] = useState(projectId);
+  if (loadedProjectId !== projectId) {
+    setLoadedProjectId(projectId);
+    setSurveys(null);
+    setError(null);
+  }
 
   useEffect(() => {
     let cancelled = false;

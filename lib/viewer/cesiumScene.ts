@@ -27,6 +27,10 @@ export function makeBaseImageryProvider(id: string): UrlTemplateImageryProvider 
  */
 export function configureCesiumScene(viewer: CesiumViewer): void {
   const { scene } = viewer;
+  // Pairs with the <Viewer requestRenderMode> prop: never re-render just
+  // because simulation time advanced — every scene mutation in the app calls
+  // scene.requestRender() explicitly. Cuts idle GPU/CPU to near zero.
+  scene.maximumRenderTimeChange = Infinity;
   scene.backgroundColor = APP_BACKGROUND;
   scene.fog.enabled = false;
   if (scene.skyBox) scene.skyBox.show = false;

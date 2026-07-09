@@ -64,13 +64,16 @@ const TOOLS: ToolDef[] = [
 ];
 
 interface ViewerDrawToolbarProps {
-  drawMode: DrawMode | null;
-  probing: boolean;
+  activeToolKey: string | null;
   onStartDraw: (mode: DrawMode, opts?: DrawOptions) => void;
-  onStartProbe: () => void;
+  onStartProbe: (toolKey?: string) => void;
   onCancelDraw: () => void;
   onUndo: () => void;
 }
+
+// Namespaced so this toolbar's buttons never collide with the left rail or the
+// measure palette in the shared activeToolKey.
+const keyFor = (id: ToolId) => `draw:${id}`;
 
 /** Icon-only pill that pops its label out on hover and collapses back on leave. */
 function ToolPill({
@@ -134,39 +137,29 @@ function ToolPill({
 }
 
 export function ViewerDrawToolbar({
-  drawMode,
-  probing,
+  activeToolKey,
   onStartDraw,
   onStartProbe,
   onCancelDraw,
   onUndo,
 }: ViewerDrawToolbarProps) {
-  const [tool, setTool] = useState<ToolId>("point");
-
-  // While a draw/probe is active the chosen tool stays lit; once it ends fall
-  // back to Point — derived, so no effect/state-sync is needed.
-  const activeTool: ToolId = drawMode || probing ? tool : "point";
-
   const handle = (t: ToolDef) => {
     if (t.probe) {
       // Re-clicking the active probe tool ends it.
-      if (probing && activeTool === t.id) {
-        setTool("point");
+      if (activeToolKey === keyFor(t.id)) {
         onCancelDraw();
         return;
       }
-      setTool(t.id);
-      onStartProbe();
+      onStartProbe(keyFor(t.id));
       return;
     }
     if (t.draw) {
-      if (drawMode && activeTool === t.id) {
-        setTool("point");
+      // Re-clicking the active draw tool cancels it.
+      if (activeToolKey === keyFor(t.id)) {
         onCancelDraw();
         return;
       }
-      setTool(t.id);
-      onStartDraw(t.draw, t.opts);
+      onStartDraw(t.draw, { ...t.opts, toolKey: keyFor(t.id) });
       return;
     }
     if (t.id === "undo") {
@@ -181,7 +174,7 @@ export function ViewerDrawToolbar({
       {TOOLS.map((t) => (
         <React.Fragment key={t.id}>
           {t.divider && <div className="mx-1 h-5 w-px bg-white/[0.08]" />}
-          <ToolPill tool={t} active={activeTool === t.id} onClick={() => handle(t)} />
+          <ToolPill tool={t} active={activeToolKey === keyFor(t.id)} onClick={() => handle(t)} />
         </React.Fragment>
       ))}
     </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
 import { motion } from "framer-motion";
 import {
   Bomb,
@@ -72,35 +72,30 @@ const TOOLS: ToolDef[] = [
 ];
 
 interface ViewerToolRailProps {
-  drawMode: DrawMode | null;
+  activeToolKey: string | null;
   onStartDraw: (mode: DrawMode, opts?: DrawOptions) => void;
   onCancelDraw: () => void;
   onExport: () => void;
 }
 
-export function ViewerToolRail({ drawMode, onStartDraw, onCancelDraw, onExport }: ViewerToolRailProps) {
-  const [tool, setTool] = useState<ToolId>("select");
+// Namespaced so this rail's buttons never collide with the top draw toolbar or
+// the measure palette in the shared activeToolKey.
+const keyFor = (id: ToolId) => `rail:${id}`;
 
-  // Highlight reflects the live draw state: while a draw is active, the chosen
-  // draw tool stays lit; once it finishes/cancels (drawMode null), fall back to
-  // Select — no effect/state-sync needed.
-  const activeTool: ToolId = drawMode ? tool : "select";
-
+export function ViewerToolRail({ activeToolKey, onStartDraw, onCancelDraw, onExport }: ViewerToolRailProps) {
   const handle = (t: ToolDef) => {
     if (t.id === "select") {
-      setTool("select");
       onCancelDraw();
       return;
     }
     if (t.draw) {
-      // Re-clicking the active draw tool cancels it.
-      if (drawMode && activeTool === t.id) {
-        setTool("select");
+      // Re-clicking the active draw tool cancels it (keeping its vertices is
+      // pointless — the draw restarts otherwise, discarding them).
+      if (activeToolKey === keyFor(t.id)) {
         onCancelDraw();
         return;
       }
-      setTool(t.id);
-      onStartDraw(t.draw, t.opts);
+      onStartDraw(t.draw, { ...t.opts, toolKey: keyFor(t.id) });
       return;
     }
     if (t.id === "export") {
@@ -114,7 +109,7 @@ export function ViewerToolRail({ drawMode, onStartDraw, onCancelDraw, onExport }
     <TooltipProvider delayDuration={300}>
       <div className="flex w-12 shrink-0 flex-col items-center gap-1.5 border-r border-white/[0.08] bg-[#111114] py-2 z-10">
         {TOOLS.map((t) => {
-          const active = activeTool === t.id;
+          const active = t.id === "select" ? activeToolKey === null : activeToolKey === keyFor(t.id);
           return (
             <React.Fragment key={t.id}>
               {t.divider && <div className="my-0.5 h-px w-7 bg-white/[0.08]" />}

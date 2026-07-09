@@ -11,7 +11,33 @@ interface ContactSalesModalProps {
   onClose: () => void;
 }
 
+// TODO(confirm): verify this is the correct inbound sales address before ship.
+// There is no backend endpoint for this form, so submissions open the user's
+// mail client addressed here rather than being silently discarded.
+const SALES_EMAIL = "sales@geoidresources.com";
+
 export function ContactSalesModal({ isOpen, onClose }: ContactSalesModalProps) {
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const firstName = String(fd.get("firstName") || "").trim();
+    const lastName = String(fd.get("lastName") || "").trim();
+    const email = String(fd.get("email") || "").trim();
+    const company = String(fd.get("company") || "").trim();
+    const subject = `Demo request — ${company || "New lead"}`;
+    const body = [
+      `Name: ${firstName} ${lastName}`.trim(),
+      `Email: ${email}`,
+      `Company: ${company}`,
+      "",
+      "I'd like to schedule a demo of GEOID TerraMine.",
+    ].join("\n");
+    window.location.href = `mailto:${SALES_EMAIL}?subject=${encodeURIComponent(
+      subject
+    )}&body=${encodeURIComponent(body)}`;
+    onClose();
+  };
+
   // Prevent scrolling when modal is open
   React.useEffect(() => {
     if (isOpen) {
@@ -54,26 +80,26 @@ export function ContactSalesModal({ isOpen, onClose }: ContactSalesModalProps) {
                 Fill out the form below and our team will get back to you shortly to schedule a demo.
               </p>
 
-              <form className="flex flex-col gap-4" onSubmit={(e) => { e.preventDefault(); onClose(); }}>
+              <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
                 <div className="flex gap-4">
                   <div className="flex-1">
                     <label className="text-sm font-medium text-[#9CA3AF] mb-1 block">First Name</label>
-                    <Input placeholder="Jane" required />
+                    <Input name="firstName" placeholder="Jane" autoComplete="given-name" required />
                   </div>
                   <div className="flex-1">
                     <label className="text-sm font-medium text-[#9CA3AF] mb-1 block">Last Name</label>
-                    <Input placeholder="Doe" required />
+                    <Input name="lastName" placeholder="Doe" autoComplete="family-name" required />
                   </div>
                 </div>
-                
+
                 <div>
                   <label className="text-sm font-medium text-[#9CA3AF] mb-1 block">Work Email</label>
-                  <Input type="email" placeholder="jane@company.com" required />
+                  <Input name="email" type="email" placeholder="jane@company.com" autoComplete="email" required />
                 </div>
 
                 <div>
                   <label className="text-sm font-medium text-[#9CA3AF] mb-1 block">Company Name</label>
-                  <Input placeholder="Acme Mining Co." required />
+                  <Input name="company" placeholder="Acme Mining Co." autoComplete="organization" required />
                 </div>
 
                 <Button type="submit" size="lg" className="w-full mt-4">

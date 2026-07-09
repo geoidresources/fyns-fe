@@ -1,11 +1,15 @@
-import { apiFetch } from "@/lib/api/client";
+import { apiFetch, resolveServiceBase } from "@/lib/api/client";
 
 // asset-svc client — surveys, render manifest, measurements. Base URL is
 // env-driven; routes live under /asset-svc/api/v1. Types mirror the Go DTOs in
 // asset-svc-refactor/internal/dtos (field names matter).
 
-const BASE =
-  (process.env.NEXT_PUBLIC_ASSET_SVC_URL || "http://localhost:8082") + "/asset-svc/api/v1";
+const BASE = resolveServiceBase(
+  process.env.NEXT_PUBLIC_ASSET_SVC_URL,
+  "/asset-svc/api/v1",
+  "NEXT_PUBLIC_ASSET_SVC_URL",
+  "http://localhost:8082"
+);
 
 /** Minimal GeoJSON geometry (Polygon / LineString / …). */
 export interface GeoJsonGeometry {

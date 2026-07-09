@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Vendored/generated trees — linting the 5.8MB Cesium build drowns real
+    // errors in ~31k vendor findings and breaks CI.
+    "public/cesium/**",
+    ".pnpm-store/**",
   ]),
 ]);
 

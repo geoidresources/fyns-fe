@@ -95,7 +95,6 @@ import {
 import { computeTilesetFootprint } from "@/lib/viewer/footprint";
 import { USE_WORLD_TERRAIN } from "@/lib/viewer/cesiumIon";
 import { configureCesiumScene, makeBaseImageryProvider } from "@/lib/viewer/cesiumScene";
-import { useCesiumReady } from "@/hooks/useCesiumReady";
 import { CameraJoystick } from "@/components/viewer/CameraJoystick";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -123,7 +122,7 @@ const ACCENT = Color.fromCssColorString("#C97A4E");
 // Terrain as the base so a survey sits inside real surrounding elevation — the
 // textured reality mesh renders ON the ground (no floating/cliff), the
 // "digital-twin" look. Without a token it stays the flat ellipsoid + DSM-drape.
-// Ion token is applied in app/layout.tsx + useCesiumReady before the viewer mounts.
+// Ion token is applied by loadCesium() before the page renders this component.
 
 // ------------------------------------------------------------- url helpers
 
@@ -240,7 +239,6 @@ interface PendingDraw {
 }
 
 export function SurveyViewer({ surveyId }: { surveyId: string }) {
-  const cesiumReady = useCesiumReady();
   // The Cesium viewer is a mutable external object — keep it in a ref and use
   // a ready flag to (re)run the effects that depend on it.
   const viewerRef = useRef<CesiumViewer | null>(null);
@@ -268,6 +266,12 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const [draftPoints, setDraftPoints] = useState<Cartesian3[]>([]);
   const [hoverPoint, setHoverPoint] = useState<Cartesian3 | null>(null);
   const [activeDrawOpts, setActiveDrawOpts] = useState<DrawOptions | null>(null);
+  // Namespaced key ("palette:line", "rail:distance", "draw:point"…) of the
+  // toolbar button that launched the active draw/probe. Shared across all the
+  // on-screen toolbars so exactly the initiating button lights up — each keeps
+  // no local highlight state of its own, which used to leave stale highlights
+  // in the toolbars that didn't start the operation.
+  const [activeToolKey, setActiveToolKey] = useState<string | null>(null);
   const [volumeMethod, setVolumeMethod] = useState("smart-base");
   const [terrainExaggeration, setTerrainExaggeration] = useState(1);
   const [baseMap, setBaseMap] = useState("satellite");
@@ -303,6 +307,9 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const probeEntityRef = useRef<Entity | null>(null);
   const measurementDsRef = useRef<GeoJsonDataSource | null>(null);
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
+  // Signature of the last measurement set pushed to state — skips redundant
+  // re-renders + Cesium overlay rebuilds when a poll returns identical data.
+  const measurementsSigRef = useRef<string>("");
   const pendingDrawRef = useRef<PendingDraw | null>(null);
   // Data footprints (lon/lat rings as Cartesian3) per survey tileset, computed
   // from each tileset's leaf occupancy once it loads; drives terrain clipping.
@@ -365,6 +372,20 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   );
   const imageCount = manifest?.layers.vectors?.find((v) => v.role === "image_positions")?.feature_count;
   const gcpCount = manifest?.layers.vectors?.find((v) => v.role === "gcps")?.feature_count;
+
+  // Always-current mirrors of the control arrays. The toggle/opacity handlers
+  // read these to compute the next state and run their Cesium side effects
+  // OUTSIDE the setState updater — React 19 + StrictMode invoke updaters twice,
+  // so side effects placed inside them (applyTerrain, GeoJsonDataSource.load)
+  // fire twice: double terrain loads and leaked/duplicated datasources.
+  const layerControlsRef = useRef<LayerControl[]>([]);
+  const designControlsRef = useRef<DesignControl[]>([]);
+  useEffect(() => {
+    layerControlsRef.current = layerControls;
+  }, [layerControls]);
+  useEffect(() => {
+    designControlsRef.current = designControls;
+  }, [designControls]);
 
   // Updates a layer row's async meta (loading spinner / load error) once its
   // tileset or vector fetch settles.
@@ -447,6 +468,12 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         }
       }
       prevStatusesRef.current = new Map(list.map((m) => [m.id, m.status]));
+      // Only re-render (and rebuild the Cesium measurement overlay) when the set
+      // actually changed — the 5s compute poll otherwise churns the whole
+      // GeoJsonDataSource every tick even while nothing moves.
+      const sig = list.map((m) => `${m.id}:${m.status}:${m.updated_at}`).join("|");
+      if (sig === measurementsSigRef.current) return;
+      measurementsSigRef.current = sig;
       setMeasurements(list);
     } catch (err) {
       console.error("Failed to fetch measurements:", err);
@@ -535,6 +562,19 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
 
   // -------------------------------------------------------- scene setup
 
+  // RequestScheduler is a static singleton shared by every Cesium instance in
+  // the tab. The layer-build effect tunes its burst caps for this viewer's
+  // heavy tileset streaming; capture the originals on mount and restore them on
+  // unmount so a later globe/dashboard mount doesn't inherit this viewer's caps.
+  useEffect(() => {
+    const savedPerServer = RequestScheduler.maximumRequestsPerServer;
+    const savedTotal = RequestScheduler.maximumRequests;
+    return () => {
+      RequestScheduler.maximumRequestsPerServer = savedPerServer;
+      RequestScheduler.maximumRequests = savedTotal;
+    };
+  }, []);
+
   // One-time scene configuration: space-dark background (no starfield), no fog,
   // and a token-free Carto basemap at layer 0 so geographic context survives
   // Ion imagery timeouts (common after hard refresh). World Terrain still
@@ -543,17 +583,13 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     const viewer = viewerRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed()) return;
     configureCesiumScene(viewer);
-    if (viewer.imageryLayers.length === 0) {
-      baseImageryRef.current = viewer.imageryLayers.addImageryProvider(
-        makeBaseImageryProvider("satellite"),
-        0
-      );
-    }
     viewer.scene.requestRender();
   }, [viewerReady]);
 
-  // Base-map selector: swap the bottom imagery layer, keeping survey ortho
-  // pyramids (added on top) undisturbed.
+  // Base-map selector — also seeds the initial base layer. Swaps the bottom
+  // imagery layer, keeping survey ortho pyramids (added on top) undisturbed.
+  // Owns baseImageryRef exclusively so the base layer is only ever added here
+  // (the scene-setup effect adding it too used to double-stack layer 0).
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed()) return;
@@ -742,16 +778,24 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         },
       })
         .then((tileset) => {
-          if (cancelled || viewer.isDestroyed()) return;
+          // The effect re-ran (layer signature changed) or the viewer went away
+          // while fromUrl was in flight — the tileset was allocated but never
+          // parented, so destroy it here or it leaks GPU memory + open requests.
+          if (cancelled || viewer.isDestroyed()) {
+            tileset.destroy();
+            return;
+          }
           correctGeographicRootTransform(tileset);
           tileset.show = visibleRef.current.get(key) ?? false;
           viewer.scene.primitives.add(tileset);
           handles.set(key, { type: "tileset", tileset });
           registerSurveyBounds(tileset);
           updateCloudPreload();
+          viewer.scene.requestRender();
           patchControl(key, { loading: false });
         })
         .catch((err) => {
+          if (cancelled) return;
           console.error("Failed to load point cloud tileset:", err);
           patchControl(key, { loading: false, error: "Failed to load point cloud tiles" });
         });
@@ -765,7 +809,12 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       const tilesetUrl = l.tileset_url;
       Cesium3DTileset.fromUrl(tilesetUrl, tilesetBudget)
         .then((tileset) => {
-          if (cancelled || viewer.isDestroyed()) return;
+          // See the point-cloud loader: a tileset resolved after the effect
+          // re-ran was never parented and must be destroyed, not leaked.
+          if (cancelled || viewer.isDestroyed()) {
+            tileset.destroy();
+            return;
+          }
           // The ortho-textured reality mesh already bakes in real capture
           // lighting, so Cesium's directional shading double-darkens the
           // sun-away faces vs the unlit base imagery. Lift the tileset light so
@@ -776,23 +825,44 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           viewer.scene.primitives.add(tileset);
           handles.set(key, { type: "tileset", tileset });
           registerSurveyBounds(tileset);
+          viewer.scene.requestRender();
           patchControl(key, { loading: false });
-          // Clipping only engages once the mesh has demonstrated a full
-          // cover of the view (initialTilesLoaded) — cutting the globe any
-          // earlier exposes the void where tiles haven't streamed in. No
-          // timer override: a mesh whose leaf tiles exceed the cache budget
-          // (no LOD pyramid) never reaches full cover and must keep the
-          // globe rendering under it. It does stop holding the hidden-cloud
-          // preload hostage after 30s — only clipping demands real cover.
+          // Clipping only engages once the mesh has demonstrated a full cover
+          // of the view — cutting the globe any earlier exposes the void where
+          // tiles haven't streamed in. No timer override: a mesh whose leaf
+          // tiles exceed the cache budget (no LOD pyramid) can never cover and
+          // must keep the globe rendering under it. It does stop holding the
+          // hidden-cloud preload hostage after 30s — only clipping demands
+          // real cover.
+          //
+          // "All tiles loaded" alone is NOT proof of cover: when the tiles the
+          // view needs exceed cacheBytes + maximumCacheOverflowBytes, Cesium
+          // raises memoryAdjustedScreenSpaceError (2%/frame) until the needed
+          // set fits the budget, then reports loaded — with permanent holes on
+          // a leaf-only tileset, where no coarser ancestor exists to stand in
+          // for the leaves it couldn't afford. The elevated adjusted SSE is
+          // Cesium's own confession that cover was unaffordable; refuse to
+          // clip while it shows. (Runtime getter, @private in the typings but
+          // a stable documented member; if absent, assume no pressure.)
+          const fullCoverAffordable = () => {
+            const adjusted = (
+              tileset as unknown as { memoryAdjustedScreenSpaceError?: number }
+            ).memoryAdjustedScreenSpaceError;
+            return adjusted === undefined || adjusted <= tileset.maximumScreenSpaceError;
+          };
           const markMeshReady = () => {
-            if (cancelled || meshReadyRef.current.has(key)) return;
+            if (cancelled || meshReadyRef.current.has(key) || !fullCoverAffordable()) return;
             meshReadyRef.current.add(key);
             setClipInputsVersion((v) => v + 1);
             updateCloudPreload();
           };
           if (tileset.tilesLoaded) markMeshReady();
           else {
-            tileset.initialTilesLoaded.addEventListener(markMeshReady);
+            // allTilesLoaded, not initialTilesLoaded: it re-fires on every
+            // later everything-settled transition, so a mesh that was under
+            // memory pressure at its first settle is re-evaluated when the
+            // pressure clears instead of losing its only chance to clip.
+            tileset.allTilesLoaded.addEventListener(markMeshReady);
             setTimeout(() => {
               if (cancelled || meshPreloadWaiverRef.current.has(key)) return;
               meshPreloadWaiverRef.current.add(key);
@@ -813,6 +883,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
           );
         })
         .catch((err) => {
+          if (cancelled) return;
           console.error("Failed to load site model tileset:", err);
           patchControl(key, { loading: false, error: "Failed to load reality mesh tiles" });
         });
@@ -968,8 +1039,20 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     if (!viewerReady || !viewer || viewer.isDestroyed()) return;
     viewer.scene.globe.enableLighting = sunLightingEnabled;
     if (sunLightingEnabled) {
+      // sunHour is LOCAL solar time at the site. Cesium's clock is UTC, so
+      // offset by the camera longitude (15° ≈ 1 h) before stamping UTC hours —
+      // otherwise noon lights the site as if it were noon in Greenwich, which
+      // is dawn/dusk for anywhere far from the prime meridian.
+      const lng = CesiumMath.toDegrees(viewer.camera.positionCartographic.longitude);
+      const t = ((sunHour - lng / 15) % 24 + 24) % 24;
+      let h = Math.floor(t);
+      let m = Math.round((t - h) * 60);
+      if (m === 60) {
+        h = (h + 1) % 24;
+        m = 0;
+      }
       const d = JulianDate.toDate(JulianDate.now());
-      d.setUTCHours(sunHour, 0, 0, 0);
+      d.setUTCHours(h, m, 0, 0);
       viewer.clock.currentTime = JulianDate.fromDate(d);
     }
     viewer.scene.requestRender();
@@ -989,7 +1072,12 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         baseTerrainRef.current = await createWorldTerrainAsync();
         return baseTerrainRef.current;
       } catch (err) {
+        // Do NOT cache the ellipsoid fallback: World Terrain failures are
+        // usually transient (token refresh, network) — caching would pin the
+        // globe flat for the rest of the session. Return a fresh ellipsoid so
+        // the next toggle retries the real provider.
         console.error("Cesium World Terrain failed (check ion token); using ellipsoid:", err);
+        return new EllipsoidTerrainProvider();
       }
     }
     baseTerrainRef.current = new EllipsoidTerrainProvider();
@@ -1001,129 +1089,146 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   // resolution must not overwrite the newest choice.
   const terrainSeqRef = useRef(0);
   const applyTerrain = useCallback(
-    async (url: string | null) => {
+    async (url: string | null): Promise<boolean> => {
       const viewer = viewerRef.current;
-      if (!viewer || viewer.isDestroyed()) return;
+      if (!viewer || viewer.isDestroyed()) return false;
       const seq = ++terrainSeqRef.current;
       if (!url) {
         const base = await ensureBaseTerrain();
-        if (!viewer.isDestroyed() && seq === terrainSeqRef.current) viewer.terrainProvider = base;
-        return;
+        if (viewer.isDestroyed() || seq !== terrainSeqRef.current) return false;
+        viewer.terrainProvider = base;
+        viewer.scene.requestRender();
+        return true;
       }
       try {
         const provider = await CesiumTerrainProvider.fromUrl(url, { requestVertexNormals: true });
-        if (!viewer.isDestroyed() && seq === terrainSeqRef.current) viewer.terrainProvider = provider;
+        if (viewer.isDestroyed() || seq !== terrainSeqRef.current) return false;
+        viewer.terrainProvider = provider;
+        viewer.scene.requestRender();
+        return true;
       } catch (err) {
         console.error("Failed to load terrain:", err);
         toast.error("Failed to load terrain tiles");
+        return false;
       }
     },
     [ensureBaseTerrain]
   );
 
-  // Set the default terrain once per survey: the default-visible DSM (no-token
-  // mode, ortho drapes on relief) or the World Terrain base (token mode, so the
-  // reality mesh sits on the ground). handleToggle owns terrain after that; the
-  // ellipsoid guard keeps this from fighting a user toggle (the layer-build
-  // effect resets the provider to the ellipsoid before this runs).
-  const defaultTerrainSurveyRef = useRef<string | null>(null);
+  // Set the default terrain once per layer build: the default-visible DSM
+  // (no-token mode, ortho drapes on relief) or the World Terrain base (token
+  // mode, so the reality mesh sits on the ground). handleToggle owns terrain
+  // after that; the ellipsoid guard keeps this from fighting a user toggle (the
+  // layer-build effect resets the provider to the ellipsoid before this runs).
+  //
+  // Keyed on the LAYER SIGNATURE, not survey.id: a manifest poll that adds a
+  // layer rebuilds (resetting the provider to ellipsoid) without changing the
+  // survey id, and this must re-apply the default terrain or the globe stays
+  // flat. The ref is set only after applyTerrain resolves true, so a transient
+  // World Terrain failure re-attempts on the next render instead of latching.
+  const defaultTerrainSigRef = useRef<string | null>(null);
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed() || !manifest) return;
-    const sig = manifest.survey.id;
-    if (defaultTerrainSurveyRef.current === sig) return;
+    const sig = layersSignatureRef.current;
+    if (!sig || defaultTerrainSigRef.current === sig) return;
     if (!(viewer.terrainProvider instanceof EllipsoidTerrainProvider)) return;
     const t = layerControls.find((c) => c.category === "terrain" && c.visible);
     if (t) {
       const h = handlesRef.current.get(t.key);
       if (h?.type === "terrain") {
-        defaultTerrainSurveyRef.current = sig;
-        applyTerrain(h.url);
+        applyTerrain(h.url).then((ok) => {
+          if (ok) defaultTerrainSigRef.current = sig;
+        });
       }
     } else if (USE_WORLD_TERRAIN) {
-      defaultTerrainSurveyRef.current = sig;
-      applyTerrain(null); // resolves to the World Terrain base
+      applyTerrain(null).then((ok) => {
+        // resolves to the World Terrain base
+        if (ok) defaultTerrainSigRef.current = sig;
+      });
     }
   }, [viewerReady, manifest, layerControls, applyTerrain]);
 
   const handleToggle = useCallback(
     (key: string) => {
-      setLayerControls((prev) => {
-        const target = prev.find((l) => l.key === key);
-        if (!target) return prev;
-        const turningOn = !target.visible;
-        const isSiteModel = key.startsWith("sitemodel-");
-        const next = prev.map((l) => {
-          if (l.key === key) return { ...l, visible: !l.visible };
-          // Terrain layers are exclusive — turning one on turns siblings off.
-          if (target.category === "terrain" && l.category === "terrain" && turningOn) {
-            return { ...l, visible: false };
-          }
-          // The reality mesh and the DSM/DTM terrain are the SAME surface
-          // captured twice — rendering both z-fights (visible flicker), so
-          // they are mutually exclusive like the terrain siblings.
-          if (turningOn && isSiteModel && l.category === "terrain" && l.visible) {
-            return { ...l, visible: false };
-          }
-          if (turningOn && target.category === "terrain" && l.key.startsWith("sitemodel-") && l.visible) {
-            return { ...l, visible: false };
-          }
-          return l;
-        });
-
-        const handle = handlesRef.current.get(key);
-        const nowVisible = !target.visible;
-        visibleRef.current.set(key, nowVisible);
-        // Hiding a still-streaming mesh unblocks hidden-cloud preloading.
-        updateCloudPreload();
-        // Apply the mesh↔terrain exclusion side effects on the scene objects.
-        if (nowVisible && isSiteModel) {
-          for (const l of prev) {
-            if (l.category === "terrain" && l.visible) visibleRef.current.set(l.key, false);
-          }
-          applyTerrain(null);
+      const prev = layerControlsRef.current;
+      const target = prev.find((l) => l.key === key);
+      if (!target) return;
+      const turningOn = !target.visible;
+      const isSiteModel = key.startsWith("sitemodel-");
+      const next = prev.map((l) => {
+        if (l.key === key) return { ...l, visible: !l.visible };
+        // Terrain layers are exclusive — turning one on turns siblings off.
+        if (target.category === "terrain" && l.category === "terrain" && turningOn) {
+          return { ...l, visible: false };
         }
-        if (nowVisible && target.category === "terrain") {
-          for (const l of prev) {
-            if (!l.key.startsWith("sitemodel-") || !l.visible) continue;
-            visibleRef.current.set(l.key, false);
-            const h = handlesRef.current.get(l.key);
-            if (h?.type === "tileset") h.tileset.show = false;
-          }
+        // The reality mesh and the DSM/DTM terrain are the SAME surface
+        // captured twice — rendering both z-fights (visible flicker), so
+        // they are mutually exclusive like the terrain siblings.
+        if (turningOn && isSiteModel && l.category === "terrain" && l.visible) {
+          return { ...l, visible: false };
         }
-        if (target.category === "terrain") {
-          const h = handle?.type === "terrain" ? handle : null;
-          applyTerrain(nowVisible && h ? h.url : null);
-        } else if (handle) {
-          if (handle.type === "imagery") handle.layer.show = nowVisible;
-          else if (handle.type === "tileset") handle.tileset.show = nowVisible;
-          else if (handle.type === "datasource") handle.ds.show = nowVisible;
-          else if (handle.type === "geojson-lazy" && nowVisible && !handle.loading) {
-            handle.loading = true;
-            patchControl(key, { loading: true, error: null });
-            const viewer = viewerRef.current;
-            GeoJsonDataSource.load(handle.url, {
-              clampToGround: true,
-              stroke: Color.fromCssColorString("#7DD3FC"),
-              fill: Color.fromCssColorString("#7DD3FC").withAlpha(0.15),
-              strokeWidth: 2,
-            })
-              .then((ds) => {
-                if (!viewer || viewer.isDestroyed()) return;
-                ds.show = visibleRef.current.get(key) ?? false;
-                viewer.dataSources.add(ds);
-                handlesRef.current.set(key, { type: "datasource", ds });
-                patchControl(key, { loading: false });
-              })
-              .catch((err) => {
-                handle.loading = false;
-                console.error("Failed to load vector layer:", err);
-                patchControl(key, { loading: false, error: "Failed to load vector data" });
-              });
-          }
+        if (turningOn && target.category === "terrain" && l.key.startsWith("sitemodel-") && l.visible) {
+          return { ...l, visible: false };
         }
-        return next;
+        return l;
       });
+
+      const handle = handlesRef.current.get(key);
+      const nowVisible = !target.visible;
+      const viewer = viewerRef.current;
+      visibleRef.current.set(key, nowVisible);
+      // Hiding a still-streaming mesh unblocks hidden-cloud preloading.
+      updateCloudPreload();
+      // Apply the mesh↔terrain exclusion side effects on the scene objects.
+      if (nowVisible && isSiteModel) {
+        for (const l of prev) {
+          if (l.category === "terrain" && l.visible) visibleRef.current.set(l.key, false);
+        }
+        applyTerrain(null);
+      }
+      if (nowVisible && target.category === "terrain") {
+        for (const l of prev) {
+          if (!l.key.startsWith("sitemodel-") || !l.visible) continue;
+          visibleRef.current.set(l.key, false);
+          const h = handlesRef.current.get(l.key);
+          if (h?.type === "tileset") h.tileset.show = false;
+        }
+      }
+      if (target.category === "terrain") {
+        const h = handle?.type === "terrain" ? handle : null;
+        applyTerrain(nowVisible && h ? h.url : null);
+      } else if (handle) {
+        if (handle.type === "imagery") handle.layer.show = nowVisible;
+        else if (handle.type === "tileset") handle.tileset.show = nowVisible;
+        else if (handle.type === "datasource") handle.ds.show = nowVisible;
+        else if (handle.type === "geojson-lazy" && nowVisible && !handle.loading) {
+          handle.loading = true;
+          patchControl(key, { loading: true, error: null });
+          GeoJsonDataSource.load(handle.url, {
+            clampToGround: true,
+            stroke: Color.fromCssColorString("#7DD3FC"),
+            fill: Color.fromCssColorString("#7DD3FC").withAlpha(0.15),
+            strokeWidth: 2,
+          })
+            .then((ds) => {
+              if (!viewer || viewer.isDestroyed()) return;
+              ds.show = visibleRef.current.get(key) ?? false;
+              viewer.dataSources.add(ds);
+              handlesRef.current.set(key, { type: "datasource", ds });
+              viewer.scene.requestRender();
+              patchControl(key, { loading: false });
+            })
+            .catch((err) => {
+              handle.loading = false;
+              console.error("Failed to load vector layer:", err);
+              patchControl(key, { loading: false, error: "Failed to load vector data" });
+            });
+        }
+      }
+      if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender();
+      layerControlsRef.current = next;
+      setLayerControls(next);
     },
     [applyTerrain, patchControl, updateCloudPreload]
   );
@@ -1132,8 +1237,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     setLayerControls((prev) => prev.map((l) => (l.key === key ? { ...l, opacity } : l)));
     const handle = handlesRef.current.get(key);
     if (!handle) return;
+    const viewer = viewerRef.current;
     if (handle.type === "imagery") {
       handle.layer.alpha = opacity;
+      if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender();
     } else if (handle.type === "tileset") {
       // Point clouds keep their RGB and fade via the ported point style (which
       // also fixes the point size); textured meshes tint through white so the
@@ -1144,6 +1251,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         : opacity >= 0.99
           ? undefined
           : new Cesium3DTileStyle({ color: `color('white', ${opacity.toFixed(2)})` });
+      if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender();
     } else if (handle.type === "terrain") {
       // Terrain (DSM/DTM) is globe geometry with no per-layer alpha — fade it
       // via globe translucency. Terrain surfaces are mutually exclusive, so the
@@ -1160,38 +1268,36 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     }
   }, []);
 
-  const applyLensVisibility = useCallback(
-    (ramp: string | null, show: boolean) => {
-      setLayerControls((prev) =>
-        prev.map((l) => {
-          if (l.lensRamp !== ramp) return l;
-          const handle = handlesRef.current.get(l.key);
-          if (handle?.type === "imagery") handle.layer.show = show;
-          visibleRef.current.set(l.key, show);
-          return { ...l, visible: show };
-        })
-      );
-    },
-    []
-  );
+  const applyLensVisibility = useCallback((ramp: string | null, show: boolean) => {
+    const next = layerControlsRef.current.map((l) => {
+      if (l.lensRamp !== ramp) return l;
+      const handle = handlesRef.current.get(l.key);
+      if (handle?.type === "imagery") handle.layer.show = show;
+      visibleRef.current.set(l.key, show);
+      return { ...l, visible: show };
+    });
+    const viewer = viewerRef.current;
+    if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender();
+    layerControlsRef.current = next;
+    setLayerControls(next);
+  }, []);
 
-  const handleColorMapChange = useCallback(
-    (value: string) => {
-      setColorMap(value);
-      setLayerControls((prev) => {
-        const selected = value.toLowerCase();
-        return prev.map((l) => {
-          if (!l.lensRamp || !(ELEVATION_RAMPS as readonly string[]).includes(l.lensRamp)) return l;
-          const show = value !== "None" && l.lensRamp === selected;
-          const handle = handlesRef.current.get(l.key);
-          if (handle?.type === "imagery") handle.layer.show = show;
-          visibleRef.current.set(l.key, show);
-          return { ...l, visible: show };
-        });
-      });
-    },
-    []
-  );
+  const handleColorMapChange = useCallback((value: string) => {
+    setColorMap(value);
+    const selected = value.toLowerCase();
+    const next = layerControlsRef.current.map((l) => {
+      if (!l.lensRamp || !(ELEVATION_RAMPS as readonly string[]).includes(l.lensRamp)) return l;
+      const show = value !== "None" && l.lensRamp === selected;
+      const handle = handlesRef.current.get(l.key);
+      if (handle?.type === "imagery") handle.layer.show = show;
+      visibleRef.current.set(l.key, show);
+      return { ...l, visible: show };
+    });
+    const viewer = viewerRef.current;
+    if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender();
+    layerControlsRef.current = next;
+    setLayerControls(next);
+  }, []);
 
   const handleShadingChange = useCallback(
     (value: string) => {
@@ -1203,93 +1309,96 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
 
   const handleContourIntervalChange = useCallback((intervalM: number) => {
     setSelectedContourIntervalM(intervalM);
-    setLayerControls((prev) =>
-      prev.map((l) => {
-        if (!l.vectorRole || !contourVectorRole(l.vectorRole)) return l;
-        const show = l.intervalM === intervalM;
-        const handle = handlesRef.current.get(l.key);
-        if (handle?.type === "datasource") {
-          handle.ds.show = show;
-        } else if (handle?.type === "geojson-lazy" && show && !handle.loading) {
-          const viewer = viewerRef.current;
-          handle.loading = true;
-          patchControl(l.key, { loading: true, error: null });
-          GeoJsonDataSource.load(handle.url, {
-            clampToGround: true,
-            stroke: Color.fromCssColorString("#7DD3FC"),
-            fill: Color.fromCssColorString("#7DD3FC").withAlpha(0.15),
-            strokeWidth: 2,
+    const viewer = viewerRef.current;
+    const next = layerControlsRef.current.map((l) => {
+      if (!l.vectorRole || !contourVectorRole(l.vectorRole)) return l;
+      const show = l.intervalM === intervalM;
+      const handle = handlesRef.current.get(l.key);
+      if (handle?.type === "datasource") {
+        handle.ds.show = show;
+      } else if (handle?.type === "geojson-lazy" && show && !handle.loading) {
+        handle.loading = true;
+        patchControl(l.key, { loading: true, error: null });
+        GeoJsonDataSource.load(handle.url, {
+          clampToGround: true,
+          stroke: Color.fromCssColorString("#7DD3FC"),
+          fill: Color.fromCssColorString("#7DD3FC").withAlpha(0.15),
+          strokeWidth: 2,
+        })
+          .then((ds) => {
+            if (!viewer || viewer.isDestroyed()) return;
+            ds.show = visibleRef.current.get(l.key) ?? false;
+            viewer.dataSources.add(ds);
+            handlesRef.current.set(l.key, { type: "datasource", ds });
+            viewer.scene.requestRender();
+            patchControl(l.key, { loading: false });
           })
-            .then((ds) => {
-              if (!viewer || viewer.isDestroyed()) return;
-              ds.show = visibleRef.current.get(l.key) ?? false;
-              viewer.dataSources.add(ds);
-              handlesRef.current.set(l.key, { type: "datasource", ds });
-              patchControl(l.key, { loading: false });
-            })
-            .catch((err) => {
-              handle.loading = false;
-              console.error("Failed to load contour layer:", err);
-              patchControl(l.key, { loading: false, error: "Failed to load contour data" });
-            });
-        }
-        visibleRef.current.set(l.key, show);
-        return { ...l, visible: show };
-      })
-    );
+          .catch((err) => {
+            handle.loading = false;
+            console.error("Failed to load contour layer:", err);
+            patchControl(l.key, { loading: false, error: "Failed to load contour data" });
+          });
+      }
+      visibleRef.current.set(l.key, show);
+      return { ...l, visible: show };
+    });
+    if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender();
+    layerControlsRef.current = next;
+    setLayerControls(next);
   }, [patchControl]);
 
   const handleToggleDigitalTwin = useCallback(() => {
     if (!USE_WORLD_TERRAIN) return;
-    setDigitalTwinEnabled((prev) => {
-      const next = !prev;
-      if (next) {
-        applyTerrain(null);
-        setLayerControls((layers) =>
-          layers.map((l) => {
-            if (l.category === "terrain" && l.visible) {
-              visibleRef.current.set(l.key, false);
-              return { ...l, visible: false };
-            }
-            if (l.key.startsWith("sitemodel-")) {
-              const hero = manifest?.layers.site_models?.some(
-                (sm, i) => `sitemodel-${i}` === l.key && !isThinSurfaceMesh(sm.source_format)
-              );
-              if (hero) {
-                const h = handlesRef.current.get(l.key);
-                if (h?.type === "tileset") h.tileset.show = true;
-                visibleRef.current.set(l.key, true);
-                return { ...l, visible: true };
-              }
-            }
-            return l;
-          })
-        );
-      } else {
-        const dsm = layerControls.find(
-          (l) => l.category === "terrain" && l.label.toLowerCase() === "dsm"
-        );
-        if (dsm) {
-          const h = handlesRef.current.get(dsm.key);
-          if (h?.type === "terrain") applyTerrain(h.url);
-          visibleRef.current.set(dsm.key, true);
-          setLayerControls((layers) =>
-            layers.map((l) => {
-              if (l.key === dsm.key) return { ...l, visible: true };
-              if (l.key.startsWith("sitemodel-") && l.visible) {
-                const h2 = handlesRef.current.get(l.key);
-                if (h2?.type === "tileset") h2.tileset.show = false;
-                visibleRef.current.set(l.key, false);
-                return { ...l, visible: false };
-              }
-              return l;
-            })
-          );
+    const next = !digitalTwinEnabled;
+    const viewer = viewerRef.current;
+    const layers = layerControlsRef.current;
+    if (next) {
+      applyTerrain(null);
+      const updated = layers.map((l) => {
+        if (l.category === "terrain" && l.visible) {
+          visibleRef.current.set(l.key, false);
+          return { ...l, visible: false };
         }
+        if (l.key.startsWith("sitemodel-")) {
+          const hero = manifest?.layers.site_models?.some(
+            (sm, i) => `sitemodel-${i}` === l.key && !isThinSurfaceMesh(sm.source_format)
+          );
+          if (hero) {
+            const h = handlesRef.current.get(l.key);
+            if (h?.type === "tileset") h.tileset.show = true;
+            visibleRef.current.set(l.key, true);
+            return { ...l, visible: true };
+          }
+        }
+        return l;
+      });
+      layerControlsRef.current = updated;
+      setLayerControls(updated);
+    } else {
+      const dsm = layers.find(
+        (l) => l.category === "terrain" && l.label.toLowerCase() === "dsm"
+      );
+      if (dsm) {
+        const h = handlesRef.current.get(dsm.key);
+        if (h?.type === "terrain") applyTerrain(h.url);
+        visibleRef.current.set(dsm.key, true);
+        const updated = layers.map((l) => {
+          if (l.key === dsm.key) return { ...l, visible: true };
+          if (l.key.startsWith("sitemodel-") && l.visible) {
+            const h2 = handlesRef.current.get(l.key);
+            if (h2?.type === "tileset") h2.tileset.show = false;
+            visibleRef.current.set(l.key, false);
+            return { ...l, visible: false };
+          }
+          return l;
+        });
+        layerControlsRef.current = updated;
+        setLayerControls(updated);
       }
-      return next;
-    });
-  }, [applyTerrain, layerControls, manifest?.layers.site_models]);
+    }
+    if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender();
+    setDigitalTwinEnabled(next);
+  }, [applyTerrain, digitalTwinEnabled, manifest?.layers.site_models]);
 
   const handleToggleImages = useCallback(() => {
     if (imageVector) handleToggle(imageVector.key);
@@ -1305,41 +1414,44 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   }, []);
 
   const handleToggleDesign = useCallback((key: string) => {
-    setDesignControls((prev) => {
-      const target = prev.find((d) => d.key === key);
-      if (!target || !target.renderable) return prev;
-      const nowVisible = !target.visible;
-      visibleRef.current.set(key, nowVisible);
+    const prev = designControlsRef.current;
+    const target = prev.find((d) => d.key === key);
+    if (!target || !target.renderable) return;
+    const nowVisible = !target.visible;
+    const viewer = viewerRef.current;
+    visibleRef.current.set(key, nowVisible);
 
-      // Sample/demo designs have no Cesium handle — they only flip visual
-      // state. Real GeoJSON designs lazy-load on first show (same path as
-      // contour vectors).
-      const handle = handlesRef.current.get(key);
-      if (handle?.type === "datasource") {
-        handle.ds.show = nowVisible;
-      } else if (handle?.type === "geojson-lazy" && nowVisible && !handle.loading) {
-        handle.loading = true;
-        const viewer = viewerRef.current;
-        GeoJsonDataSource.load(handle.url, {
-          clampToGround: true,
-          stroke: Color.fromCssColorString("#A78BFA"),
-          fill: Color.fromCssColorString("#A78BFA").withAlpha(0.15),
-          strokeWidth: 2,
+    // Sample/demo designs have no Cesium handle — they only flip visual
+    // state. Real GeoJSON designs lazy-load on first show (same path as
+    // contour vectors).
+    const handle = handlesRef.current.get(key);
+    if (handle?.type === "datasource") {
+      handle.ds.show = nowVisible;
+    } else if (handle?.type === "geojson-lazy" && nowVisible && !handle.loading) {
+      handle.loading = true;
+      GeoJsonDataSource.load(handle.url, {
+        clampToGround: true,
+        stroke: Color.fromCssColorString("#A78BFA"),
+        fill: Color.fromCssColorString("#A78BFA").withAlpha(0.15),
+        strokeWidth: 2,
+      })
+        .then((ds) => {
+          if (!viewer || viewer.isDestroyed()) return;
+          ds.show = visibleRef.current.get(key) ?? false;
+          viewer.dataSources.add(ds);
+          handlesRef.current.set(key, { type: "datasource", ds });
+          viewer.scene.requestRender();
         })
-          .then((ds) => {
-            if (!viewer || viewer.isDestroyed()) return;
-            ds.show = visibleRef.current.get(key) ?? false;
-            viewer.dataSources.add(ds);
-            handlesRef.current.set(key, { type: "datasource", ds });
-          })
-          .catch((err) => {
-            handle.loading = false;
-            console.error("Failed to load design layer:", err);
-            toast.error("Failed to load design overlay");
-          });
-      }
-      return prev.map((d) => (d.key === key ? { ...d, visible: nowVisible } : d));
-    });
+        .catch((err) => {
+          handle.loading = false;
+          console.error("Failed to load design layer:", err);
+          toast.error("Failed to load design overlay");
+        });
+    }
+    if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender();
+    const next = prev.map((d) => (d.key === key ? { ...d, visible: nowVisible } : d));
+    designControlsRef.current = next;
+    setDesignControls(next);
   }, []);
 
   // -------------------------------------------------- measurement rendering
@@ -1371,6 +1483,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         }
         measurementDsRef.current = ds;
         viewer.dataSources.add(ds);
+        viewer.scene.requestRender();
       })
       .catch((err) => console.error("Failed to render measurements:", err));
 
@@ -1482,6 +1595,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     stopProbe();
     setDrawMode(null);
     setActiveDrawOpts(null);
+    setActiveToolKey(null);
     pendingDrawRef.current = null;
     setRightPanel(null);
     setSelectedMeasurement(null);
@@ -1490,10 +1604,11 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
 
   // Probe tool: sample longitude/latitude/elevation at clicked surface points
   // (the Point/Elevation/Probe tools). Readout lives in the Measure palette.
-  const startProbe = useCallback(() => {
+  const startProbe = useCallback((toolKey?: string) => {
     cleanupDraw();
     setDrawMode(null);
     setActiveDrawOpts(null);
+    setActiveToolKey(toolKey ?? null);
     pendingDrawRef.current = null;
     setSelectedMeasurement(null);
     setIsInspectingNew(false);
@@ -1540,6 +1655,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       pendingDrawRef.current = null;
       setDrawMode(mode);
       setActiveDrawOpts(opts ?? null);
+      setActiveToolKey(opts?.toolKey ?? null);
       setPickedFeature(null);
       draftPositionsRef.current = [];
 
@@ -1635,6 +1751,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         pendingDrawRef.current = { mode, coords, kind, folder: opts?.folder, slope: opts?.slope };
         setDrawMode(null);
         setActiveDrawOpts(null);
+        setActiveToolKey(null);
         setSelectedMeasurement(tempMeasurement);
         setIsInspectingNew(true);
         setRightPanel("inspect");
@@ -1891,7 +2008,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
       <div className="w-full h-full flex">
         {/* Map-tools rail (48px) */}
         <ViewerToolRail
-          drawMode={drawMode}
+          activeToolKey={activeToolKey}
           onStartDraw={startDraw}
           onCancelDraw={cancelDraw}
           onExport={exportMeasurements}
@@ -2013,10 +2130,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
         {/* Center: 3D Viewer */}
         <div className="flex-1 relative min-h-0">
           <div className="absolute inset-0 cesium-container">
-          {cesiumReady ? (
           <Viewer
             ref={handleViewerRef}
             full
+            requestRenderMode
             timeline={false}
             animation={false}
             geocoder={false}
@@ -2030,17 +2147,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
             selectionIndicator={false}
             style={{ width: "100%", height: "100%" }}
           />
-          ) : (
-            <div className="flex h-full items-center justify-center text-xs text-gray-500">
-              <Loader2 size={14} className="mr-2 animate-spin" />
-              Loading viewer…
-            </div>
-          )}
           </div>
           {manifest && (
             <ViewerDrawToolbar
-              drawMode={drawMode}
-              probing={probing}
+              activeToolKey={activeToolKey}
               onStartDraw={startDraw}
               onStartProbe={startProbe}
               onCancelDraw={cancelDraw}
@@ -2059,8 +2169,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
             <div className="pointer-events-auto absolute right-4 top-4 bottom-8 z-20 flex w-[280px] flex-col overflow-y-auto rounded-xl border border-white/[0.06] bg-[#111114]/85 shadow-[0_4px_24px_0_rgba(0,0,0,0.5)] backdrop-blur-md">
               {rightPanel === "measure" && (
                 <MeasurePalette
-                  drawMode={drawMode}
-                  probing={probing}
+                  activeToolKey={activeToolKey}
                   readout={readout}
                   volumeMethod={volumeMethod}
                   onVolumeMethod={setVolumeMethod}

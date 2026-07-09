@@ -145,6 +145,7 @@ function ControlRow({
   error,
   right,
   onToggle,
+  onDisabledClick,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -155,9 +156,18 @@ function ControlRow({
   error?: string | null;
   right?: React.ReactNode;
   onToggle?: () => void;
+  // Fired when the row is clicked while disabled — a disabled Switch swallows
+  // its own onCheckedChange, so without this the "why is this off?" hint (e.g.
+  // "not available for this survey") could never reach the user.
+  onDisabledClick?: () => void;
 }) {
+  const rowDisabledClick = disabled && onDisabledClick ? onDisabledClick : undefined;
   return (
-    <div className="flex h-9 items-center gap-2.5 px-2">
+    <div
+      className={`flex h-9 items-center gap-2.5 px-2 ${rowDisabledClick ? "cursor-pointer" : ""}`}
+      onClick={rowDisabledClick}
+      role={rowDisabledClick ? "button" : undefined}
+    >
       <span className={`shrink-0 ${active ? "text-[#C97A4E]" : "text-gray-500"}`}>{icon}</span>
       <span
         className={`min-w-0 flex-1 truncate text-[13px] ${
@@ -273,7 +283,6 @@ function Histogram({ buckets }: { buckets?: number[] }) {
   );
 }
 
-const COLOR_MAPS = ["Viridis", "Terrain", "Plasma", "Grayscale"];
 const SHADING = ["None", "Hillshade"];
 
 function formatIntervalLabel(m: number): string {
@@ -318,13 +327,19 @@ function TerrainSettings({
     max: stats ? String(Math.round(stats.max_elevation)) : "100",
   }));
 
-  React.useEffect(() => {
-    if (!stats) return;
+  // Re-sync the range inputs when a new stats object arrives (survey switch).
+  // Done as a render-phase adjustment rather than an effect: no extra commit,
+  // no set-state-in-effect, and the fresh range renders on the first paint.
+  // (React's documented "adjust state on prop change" pattern — the previous
+  // value is tracked in state, not a ref, so it stays render-safe.)
+  const [prevStats, setPrevStats] = useState(stats);
+  if (stats && stats !== prevStats) {
+    setPrevStats(stats);
     setRange({
       min: String(Math.round(stats.min_elevation)),
       max: String(Math.round(stats.max_elevation)),
     });
-  }, [stats]);
+  }
 
   return (
     <div className="mx-2 mb-2 space-y-4 rounded-lg border border-white/[0.06] bg-[#16161a] p-3">
@@ -651,6 +666,9 @@ export function LayerPanel({
               active={d.visible}
               disabled={!d.renderable}
               onToggle={() => onToggleDesign(d.key)}
+              onDisabledClick={() =>
+                toast.info("This design isn't renderable yet — raw CAD is tiled server-side first")
+              }
             />
           ))}
         </Section>
@@ -675,13 +693,10 @@ export function LayerPanel({
           label="Digital Twin"
           active={digitalTwinEnabled}
           disabled={!digitalTwinAvailable}
-          onToggle={() => {
-            if (!digitalTwinAvailable) {
-              toast.info("Digital Twin requires a Cesium ion token (World Terrain)");
-              return;
-            }
-            onToggleDigitalTwin?.();
-          }}
+          onToggle={() => onToggleDigitalTwin?.()}
+          onDisabledClick={() =>
+            toast.info("Digital Twin requires a Cesium ion token (World Terrain)")
+          }
         />
       </Section>
 
@@ -693,13 +708,8 @@ export function LayerPanel({
           count={imageCount ? `${imageCount.toLocaleString()} images` : undefined}
           active={imagesVisible}
           disabled={!hasImageLayer}
-          onToggle={() => {
-            if (!hasImageLayer) {
-              toast.info("Image positions — not available for this survey");
-              return;
-            }
-            onToggleImages?.();
-          }}
+          onToggle={() => onToggleImages?.()}
+          onDisabledClick={() => toast.info("Image positions — not available for this survey")}
         />
         <ControlRow
           icon={<Circle size={16} />}
@@ -707,13 +717,8 @@ export function LayerPanel({
           count={gcpCount ? `${gcpCount} GCPs` : undefined}
           active={gcpsVisible}
           disabled={!hasGcpLayer}
-          onToggle={() => {
-            if (!hasGcpLayer) {
-              toast.info("Ground control points — not available for this survey");
-              return;
-            }
-            onToggleGcps?.();
-          }}
+          onToggle={() => onToggleGcps?.()}
+          onDisabledClick={() => toast.info("Ground control points — not available for this survey")}
         />
       </Section>
 
