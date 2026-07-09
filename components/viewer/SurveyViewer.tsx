@@ -50,7 +50,8 @@ import {
   type Measurement,
   type SiteModelLayer,
 } from "@/lib/api/assetSvc";
-import { getProject } from "@/lib/api/userSvc";
+import { getProject, type Project } from "@/lib/api/userSvc";
+import { isMineSiteProject } from "@/lib/dashboard/resolveProjectCenter";
 import { ApiError } from "@/lib/api/client";
 import {
   LayerPanel,
@@ -70,7 +71,6 @@ import { ViewerStatusBar } from "@/components/viewer/ViewerStatusBar";
 import { SurveyList } from "@/components/viewer/SurveyList";
 import {
   SAMPLE_DESIGNS,
-  SAMPLE_MEASUREMENTS,
   type PanelMeasurement,
 } from "@/lib/viewer/sampleData";
 import {
@@ -245,10 +245,16 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   const [viewerReady, setViewerReady] = useState(false);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [manifestError, setManifestError] = useState<string | null>(null);
+  const [project, setProject] = useState<Project | null>(null);
   const [activeTab, setActiveTab] = useState<"layers" | "surveys">("layers");
   const [layerControls, setLayerControls] = useState<LayerControl[]>([]);
   const [designControls, setDesignControls] = useState<DesignControl[]>([]);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
+  // Raw value of the measurement-panel search box; debounced into a server-side
+  // `?search=` refetch below. `searchingMeasurements` gates a spinner for those
+  // search-triggered loads only (never the 5s compute poll).
+  const [measurementSearch, setMeasurementSearch] = useState("");
+  const [searchingMeasurements, setSearchingMeasurements] = useState(false);
   const [drawMode, setDrawMode] = useState<DrawMode | null>(null);
   const [saving, setSaving] = useState(false);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
@@ -310,6 +316,11 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   // Signature of the last measurement set pushed to state — skips redundant
   // re-renders + Cesium overlay rebuilds when a poll returns identical data.
   const measurementsSigRef = useRef<string>("");
+  // Active (debounced) search term threaded into refreshMeasurements — incl. the
+  // 5s compute poll — without rebuilding the callback. appliedSearchRef is the
+  // last term actually fetched, so the mount tick (""==="") skips a duplicate.
+  const searchRef = useRef<string>("");
+  const appliedSearchRef = useRef<string>("");
   const pendingDrawRef = useRef<PendingDraw | null>(null);
   // Data footprints (lon/lat rings as Cartesian3) per survey tileset, computed
   // from each tileset's leaf occupancy once it loads; drives terrain clipping.
@@ -456,7 +467,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
 
   const refreshMeasurements = useCallback(async () => {
     try {
-      const res = await listMeasurements(surveyId);
+      const res = await listMeasurements(surveyId, searchRef.current);
       const list = res.measurements || [];
       // Toast on compute completion/failure transitions.
       for (const m of list) {
@@ -486,6 +497,41 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     loadManifest();
     refreshMeasurements();
   }, [loadManifest, refreshMeasurements]);
+
+  useEffect(() => {
+    const projectId = manifest?.survey.project_id;
+    if (!projectId) return;
+
+    let cancelled = false;
+    getProject(projectId)
+      .then((p) => {
+        if (!cancelled) setProject(p);
+      })
+      .catch((err) => {
+        console.error("Failed to fetch project:", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [manifest?.survey.project_id]);
+
+  // Debounce the search box, then refetch server-side (asset-svc `?search=`).
+  // appliedSearchRef skips the redundant mount fire (""==="") and no-op keystrokes;
+  // resetting the signature forces the freshly filtered set to apply even if it
+  // happens to collide with the previous set's signature. Only search-initiated
+  // loads flip the spinner — the 5s compute poll refetches silently.
+  useEffect(() => {
+    const q = measurementSearch.trim();
+    const t = setTimeout(() => {
+      if (appliedSearchRef.current === q) return;
+      appliedSearchRef.current = q;
+      searchRef.current = q;
+      measurementsSigRef.current = "";
+      setSearchingMeasurements(true);
+      refreshMeasurements().finally(() => setSearchingMeasurements(false));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [measurementSearch, refreshMeasurements]);
 
   // Poll the manifest every 30s while processors are still running.
   useEffect(() => {
@@ -1920,13 +1966,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     return `Survey ${manifest.survey.survey_date}`;
   }, [manifest]);
 
-  // Real measurements first, then the demo folder fixtures (display-only) so
-  // the grouped Measurements UI is demonstrable. Drop SAMPLE_MEASUREMENTS once
-  // asset-svc serves foldered measurements.
-  const panelMeasurements = useMemo<PanelMeasurement[]>(
-    () => [...measurements, ...SAMPLE_MEASUREMENTS],
-    [measurements]
-  );
+  const showDigitalTwin =
+    project !== null &&
+    manifest?.survey.project_id === project.id &&
+    !isMineSiteProject(project);
 
   // Live palette readout — the ported measurement math over the committed
   // vertices plus the rubber-band vertex, so lengths/areas tick up while the
@@ -2078,6 +2121,7 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
                     availableContourIntervals={availableContourIntervals}
                     digitalTwinEnabled={digitalTwinEnabled}
                     digitalTwinAvailable={USE_WORLD_TERRAIN}
+                    showDigitalTwin={showDigitalTwin}
                     sunLightingEnabled={sunLightingEnabled}
                     sunHour={sunHour}
                     onToggle={handleToggle}
@@ -2100,7 +2144,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
                     currentSurveyId={surveyId}
                   />
                   <MeasurementPanel
-                    measurements={panelMeasurements}
+                    measurements={measurements}
+                    query={measurementSearch}
+                    onQueryChange={setMeasurementSearch}
+                    searching={searchingMeasurements}
                     drawMode={drawMode}
                     busyIds={busyIds}
                     onStartDraw={startDraw}

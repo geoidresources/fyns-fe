@@ -89,6 +89,7 @@ interface LayerPanelProps {
   availableContourIntervals: number[];
   digitalTwinEnabled?: boolean;
   digitalTwinAvailable?: boolean;
+  showDigitalTwin?: boolean;
   sunLightingEnabled?: boolean;
   sunHour?: number;
   onToggle: (key: string) => void;
@@ -578,6 +579,7 @@ export function LayerPanel({
   availableContourIntervals,
   digitalTwinEnabled = false,
   digitalTwinAvailable = false,
+  showDigitalTwin = true,
   sunLightingEnabled = false,
   sunHour = 12,
   onToggle,
@@ -688,16 +690,18 @@ export function LayerPanel({
         {pointClouds.length > 0 && (
           <GroupRow icon={<Circle size={16} />} label="Point Cloud" group={pointClouds} onToggle={onToggle} />
         )}
-        <ControlRow
-          icon={<Building2 size={16} />}
-          label="Digital Twin"
-          active={digitalTwinEnabled}
-          disabled={!digitalTwinAvailable}
-          onToggle={() => onToggleDigitalTwin?.()}
-          onDisabledClick={() =>
-            toast.info("Digital Twin requires a Cesium ion token (World Terrain)")
-          }
-        />
+        {showDigitalTwin && (
+          <ControlRow
+            icon={<Building2 size={16} />}
+            label="Digital Twin"
+            active={digitalTwinEnabled}
+            disabled={!digitalTwinAvailable}
+            onToggle={() => onToggleDigitalTwin?.()}
+            onDisabledClick={() =>
+              toast.info("Digital Twin requires a Cesium ion token (World Terrain)")
+            }
+          />
+        )}
       </Section>
 
       {/* --------------------------------------------------- SURVEY DATA */}

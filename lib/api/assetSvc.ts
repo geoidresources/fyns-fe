@@ -205,8 +205,16 @@ export interface CreateMeasurementRequest {
   params?: Record<string, unknown>;
 }
 
-export function listMeasurements(surveyId: string): Promise<{ measurements: Measurement[] }> {
-  return apiFetch<{ measurements: Measurement[] }>(BASE, `/surveys/${surveyId}/measurements`);
+/** Optional `search` filters server-side by measurement name (case-insensitive
+ * substring, asset-svc `?search=`). Empty/blank is omitted so the URL stays
+ * clean and the endpoint returns the full set. */
+export function listMeasurements(
+  surveyId: string,
+  search?: string
+): Promise<{ measurements: Measurement[] }> {
+  const q = search?.trim();
+  const qs = q ? `?search=${encodeURIComponent(q)}` : "";
+  return apiFetch<{ measurements: Measurement[] }>(BASE, `/surveys/${surveyId}/measurements${qs}`);
 }
 
 export function createMeasurement(surveyId: string, req: CreateMeasurementRequest): Promise<Measurement> {

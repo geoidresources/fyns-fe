@@ -1,8 +1,10 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { ChevronRight, Plus } from "lucide-react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Search01Icon } from "@hugeicons/core-free-icons";
 import type { Project } from "@/lib/api/userSvc";
+import { listSurveys } from "@/lib/api/assetSvc";
+import { formatSurveyDate } from "@/lib/utils";
 
 interface ActiveSitesPanelProps {
   projects: Project[];
@@ -10,7 +12,54 @@ interface ActiveSitesPanelProps {
   selectedSiteId: string;
 }
 
+interface SurveyStats {
+  count: number;
+  latestDate: string;
+}
+
 export function ActiveSitesPanel({ projects, onSiteSelect, selectedSiteId }: ActiveSitesPanelProps) {
+  const [surveyStats, setSurveyStats] = useState<Record<string, SurveyStats>>({});
+
+  useEffect(() => {
+    if (projects.length === 0) {
+      setSurveyStats({});
+      return;
+    }
+
+    let cancelled = false;
+
+    Promise.all(
+      projects.map(async (project) => {
+        try {
+          const { surveys = [] } = await listSurveys(project.id);
+          const latest = [...surveys].sort(
+            (a, b) => new Date(b.survey_date).getTime() - new Date(a.survey_date).getTime()
+          )[0];
+          return {
+            id: project.id,
+            count: surveys.length,
+            latestDate: latest ? formatSurveyDate(latest.survey_date) : "-",
+          };
+        } catch (err) {
+          console.error(`Failed to fetch surveys for project ${project.id}:`, err);
+          return { id: project.id, count: 0, latestDate: "-" };
+        }
+      })
+    ).then((results) => {
+      if (!cancelled) {
+        setSurveyStats(
+          Object.fromEntries(
+            results.map((r) => [r.id, { count: r.count, latestDate: r.latestDate }])
+          )
+        );
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projects]);
+
   return (
     <div className="w-full h-full bg-[#0A0D14]/80 backdrop-blur-md flex flex-col pt-4 pb-6 pointer-events-auto">
       <div className="px-6 mb-6">
@@ -37,11 +86,11 @@ export function ActiveSitesPanel({ projects, onSiteSelect, selectedSiteId }: Act
       <div className="flex-1 overflow-y-auto">
         <div className="flex flex-col gap-1 px-4">
           {projects.map((site) => {
-            const isActive = site.lifecycle_status === 'active';
-            // Placeholder values for stats not yet available
-            const surveys = 0;
-            const date = "-";
-            
+            const isActive = site.lifecycle_status === "active";
+            const stats = surveyStats[site.id];
+            const surveys = stats?.count ?? "…";
+            const date = stats?.latestDate ?? "…";
+
             return (
               <button
                 key={site.id}

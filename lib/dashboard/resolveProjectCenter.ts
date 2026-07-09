@@ -6,6 +6,13 @@ export interface Wgs84Center {
   lng: number;
 }
 
+/** Mining sites omit stored WGS84 center on the project record (see resolveProjectCenter). */
+export function isMineSiteProject(
+  project: Pick<Project, "center_lat" | "center_lng">
+): boolean {
+  return projectWgs84Center(project) === null;
+}
+
 /** True WGS84 degrees — rejects nulls and projected easting/northing stored wrongly. */
 export function projectWgs84Center(
   project: Pick<Project, "center_lat" | "center_lng">

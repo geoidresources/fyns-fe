@@ -46,6 +46,12 @@ const UNGROUPED = "Ungrouped";
 
 interface MeasurementPanelProps {
   measurements: PanelMeasurement[];
+  /** Search box value + change handler. Name matching runs server-side
+   * (asset-svc `?search=`) — the parent debounces and refetches. */
+  query: string;
+  onQueryChange: (value: string) => void;
+  /** A server-side search fetch is in flight (drives the input spinner). */
+  searching?: boolean;
   drawMode: DrawMode | null;
   busyIds: Set<string>;
   onStartDraw: (mode: DrawMode, opts?: DrawOptions) => void;
@@ -127,6 +133,9 @@ function ToolbarButton({
 
 export function MeasurementPanel({
   measurements,
+  query,
+  onQueryChange,
+  searching,
   drawMode,
   busyIds,
   onStartDraw,
@@ -135,15 +144,14 @@ export function MeasurementPanel({
   onDelete,
   onSelect,
 }: MeasurementPanelProps) {
-  const [query, setQuery] = useState("");
   const [sortRecent, setSortRecent] = useState(false);
   const [completedOnly, setCompletedOnly] = useState(false);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
 
+  // Name search runs server-side; `measurements` already reflects the query.
+  // Only the completed-only filter, folder grouping and sort stay client-side.
   const groups = useMemo(() => {
-    const q = query.trim().toLowerCase();
     let list = measurements;
-    if (q) list = list.filter((m) => m.name.toLowerCase().includes(q));
     if (completedOnly) list = list.filter((m) => m.status === "completed");
 
     const byFolder = new Map<string, PanelMeasurement[]>();
@@ -172,7 +180,7 @@ export function MeasurementPanel({
       return 0;
     });
     return entries;
-  }, [measurements, query, completedOnly, sortRecent]);
+  }, [measurements, completedOnly, sortRecent]);
 
   const allCollapsed = groups.length > 0 && collapsedFolders.size >= groups.length;
 
@@ -231,7 +239,7 @@ export function MeasurementPanel({
           </ToolbarButton>
         </div>
 
-        {/* Search */}
+        {/* Search — matching runs server-side; the parent debounces + refetches. */}
         <div className="relative mb-1 px-1">
           <Search
             size={12}
@@ -239,10 +247,16 @@ export function MeasurementPanel({
           />
           <input
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => onQueryChange(e.target.value)}
             placeholder="Search measurements..."
-            className="h-7 w-full rounded-[4px] border border-white/[0.08] bg-[#19191d] pl-7 pr-2 text-[11px] text-[#F3F4F6] placeholder:text-gray-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#C97A4E]"
+            className="h-7 w-full rounded-[4px] border border-white/[0.08] bg-[#19191d] pl-7 pr-7 text-[11px] text-[#F3F4F6] placeholder:text-gray-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#C97A4E]"
           />
+          {searching && (
+            <Loader2
+              size={12}
+              className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-gray-500"
+            />
+          )}
         </div>
 
         {drawMode && (
