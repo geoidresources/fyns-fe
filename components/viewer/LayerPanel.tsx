@@ -1,21 +1,26 @@
 "use client";
 
 import React, { useState } from "react";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  AlertCircle,
-  Building2,
-  Camera,
-  ChevronRight,
-  Circle,
-  Layers,
-  Loader2,
-  Map as MapIcon,
-  Minus,
-  Settings2,
-  Sparkles,
-  Sun,
-  TrendingUp,
-} from "lucide-react";
+  AlertCircleIcon,
+  AnalyticsUpIcon,
+  ArrowRight01Icon,
+  Building03Icon,
+  Camera01Icon,
+  CubeIcon,
+  DistributionIcon,
+  Image01Icon,
+  Loading03Icon,
+  MapsIcon,
+  MountainIcon,
+  PenTool02Icon,
+  RippleIcon,
+  Settings01Icon,
+  SparklesIcon,
+  Sun03Icon,
+  Target01Icon,
+} from "@hugeicons/core-free-icons";
 import { toast } from "sonner";
 import type { TerrainStats } from "@/lib/api/assetSvc";
 import { Switch } from "@/components/ui/switch";
@@ -122,7 +127,8 @@ function Section({
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger className="group flex w-full items-center gap-1.5 px-2 pt-4 pb-1.5">
-        <ChevronRight
+        <HugeiconsIcon
+          icon={ArrowRight01Icon}
           size={12}
           className={`shrink-0 text-[#C97A4E] transition-transform ${open ? "rotate-90" : ""}`}
         />
@@ -178,10 +184,12 @@ function ControlRow({
         {label}
         {count && <span className="ml-1.5 text-[11px] text-gray-500">{count}</span>}
       </span>
-      {loading && <Loader2 size={13} className="shrink-0 animate-spin text-[#C97A4E]" />}
+      {loading && (
+        <HugeiconsIcon icon={Loading03Icon} size={13} className="shrink-0 animate-spin text-[#C97A4E]" />
+      )}
       {!loading && error && (
         <span title={error}>
-          <AlertCircle size={13} className="shrink-0 text-red-400" />
+          <HugeiconsIcon icon={AlertCircleIcon} size={13} className="shrink-0 text-red-400" />
         </span>
       )}
       {right ?? (
@@ -204,7 +212,11 @@ function SunPositionRow({
   return (
     <div>
       <div className="flex h-9 items-center gap-2.5 px-2">
-        <Sun size={16} className={`shrink-0 ${enabled ? "text-[#C97A4E]" : "text-gray-500"}`} />
+        <HugeiconsIcon
+          icon={Sun03Icon}
+          size={16}
+          className={`shrink-0 ${enabled ? "text-[#C97A4E]" : "text-gray-500"}`}
+        />
         <span className="min-w-0 flex-1 text-[13px] text-gray-300">Sun Position</span>
         <button
           type="button"
@@ -213,7 +225,7 @@ function SunPositionRow({
           onClick={() => setOpen((v) => !v)}
           className="shrink-0 text-gray-500 transition-colors hover:text-gray-300"
         >
-          <Settings2 size={14} />
+          <HugeiconsIcon icon={Settings01Icon} size={14} />
         </button>
       </div>
       {open && (
@@ -462,7 +474,7 @@ function TerrainLayerRow({
     <div>
       <div className="flex h-9 items-center gap-2.5 px-2">
         <span className={`shrink-0 ${control.visible ? "text-[#C97A4E]" : "text-gray-500"}`}>
-          <Layers size={16} />
+          <HugeiconsIcon icon={MountainIcon} size={16} />
         </span>
         <span
           className={`min-w-0 flex-1 truncate text-[13px] ${
@@ -471,7 +483,9 @@ function TerrainLayerRow({
         >
           {control.label}
         </span>
-        {control.loading && <Loader2 size={13} className="shrink-0 animate-spin text-[#C97A4E]" />}
+        {control.loading && (
+          <HugeiconsIcon icon={Loading03Icon} size={13} className="shrink-0 animate-spin text-[#C97A4E]" />
+        )}
         <button
           type="button"
           aria-label="Toggle settings"
@@ -479,7 +493,11 @@ function TerrainLayerRow({
           onClick={() => setOpen((v) => !v)}
           className="shrink-0 text-gray-500 transition-colors hover:text-gray-300"
         >
-          <ChevronRight size={14} className={`transition-transform ${open ? "-rotate-90" : "rotate-90"}`} />
+          <HugeiconsIcon
+            icon={ArrowRight01Icon}
+            size={14}
+            className={`transition-transform ${open ? "-rotate-90" : "rotate-90"}`}
+          />
         </button>
         <button
           type="button"
@@ -487,7 +505,7 @@ function TerrainLayerRow({
           onClick={() => setOpen((v) => !v)}
           className="shrink-0 text-gray-500 transition-colors hover:text-gray-300"
         >
-          <Settings2 size={14} />
+          <HugeiconsIcon icon={Settings01Icon} size={14} />
         </button>
         <Switch checked={control.visible} onCheckedChange={onToggle} />
       </div>
@@ -551,9 +569,9 @@ function GroupRow({
 function lensIcon(label: string) {
   const l = label.toLowerCase();
   if (l.includes("gradient") || l.includes("slope") || l.includes("aspect")) {
-    return <TrendingUp size={16} />;
+    return <HugeiconsIcon icon={AnalyticsUpIcon} size={16} />;
   }
-  return <Sparkles size={16} />;
+  return <HugeiconsIcon icon={SparklesIcon} size={16} />;
 }
 
 // ------------------------------------------------------------------- panel
@@ -610,7 +628,7 @@ export function LayerPanel({
     <div className="flex flex-col pb-2">
       {processing && layers.length === 0 && (
         <div className="mx-2 mb-2 mt-3 flex items-start gap-2 rounded-lg border border-[#2A2D35] bg-[#1E2028]/50 p-3">
-          <Loader2 size={14} className="mt-0.5 shrink-0 animate-spin text-[#C97A4E]" />
+          <HugeiconsIcon icon={Loading03Icon} size={14} className="mt-0.5 shrink-0 animate-spin text-[#C97A4E]" />
           <div>
             <p className="text-xs font-medium text-gray-300">Processing survey…</p>
             <p className="mt-0.5 text-[11px] text-gray-500">
@@ -627,7 +645,7 @@ export function LayerPanel({
           {ortho.map((l) => (
             <ControlRow
               key={l.key}
-              icon={<Layers size={16} />}
+              icon={<HugeiconsIcon icon={Image01Icon} size={16} />}
               label={l.label}
               active={l.visible}
               loading={l.loading}
@@ -663,7 +681,7 @@ export function LayerPanel({
           {designs.map((d) => (
             <ControlRow
               key={d.key}
-              icon={<MapIcon size={16} />}
+              icon={<HugeiconsIcon icon={PenTool02Icon} size={16} />}
               label={d.label}
               active={d.visible}
               disabled={!d.renderable}
@@ -679,20 +697,20 @@ export function LayerPanel({
       {/* ---------------------------------------------------- VIEW TYPES */}
       <Section title="View Types" defaultOpen>
         {terrain.length > 0 && (
-          <GroupRow icon={<Layers size={16} />} label="Terrain" group={terrain} onToggle={onToggle} />
+          <GroupRow icon={<HugeiconsIcon icon={MountainIcon} size={16} />} label="Terrain" group={terrain} onToggle={onToggle} />
         )}
         {contourVectors.length > 0 && (
-          <GroupRow icon={<Minus size={16} />} label="Contour Lines" group={contourVectors} onToggle={onToggle} />
+          <GroupRow icon={<HugeiconsIcon icon={RippleIcon} size={16} />} label="Contour Lines" group={contourVectors} onToggle={onToggle} />
         )}
         {siteModels.length > 0 && (
-          <GroupRow icon={<Building2 size={16} />} label="3D Model" group={siteModels} onToggle={onToggle} />
+          <GroupRow icon={<HugeiconsIcon icon={CubeIcon} size={16} />} label="3D Model" group={siteModels} onToggle={onToggle} />
         )}
         {pointClouds.length > 0 && (
-          <GroupRow icon={<Circle size={16} />} label="Point Cloud" group={pointClouds} onToggle={onToggle} />
+          <GroupRow icon={<HugeiconsIcon icon={DistributionIcon} size={16} />} label="Point Cloud" group={pointClouds} onToggle={onToggle} />
         )}
         {showDigitalTwin && (
           <ControlRow
-            icon={<Building2 size={16} />}
+            icon={<HugeiconsIcon icon={Building03Icon} size={16} />}
             label="Digital Twin"
             active={digitalTwinEnabled}
             disabled={!digitalTwinAvailable}
@@ -707,7 +725,7 @@ export function LayerPanel({
       {/* --------------------------------------------------- SURVEY DATA */}
       <Section title="Survey Data">
         <ControlRow
-          icon={<Camera size={16} />}
+          icon={<HugeiconsIcon icon={Camera01Icon} size={16} />}
           label="Images"
           count={imageCount ? `${imageCount.toLocaleString()} images` : undefined}
           active={imagesVisible}
@@ -716,7 +734,7 @@ export function LayerPanel({
           onDisabledClick={() => toast.info("Image positions — not available for this survey")}
         />
         <ControlRow
-          icon={<Circle size={16} />}
+          icon={<HugeiconsIcon icon={Target01Icon} size={16} />}
           label="GCPs"
           count={gcpCount ? `${gcpCount} GCPs` : undefined}
           active={gcpsVisible}
@@ -729,7 +747,7 @@ export function LayerPanel({
       {/* -------------------------------------------------- MAP CONTROLS */}
       <Section title="Map Controls">
         <div className="flex h-9 items-center gap-2.5 px-2">
-          <MapIcon size={16} className="shrink-0 text-[#C97A4E]" />
+          <HugeiconsIcon icon={MapsIcon} size={16} className="shrink-0 text-[#C97A4E]" />
           <span className="min-w-0 flex-1 text-[13px] text-gray-300">Base Map</span>
           <Select value={baseMap} onValueChange={onSetBaseMap}>
             <SelectTrigger className="w-28">
@@ -767,7 +785,7 @@ export function LayerPanel({
         </div>
 
         <div className="mt-1 flex h-9 items-center gap-2.5 px-2">
-          <Minus size={16} className="shrink-0 text-gray-500" />
+          <HugeiconsIcon icon={RippleIcon} size={16} className="shrink-0 text-gray-500" />
           <span className="min-w-0 flex-1 text-[13px] text-gray-300">Contour Interval</span>
           <Select
             value={contourIntervalM != null ? String(contourIntervalM) : undefined}
