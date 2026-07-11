@@ -3,8 +3,16 @@
 import React from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   AreaChart,
   Circle,
@@ -18,9 +26,10 @@ import {
 import type { DrawMode, DrawOptions } from "@/components/viewer/MeasurementPanel";
 import { formatArea, formatDistance, type LngLatHeight } from "@/lib/viewer/measure";
 
-// The Measure palette from the design (§7.2): a functional tool grid, a live
-// readout that updates while vertices are placed, and the volume-method
-// selector persisted into the measurement's compute params.
+// The Measure palette from the design (§7.2): a functional tool grid, a template
+// selector, a live readout that updates while vertices are placed, the
+// volume-method selector, the stockpile factor inputs, and the calculated
+// outputs — all persisted into the measurement's compute params.
 
 /** Live values computed by the viewer while a tool is active. */
 export interface LiveReadout {
@@ -40,6 +49,36 @@ export const VOLUME_METHODS = [
   { id: "design-surface", label: "Design surface" },
   { id: "custom-base", label: "Custom base" },
 ] as const;
+
+/** Measurement presets. `stockpile` surfaces the factor inputs + outputs;
+ * `cross_section` hides them (a polyline has no volume). */
+export const MEASURE_TEMPLATES = [
+  { id: "stockpile", label: "Stockpile", volumetric: true },
+  { id: "volume", label: "Volume", volumetric: true },
+  { id: "cross_section", label: "Cross-section", volumetric: false },
+] as const;
+
+/** Stockpile factor inputs, held as strings so decimals type cleanly; parsed at
+ * save time. Values mirror the design's default preset. */
+export interface StockpileFactors {
+  moisture: string; // %
+  grade: string; // quality/saleable multiplier
+  swell: string; // bulking multiplier (1.15 = +15%)
+  compaction: string; // placed-volume multiplier
+}
+
+export const DEFAULT_STOCKPILE_FACTORS: StockpileFactors = {
+  moisture: "8.5",
+  grade: "1.0",
+  swell: "1.15",
+  compaction: "0.85",
+};
+
+/** One computed-output row for the Calculated outputs card. */
+export interface MeasureOutput {
+  label: string;
+  value: string;
+}
 
 type PaletteToolId = "point" | "line" | "polygon" | "section" | "probe" | "slope";
 
@@ -61,11 +100,35 @@ const TOOLS: PaletteTool[] = [
   { id: "slope", icon: AreaChart, label: "Slope", draw: "polyline", opts: { label: "Slope", slope: true } },
 ];
 
+const FACTOR_FIELDS: { key: keyof StockpileFactors; label: string }[] = [
+  { key: "moisture", label: "Moisture %" },
+  { key: "grade", label: "Grade/quality factor" },
+  { key: "swell", label: "Swell factor" },
+  { key: "compaction", label: "Compaction factor" },
+];
+
+/** The rows the Calculated outputs card renders. Values come from the computed
+ * result; before compute every row shows an em dash. */
+const OUTPUT_ROWS = [
+  "In-situ volume",
+  "Adjusted volume",
+  "Compacted volume",
+  "Tonnage",
+  "Dry tonnage",
+  "Saleable tonnage",
+] as const;
+
 interface MeasurePaletteProps {
   activeToolKey: string | null;
   readout: LiveReadout;
+  template: string;
+  onTemplate: (template: string) => void;
   volumeMethod: string;
   onVolumeMethod: (method: string) => void;
+  factors: StockpileFactors;
+  onFactor: (key: keyof StockpileFactors, value: string) => void;
+  /** Computed outputs (empty until the measurement is saved + computed). */
+  outputs?: MeasureOutput[];
   onStartDraw: (mode: DrawMode, opts?: DrawOptions) => void;
   onStartProbe: (toolKey?: string) => void;
   onClose: () => void;
@@ -87,8 +150,13 @@ function ReadoutRow({ label, value }: { label: string; value: string }) {
 export function MeasurePalette({
   activeToolKey,
   readout,
+  template,
+  onTemplate,
   volumeMethod,
   onVolumeMethod,
+  factors,
+  onFactor,
+  outputs,
   onStartDraw,
   onStartProbe,
   onClose,
@@ -103,6 +171,10 @@ export function MeasurePalette({
     if (t.probe) onStartProbe(keyFor(t.id));
     else if (t.draw) onStartDraw(t.draw, { ...t.opts, toolKey: keyFor(t.id) });
   };
+
+  const volumetric =
+    MEASURE_TEMPLATES.find((t) => t.id === template)?.volumetric ?? true;
+  const outputByLabel = new Map((outputs ?? []).map((o) => [o.label, o.value]));
 
   return (
     <div className="h-full flex flex-col text-sm text-gray-200 p-3 gap-4">
@@ -135,6 +207,22 @@ export function MeasurePalette({
             </button>
           );
         })}
+      </div>
+
+      <div>
+        <Label className="text-xs text-gray-400 mb-2 block">Template</Label>
+        <Select value={template} onValueChange={onTemplate}>
+          <SelectTrigger className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {MEASURE_TEMPLATES.map((t) => (
+              <SelectItem key={t.id} value={t.id}>
+                {t.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <Card className="bg-[#19191d] border-white/[0.08]">
@@ -180,19 +268,55 @@ export function MeasurePalette({
         </CardContent>
       </Card>
 
-      <div>
-        <Label className="text-xs text-gray-400 mb-2 block">Volume method</Label>
-        <RadioGroup value={volumeMethod} onValueChange={onVolumeMethod} className="gap-1">
-          {VOLUME_METHODS.map((item) => (
-            <div key={item.id} className="flex items-center space-x-2">
-              <RadioGroupItem value={item.id} id={item.id} />
-              <Label htmlFor={item.id} className="text-gray-300 font-normal">
-                {item.label}
-              </Label>
-            </div>
-          ))}
-        </RadioGroup>
-      </div>
+      {volumetric && (
+        <>
+          <div>
+            <Label className="text-xs text-gray-400 mb-2 block">Volume method</Label>
+            <RadioGroup value={volumeMethod} onValueChange={onVolumeMethod} className="gap-1">
+              {VOLUME_METHODS.map((item) => (
+                <div key={item.id} className="flex items-center space-x-2">
+                  <RadioGroupItem value={item.id} id={item.id} />
+                  <Label htmlFor={item.id} className="text-gray-300 font-normal">
+                    {item.label}
+                  </Label>
+                </div>
+              ))}
+            </RadioGroup>
+          </div>
+
+          {template === "stockpile" &&
+            FACTOR_FIELDS.map((f) => (
+              <div key={f.key}>
+                <Label htmlFor={`factor-${f.key}`} className="text-xs text-gray-400 mb-2 block">
+                  {f.label}
+                </Label>
+                <Input
+                  id={`factor-${f.key}`}
+                  inputMode="decimal"
+                  value={factors[f.key]}
+                  onChange={(e) => onFactor(f.key, e.target.value)}
+                  className="bg-[#19191d] border-white/[0.08] font-mono"
+                />
+              </div>
+            ))}
+
+          <Card className="bg-[#19191d] border-white/[0.08]">
+            <CardHeader className="p-3">
+              <CardTitle className="text-xs font-medium text-gray-400">Calculated outputs</CardTitle>
+            </CardHeader>
+            <CardContent className="p-3 pt-0 space-y-1 text-xs text-gray-200">
+              {OUTPUT_ROWS.map((label) => (
+                <ReadoutRow key={label} label={label} value={outputByLabel.get(label) ?? "—"} />
+              ))}
+              {outputByLabel.size === 0 && (
+                <p className="pt-1 text-[11px] text-gray-500">
+                  Populated after you save &amp; run compute.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </>
+      )}
     </div>
   );
 }

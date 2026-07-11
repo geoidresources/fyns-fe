@@ -63,7 +63,13 @@ import {
   type DrawMode,
   type DrawOptions,
 } from "@/components/viewer/MeasurementPanel";
-import { MeasurePalette, type LiveReadout } from "@/components/viewer/MeasurePalette";
+import {
+  MeasurePalette,
+  DEFAULT_STOCKPILE_FACTORS,
+  type LiveReadout,
+  type StockpileFactors,
+  type MeasureOutput,
+} from "@/components/viewer/MeasurePalette";
 import { FeatureInspector } from "@/components/viewer/FeatureInspector";
 import { ViewerToolRail } from "@/components/viewer/ViewerToolRail";
 import { ViewerDrawToolbar } from "@/components/viewer/ViewerDrawToolbar";
@@ -166,6 +172,30 @@ function contourVectorRole(role: string): boolean {
 }
 
 const ELEVATION_RAMPS = ["viridis", "terrain", "plasma", "grayscale"] as const;
+
+// Maps a computed stockpile result onto the Measure palette's "Calculated
+// outputs" rows. total_* keys are what the stockpile compute emits; the bare
+// keys cover a single-pile result. Rows with no matching key are omitted, so an
+// un-computed measurement yields [] (the palette then shows em-dash placeholders).
+function deriveMeasureOutputs(result?: Record<string, number>): MeasureOutput[] {
+  if (!result) return [];
+  const fmt = (n: number, unit: string) =>
+    `${n.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${unit}`;
+  const rows: [label: string, keys: string[], unit: string][] = [
+    ["In-situ volume", ["total_volume_m3", "volume_m3"], "m³"],
+    ["Adjusted volume", ["total_adjusted_volume_m3", "adjusted_volume_m3"], "m³"],
+    ["Compacted volume", ["total_compacted_volume_m3", "compacted_volume_m3"], "m³"],
+    ["Tonnage", ["total_tonnage_t", "tonnage_t"], "t"],
+    ["Dry tonnage", ["total_dry_tonnage_t", "dry_tonnage_t"], "t"],
+    ["Saleable tonnage", ["total_saleable_tonnage_t", "saleable_tonnage_t"], "t"],
+  ];
+  const out: MeasureOutput[] = [];
+  for (const [label, keys, unit] of rows) {
+    const key = keys.find((k) => typeof result[k] === "number" && Number.isFinite(result[k]));
+    if (key) out.push({ label, value: fmt(result[key], unit) });
+  }
+  return out;
+}
 
 // proxyGcsUrls deep-rewrites storage.googleapis.com URLs onto the app's /gcs
 // same-origin proxy (next.config.ts rewrites) — the bucket has no CORS policy
@@ -279,6 +309,10 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
   // in the toolbars that didn't start the operation.
   const [activeToolKey, setActiveToolKey] = useState<string | null>(null);
   const [volumeMethod, setVolumeMethod] = useState("smart-base");
+  // Measure-palette stockpile config, persisted into the measurement's compute
+  // params on save (template + moisture/grade/swell/compaction factors).
+  const [measureTemplate, setMeasureTemplate] = useState("stockpile");
+  const [measureFactors, setMeasureFactors] = useState<StockpileFactors>(DEFAULT_STOCKPILE_FACTORS);
   const [terrainExaggeration, setTerrainExaggeration] = useState(1);
   const [baseMap, setBaseMap] = useState("satellite");
   const [colorMap, setColorMap] = useState("None");
@@ -1893,9 +1927,25 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
 
       // params is stored verbatim by asset-svc; volume_method records the
       // palette's base-surface choice (compute auto-resolves DSM−DTM today),
-      // slope marks a grade-focused polyline.
+      // slope marks a grade-focused polyline. For a volumetric (stockpile)
+      // measurement the palette factors become a single default material entry
+      // (no polygon_id → the processor applies it to the pile): the swell field
+      // is a multiplier (1.15) so it maps onto the backend's fractional
+      // swell_shrink_factor (0.15); compaction/moisture/grade pass through.
       const params: Record<string, unknown> = {};
-      if (kind === "volume") params.volume_method = volumeMethod;
+      if (kind === "volume") {
+        params.volume_method = volumeMethod;
+        const swell = parseFloat(measureFactors.swell);
+        const compaction = parseFloat(measureFactors.compaction);
+        const moisture = parseFloat(measureFactors.moisture);
+        const grade = parseFloat(measureFactors.grade);
+        const material: Record<string, unknown> = { material_name: measureTemplate };
+        if (Number.isFinite(swell)) material.swell_shrink_factor = swell - 1;
+        if (Number.isFinite(compaction)) material.compaction_factor = compaction;
+        if (Number.isFinite(moisture)) material.moisture_pct = moisture;
+        if (Number.isFinite(grade)) material.grade_factor = grade;
+        params.materials = [material];
+      }
       if (slope) params.slope = true;
 
       const created = await createMeasurement(surveyId, {
@@ -1920,7 +1970,15 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
     } finally {
       setSaving(false);
     }
-  }, [surveyId, volumeMethod, cleanupDraw, refreshMeasurements, triggerCompute]);
+  }, [
+    surveyId,
+    volumeMethod,
+    measureTemplate,
+    measureFactors,
+    cleanupDraw,
+    refreshMeasurements,
+    triggerCompute,
+  ]);
 
   const removeMeasurement = useCallback(
     async (id: string) => {
@@ -2218,8 +2276,15 @@ export function SurveyViewer({ surveyId }: { surveyId: string }) {
                 <MeasurePalette
                   activeToolKey={activeToolKey}
                   readout={readout}
+                  template={measureTemplate}
+                  onTemplate={setMeasureTemplate}
                   volumeMethod={volumeMethod}
                   onVolumeMethod={setVolumeMethod}
+                  factors={measureFactors}
+                  onFactor={(key, value) =>
+                    setMeasureFactors((prev) => ({ ...prev, [key]: value }))
+                  }
+                  outputs={deriveMeasureOutputs(selectedMeasurement?.result)}
                   onStartDraw={startDraw}
                   onStartProbe={startProbe}
                   onClose={cancelDraw}

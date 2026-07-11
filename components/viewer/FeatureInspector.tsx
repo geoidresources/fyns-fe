@@ -36,7 +36,10 @@ interface FeatureInspectorProps {
 const METRIC_LABELS: [key: string, label: string, unit: string][] = [
   ["total_volume_m3", "Volume", "m³"],
   ["total_adjusted_volume_m3", "Adj. volume", "m³"],
+  ["total_compacted_volume_m3", "Compacted vol.", "m³"],
   ["total_tonnage_t", "Tonnage", "t"],
+  ["total_dry_tonnage_t", "Dry tonnage", "t"],
+  ["total_saleable_tonnage_t", "Saleable", "t"],
   ["delta_volume_m3", "Δ volume", "m³"],
   ["delta_tonnage_t", "Δ tonnage", "t"],
   ["active_pile_count", "Piles", ""],
