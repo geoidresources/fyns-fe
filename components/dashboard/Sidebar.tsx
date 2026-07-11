@@ -13,7 +13,7 @@ export function Sidebar() {
         <SidebarItem icon={<Globe size={22} />} active href="/globe" />
         <SidebarItem icon={<Map size={22} />} href="#" />
         <SidebarItem icon={<BarChart2 size={22} />} href="#" />
-        <SidebarItem icon={<Upload size={22} />} href="#" />
+        <SidebarItem icon={<Upload size={22} />} href="/upload" />
         <SidebarItem icon={<FolderOpen size={22} />} href="#" />
         <SidebarItem icon={<FileText size={22} />} href="#" />
       </div>

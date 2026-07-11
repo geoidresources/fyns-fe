@@ -38,6 +38,126 @@ export function listSurveys(projectId: string): Promise<{ surveys: Survey[] }> {
   return apiFetch<{ surveys: Survey[] }>(BASE, `/surveys?project_id=${encodeURIComponent(projectId)}`);
 }
 
+/** Body for POST /surveys — working CRS / vertical datum are NOT client-supplied;
+ * asset-svc snapshots them from the project. */
+export interface CreateSurveyRequest {
+  project_id: string;
+  survey_date: string; // YYYY-MM-DD
+  survey_type?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export function createSurvey(req: CreateSurveyRequest): Promise<Survey> {
+  return apiFetch<Survey>(BASE, "/surveys", { method: "POST", body: req });
+}
+
+// ------------------------------------------------------------------ ingest
+
+/** One requested upload slot (asset-svc ingest.UploadInit). `kind` must be one
+ * of the ingest validKinds: terrain | ortho | pointcloud | vector | site_model
+ * | images | gcp. */
+export interface UploadInitFile {
+  filename: string;
+  kind: string;
+  role?: string;
+  content_type?: string;
+  crs?: string;
+}
+
+/** A registered (or pending) source object on a survey. */
+export interface SourceAsset {
+  id: string;
+  client_id: string;
+  survey_id: string;
+  kind: string;
+  role?: string;
+  url: string;
+  filename?: string;
+  size_bytes?: number;
+  crs?: string;
+  vertical_datum?: string;
+  status: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface InitiatedUpload {
+  asset: SourceAsset;
+  upload_url: string;
+}
+
+/** Mints signed PUT URLs under original/<survey_id>/ and records pending
+ * assets. The client PUTs each file to its upload_url, then calls
+ * markAssetUploaded. */
+export function initUploads(
+  surveyId: string,
+  files: UploadInitFile[]
+): Promise<{ uploads: InitiatedUpload[] }> {
+  return apiFetch<{ uploads: InitiatedUpload[] }>(BASE, `/surveys/${surveyId}/assets/init`, {
+    method: "POST",
+    body: { files },
+  });
+}
+
+export function markAssetUploaded(surveyId: string, assetId: string): Promise<SourceAsset> {
+  return apiFetch<SourceAsset>(BASE, `/surveys/${surveyId}/assets/${assetId}/uploaded`, {
+    method: "PATCH",
+  });
+}
+
+// ---------------------------------------------------------------- generate
+
+/** Addressable input artifact for a processor (asset-svc dtos.ArtifactRefDTO). */
+export interface GenerateArtifactRef {
+  url: string;
+  kind: string;
+  crs?: string;
+}
+
+/** Body for POST /surveys/:id/generate — dispatches one processor workflow.
+ * `payload` is the processor's typed input (workflow-geo-svc framework
+ * schemas); see lib/upload/planner.ts for the per-processor shapes. */
+export interface GenerateRequest {
+  processor_type: string;
+  version?: string;
+  payload?: Record<string, unknown>;
+  inputs?: GenerateArtifactRef[];
+}
+
+export function generateSurvey(
+  surveyId: string,
+  req: GenerateRequest
+): Promise<{ workflow_id: string; status: string }> {
+  return apiFetch<{ workflow_id: string; status: string }>(BASE, `/surveys/${surveyId}/generate`, {
+    method: "POST",
+    body: req,
+  });
+}
+
+// ------------------------------------------------------------------ designs
+
+/** Body for POST /designs — registers an uploaded design file on a project. */
+export interface CreateDesignRequest {
+  project_id: string;
+  name: string;
+  format: string; // dxf | landxml | obj | geojson | ifc
+  file_url: string;
+  source_crs?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface DesignRecord {
+  id: string;
+  project_id: string;
+  name: string;
+  format: string;
+  file_url?: string;
+  status?: string;
+}
+
+export function createDesign(req: CreateDesignRequest): Promise<DesignRecord> {
+  return apiFetch<DesignRecord>(BASE, "/designs", { method: "POST", body: req });
+}
+
 // ---------------------------------------------------------------- manifest
 
 export interface ManifestSurvey {

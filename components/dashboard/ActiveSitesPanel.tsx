@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ChevronRight, Plus } from "lucide-react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Search01Icon } from "@hugeicons/core-free-icons";
@@ -18,13 +19,21 @@ interface SurveyStats {
 }
 
 export function ActiveSitesPanel({ projects, onSiteSelect, selectedSiteId }: ActiveSitesPanelProps) {
+  const router = useRouter();
   const [surveyStats, setSurveyStats] = useState<Record<string, SurveyStats>>({});
+  const [filter, setFilter] = useState("");
+
+  const q = filter.trim().toLowerCase();
+  const visibleProjects = q
+    ? projects.filter((p) => p.name.toLowerCase().includes(q))
+    : projects;
 
   useEffect(() => {
-    if (projects.length === 0) {
-      setSurveyStats({});
-      return;
-    }
+    // Nothing to fetch for an empty project list. Stale stats entries are
+    // harmless — render only reads stats for projects currently in the list —
+    // so no synchronous reset is needed (which would also trip the
+    // set-state-in-effect lint).
+    if (projects.length === 0) return;
 
     let cancelled = false;
 
@@ -73,6 +82,8 @@ export function ActiveSitesPanel({ projects, onSiteSelect, selectedSiteId }: Act
           />
           <input
             type="text"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
             placeholder="Filter sites..."
             className="w-full bg-[#12141A] border border-[#1E2028] rounded-md py-2 pl-9 pr-3 text-sm text-gray-300 placeholder-gray-500 focus:outline-none focus:border-[#C97A4E] transition-colors"
           />
@@ -85,7 +96,12 @@ export function ActiveSitesPanel({ projects, onSiteSelect, selectedSiteId }: Act
 
       <div className="flex-1 overflow-y-auto">
         <div className="flex flex-col gap-1 px-4">
-          {projects.map((site) => {
+          {visibleProjects.length === 0 && (
+            <p className="px-2 py-3 text-xs text-gray-500">
+              {q ? "No sites match your filter." : "No active sites."}
+            </p>
+          )}
+          {visibleProjects.map((site) => {
             const isActive = site.lifecycle_status === "active";
             const stats = surveyStats[site.id];
             const surveys = stats?.count ?? "…";
@@ -118,7 +134,10 @@ export function ActiveSitesPanel({ projects, onSiteSelect, selectedSiteId }: Act
       </div>
 
       <div className="px-6 mt-4">
-        <button className="w-full py-2 flex items-center justify-center gap-2 text-sm text-[#C97A4E] hover:text-[#e08959] transition-colors">
+        <button
+          onClick={() => router.push("/upload?new=1")}
+          className="w-full py-2 flex items-center justify-center gap-2 text-sm text-[#C97A4E] hover:text-[#e08959] transition-colors"
+        >
           <Plus size={16} />
           New site
         </button>

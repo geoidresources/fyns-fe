@@ -34,7 +34,7 @@ export function resolveServiceBase(
 }
 
 interface ApiFetchOptions {
-  method?: "GET" | "POST" | "PUT" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   /** Skip the Authorization header (e.g. login). */
   noAuth?: boolean;

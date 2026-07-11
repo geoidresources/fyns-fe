@@ -54,3 +54,20 @@ export function listProjects(): Promise<Project[]> {
 export function getProject(id: string): Promise<Project> {
   return apiFetch<Project>(BASE, `/project/${id}`);
 }
+
+/** Body for POST /project — mirrors user-svc dtos.CreateProjectRequest.
+ * Geo/CRS fields are optional; asset-svc snapshots crs_epsg/vertical_datum
+ * onto each new survey as its working CRS. */
+export interface CreateProjectRequest {
+  name: string;
+  description?: string;
+  location_name?: string;
+  crs_epsg?: number;
+  crs_label?: string;
+  vertical_datum?: string;
+  primary_material?: string;
+}
+
+export function createProject(req: CreateProjectRequest): Promise<Project> {
+  return apiFetch<Project>(BASE, "/project", { method: "POST", body: req });
+}

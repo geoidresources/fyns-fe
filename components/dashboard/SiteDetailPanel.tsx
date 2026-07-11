@@ -24,7 +24,14 @@ export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onC
       .catch((err) => console.error("Failed to fetch project details:", err));
     listSurveys(projectId)
       .then((res) => {
-        if (!cancelled) setSurveys(res.surveys || []);
+        if (cancelled) return;
+        // listSurveys does not guarantee an order, so sort newest-first here —
+        // the "Open viewer" CTA below opens surveys[0], and both this list and
+        // SurveyList/ActiveSitesPanel must agree on which survey is "latest".
+        const list = (res.surveys || [])
+          .slice()
+          .sort((a, b) => b.survey_date.localeCompare(a.survey_date));
+        setSurveys(list);
       })
       .catch((err) => console.error("Failed to fetch surveys:", err));
     return () => {
@@ -74,7 +81,10 @@ export function SiteDetailPanel({ projectId, onClose }: { projectId: string; onC
 
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-sm font-semibold text-gray-300">Surveys</h3>
-          <button className="flex items-center gap-1 bg-[#C97A4E] hover:bg-[#b06941] text-[#0A0D14] font-medium text-xs px-3 py-1.5 rounded-full transition-colors">
+          <button
+            onClick={() => router.push(`/upload?site=${projectId}`)}
+            className="flex items-center gap-1 bg-[#C97A4E] hover:bg-[#b06941] text-[#0A0D14] font-medium text-xs px-3 py-1.5 rounded-full transition-colors"
+          >
             <HugeiconsIcon icon={Upload01Icon} size={14} color="#0A0D14" strokeWidth={2} />
             Upload
           </button>
