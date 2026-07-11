@@ -35,17 +35,6 @@ export default function MarketingLayout({
             />
             <span className="text-[13px] text-[#71717A]">TerraMine</span>
           </div>
-          <nav className="flex gap-6">
-            {["Documentation", "API", "Changelog", "Contact"].map((label) => (
-              <a
-                key={label}
-                href="#"
-                className="text-[13px] text-[#71717A] no-underline transition-colors hover:text-[#A1A1AA]"
-              >
-                {label}
-              </a>
-            ))}
-          </nav>
           <div className="text-[12px] text-[#71717A]">
             © 2026 GEOID Resources. All rights reserved.
           </div>

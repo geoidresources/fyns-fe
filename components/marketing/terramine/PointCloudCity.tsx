@@ -10,6 +10,19 @@ interface Dot {
 }
 
 /**
+ * Tune point-cloud building heights.
+ * max height ≈ minHeight + heightRange (center buildings; edges scale by edgeScaleMin).
+ */
+const BUILDING_CONFIG = {
+  minHeight: 150,
+  heightRange: 480,
+  edgeScaleMin: 0.55,
+  groundOffset: 20,
+  pointDensity: 0.08,
+  canvasHeight: 700,
+} as const;
+
+/**
  * Animated point-cloud city, ported faithfully from the TerraMine design export
  * (`_initCanvas` / `_draw`). A scan line sweeps vertically, briefly brightening
  * nearby points. Starts once the canvas scrolls into view.
@@ -26,8 +39,8 @@ export function PointCloudCity() {
 
     let dots: Dot[] = [];
     let cW = 0;
-    let cH = 520;
-    let sy = 520;
+    let cH = BUILDING_CONFIG.canvasHeight;
+    let sy = BUILDING_CONFIG.canvasHeight;
 
     const init = () => {
       // Re-init (on resize) restarts the draw loop — cancel the running one
@@ -36,7 +49,7 @@ export function PointCloudCity() {
       const parent = canvas.parentElement;
       if (!parent) return;
       const W = parent.offsetWidth;
-      const H = 520;
+      const H = BUILDING_CONFIG.canvasHeight;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       canvas.width = W * dpr;
       canvas.height = H * dpr;
@@ -50,11 +63,14 @@ export function PointCloudCity() {
       const bc = Math.floor(W / 28);
       for (let i = 0; i < bc; i++) {
         const cf = 1 - Math.abs(i - bc / 2) / (bc / 2);
-        const bh = (40 + Math.random() * 140) * (0.3 + cf * 0.7);
+        const edgeScale =
+          BUILDING_CONFIG.edgeScaleMin + cf * (1 - BUILDING_CONFIG.edgeScaleMin);
+        const bh =
+          (BUILDING_CONFIG.minHeight + Math.random() * BUILDING_CONFIG.heightRange) * edgeScale;
         const bx = i * (W / bc);
         const bw = W / bc - 3;
-        const by = H - bh - 25;
-        const cnt = Math.floor(bw * bh * 0.08);
+        const by = H - bh - BUILDING_CONFIG.groundOffset;
+        const cnt = Math.floor(bw * bh * BUILDING_CONFIG.pointDensity);
         const ef = Math.abs(i - bc / 2) / bc;
         for (let j = 0; j < cnt; j++) {
           const dx = bx + Math.random() * bw;
@@ -69,7 +85,12 @@ export function PointCloudCity() {
         }
       }
       for (let i = 0; i < W * 0.25; i++) {
-        next.push({ x: Math.random() * W, y: H - 25 + Math.random() * 18, a: 0.05 + Math.random() * 0.1, s: 1 });
+        next.push({
+          x: Math.random() * W,
+          y: H - BUILDING_CONFIG.groundOffset + Math.random() * 18,
+          a: 0.05 + Math.random() * 0.1,
+          s: 1,
+        });
       }
       for (let i = 0; i < 25; i++) {
         next.push({ x: Math.random() * W, y: Math.random() * (H - 50), a: 0.02 + Math.random() * 0.06, s: 1 });
@@ -137,8 +158,12 @@ export function PointCloudCity() {
 
   return (
     <section className="py-20">
-      <div className="relative h-[520px] w-full">
-        <canvas ref={canvasRef} className="block h-[520px] w-full" />
+      <div className="relative w-full" style={{ height: BUILDING_CONFIG.canvasHeight }}>
+        <canvas
+          ref={canvasRef}
+          className="block w-full"
+          style={{ height: BUILDING_CONFIG.canvasHeight }}
+        />
       </div>
       <div
         className="flex h-12 items-center justify-center"
