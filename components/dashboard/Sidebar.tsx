@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Menu, Globe, Map, BarChart2, Upload, FolderOpen, FileText, Settings, HelpCircle } from "lucide-react";
+import { Menu, Globe, Upload, FolderOpen, FileText, Settings, HelpCircle } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -20,8 +20,6 @@ export function Sidebar() {
           active={pathname === "/globe" || pathname.startsWith("/viewer/")}
           href="/globe"
         />
-        <SidebarItem icon={<Map size={22} />} href="#" />
-        <SidebarItem icon={<BarChart2 size={22} />} href="#" />
         <SidebarItem icon={<Upload size={22} />} active={pathname === "/upload"} href="/upload" />
         <SidebarItem icon={<FolderOpen size={22} />} active={pathname === "/files"} href="/files" />
         <SidebarItem icon={<FileText size={22} />} href="#" />
