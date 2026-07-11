@@ -9,7 +9,7 @@ import type { NextRequest } from "next/server";
 // authorization. Do NOT set a `runtime` config here: proxy is Node.js-only and
 // setting runtime throws.
 
-const PROTECTED = ["/globe", "/viewer", "/upload"];
+const PROTECTED = ["/globe", "/viewer", "/upload", "/files"];
 const AUTH_ROUTES = ["/sign-in", "/sign-up"];
 
 export function proxy(request: NextRequest) {
@@ -38,5 +38,5 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/globe", "/viewer/:path*", "/upload", "/sign-in", "/sign-up"],
+  matcher: ["/globe", "/viewer/:path*", "/upload", "/files", "/sign-in", "/sign-up"],
 };

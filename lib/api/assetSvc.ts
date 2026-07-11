@@ -104,6 +104,12 @@ export function markAssetUploaded(surveyId: string, assetId: string): Promise<So
   });
 }
 
+/** Source objects uploaded/registered on a survey (status: pending_upload |
+ * registered). */
+export function listSurveyAssets(surveyId: string): Promise<{ assets: SourceAsset[] }> {
+  return apiFetch<{ assets: SourceAsset[] }>(BASE, `/surveys/${surveyId}/assets`);
+}
+
 // ---------------------------------------------------------------- generate
 
 /** Addressable input artifact for a processor (asset-svc dtos.ArtifactRefDTO). */
@@ -151,11 +157,20 @@ export interface DesignRecord {
   name: string;
   format: string;
   file_url?: string;
+  source_crs?: string;
   status?: string;
+  created_at?: string;
 }
 
 export function createDesign(req: CreateDesignRequest): Promise<DesignRecord> {
   return apiFetch<DesignRecord>(BASE, "/designs", { method: "POST", body: req });
+}
+
+export function listDesigns(projectId: string): Promise<{ designs: DesignRecord[] }> {
+  return apiFetch<{ designs: DesignRecord[] }>(
+    BASE,
+    `/designs?project_id=${encodeURIComponent(projectId)}`
+  );
 }
 
 // ---------------------------------------------------------------- manifest
