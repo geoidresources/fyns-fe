@@ -21,6 +21,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   ArrowUpDown,
   ChevronRight,
+  Eye,
+  EyeOff,
   Filter,
   Folder,
   FolderTree,
@@ -49,7 +51,10 @@ import {
   legacyFolderTreeSource,
   type WorkspaceTreeNode,
 } from "@/lib/viewer/workspaceTree";
-import { useViewerStore } from "@/lib/viewer/state/store";
+import {
+  isMeasurementVisibleOnCanvas,
+  useViewerStore,
+} from "@/lib/viewer/state/store";
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
 import { metricsOf, resultForKind } from "@/lib/viewer/calc";
 import type { PanelMeasurement } from "@/lib/viewer/sampleData";
@@ -142,31 +147,52 @@ function collectNodeIds(nodes: WorkspaceTreeNode[], out: string[] = []): string[
   return out;
 }
 
+/** All measurement ids under a folder/workspace (direct + nested). */
+function collectSubtreeItemIds(node: WorkspaceTreeNode): string[] {
+  const ids = [...node.itemIds];
+  for (const child of node.children) ids.push(...collectSubtreeItemIds(child));
+  return ids;
+}
+
 // -------------------------------------------------------------- measurement row
 
 function MeasurementRow({
   m,
   busy,
+  visible,
   onSelect,
   onCompute,
   onDelete,
+  onToggleVisible,
 }: {
   m: PanelMeasurement;
   busy: boolean;
+  visible: boolean;
   onSelect: (m: PanelMeasurement) => void;
   onCompute: (id: string) => void;
   onDelete: (id: string) => void;
+  onToggleVisible: (id: string, visible: boolean) => void;
 }) {
   const canCompute = m.status === "draft" || m.status === "failed";
   const showDot = !m.demo && m.status !== "completed";
   return (
-    <div className="group flex h-7 items-center gap-2 rounded-[4px] px-2 hover:bg-white/[0.03]">
+    <div
+      className={`group flex h-7 items-center gap-2 rounded-[4px] px-2 transition-colors ${
+        visible
+          ? "bg-[#C97A4E]/10 hover:bg-[#C97A4E]/15"
+          : "hover:bg-white/[0.03]"
+      }`}
+    >
       {showDot && <StatusDot status={m.status} />}
       <button
         type="button"
         onClick={() => onSelect(m)}
         title="Inspect measurement"
-        className="min-w-0 flex-1 truncate text-left text-[11px] text-[#a1a1aa] transition-colors hover:text-[#F3F4F6]"
+        className={`min-w-0 flex-1 truncate text-left text-[11px] transition-colors ${
+          visible
+            ? "font-medium text-[#F3F4F6] hover:text-white"
+            : "text-[#52525b] hover:text-[#a1a1aa]"
+        }`}
       >
         {measurementLabel(m)}
       </button>
@@ -185,6 +211,20 @@ function MeasurementRow({
         >
           demo
         </span>
+      )}
+      {!m.demo && (
+        <button
+          type="button"
+          onClick={() => onToggleVisible(m.id, !visible)}
+          title={visible ? "Hide on viewer" : "Show on viewer"}
+          className={`shrink-0 transition-colors ${
+            visible
+              ? "text-[#C97A4E] hover:text-[#E09A6E]"
+              : "text-gray-600 hover:text-gray-400"
+          }`}
+        >
+          {visible ? <Eye size={12} /> : <EyeOff size={12} />}
+        </button>
       )}
       {!m.demo && (
         <div className="hidden shrink-0 items-center gap-1 group-hover:flex">
@@ -222,20 +262,26 @@ function TreeNode({
   sortRecent,
   busyIds,
   collapsed,
+  visibility,
   onToggle,
   onSelect,
   onCompute,
   onDelete,
+  onToggleVisible,
+  onToggleFolderVisible,
 }: {
   node: WorkspaceTreeNode;
   byId: Map<string, PanelMeasurement>;
   sortRecent: boolean;
   busyIds: Set<string>;
   collapsed: Set<string>;
+  visibility: Record<string, boolean>;
   onToggle: (id: string) => void;
   onSelect: (m: PanelMeasurement) => void;
   onCompute: (id: string) => void;
   onDelete: (id: string) => void;
+  onToggleVisible: (id: string, visible: boolean) => void;
+  onToggleFolderVisible: (ids: string[]) => void;
 }) {
   const open = !collapsed.has(node.id);
   const isWorkspace = node.kind === "workspace";
@@ -250,26 +296,61 @@ function TreeNode({
       sortRecent ? b.updated_at.localeCompare(a.updated_at) : a.name.localeCompare(b.name)
     );
 
+  // Folder eye covers every non-demo measurement in the subtree.
+  const subtreeIds = collectSubtreeItemIds(node);
+  const toggleableIds = subtreeIds.filter((id) => {
+    const m = byId.get(id);
+    return m && !m.demo;
+  });
+  const anyVisible = toggleableIds.some(
+    (id) => byId.get(id) != null && isMeasurementVisibleOnCanvas(byId.get(id)!, visibility)
+  );
+  const folderEyeActive = toggleableIds.length > 0 && anyVisible;
+
   return (
     <Collapsible open={open} onOpenChange={() => onToggle(node.id)}>
-      <CollapsibleTrigger
+      <div
         className="group flex h-8 w-full items-center gap-1.5 rounded-[4px] px-2 hover:bg-white/[0.03]"
         style={{ paddingLeft: `${8 + node.depth * 14}px` }}
       >
-        <ChevronRight
-          size={14}
-          className={`shrink-0 text-gray-500 transition-transform ${open ? "rotate-90" : ""}`}
-        />
-        <NodeIcon size={14} className="shrink-0 text-gray-500" />
-        <span
-          className={`min-w-0 flex-1 truncate text-left text-xs ${
-            isWorkspace ? "font-medium text-[#F3F4F6]" : "text-[#F3F4F6]"
-          }`}
-        >
-          {node.name}
-        </span>
-        <span className="shrink-0 text-[11px] text-[#71717a]">({subtreeCount(node)})</span>
-      </CollapsibleTrigger>
+        <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+          <ChevronRight
+            size={14}
+            className={`shrink-0 text-gray-500 transition-transform ${open ? "rotate-90" : ""}`}
+          />
+          <NodeIcon size={14} className="shrink-0 text-gray-500" />
+          <span
+            className={`min-w-0 flex-1 truncate text-left text-xs ${
+              isWorkspace
+                ? "font-medium text-[#F3F4F6]"
+                : folderEyeActive
+                  ? "text-[#F3F4F6]"
+                  : "text-[#a1a1aa]"
+            }`}
+          >
+            {node.name}
+          </span>
+          <span className="shrink-0 text-[11px] text-[#71717a]">({subtreeCount(node)})</span>
+        </CollapsibleTrigger>
+        {toggleableIds.length > 0 && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onToggleFolderVisible(toggleableIds);
+            }}
+            title={folderEyeActive ? "Hide all in group" : "Show all in group"}
+            className={`shrink-0 transition-colors ${
+              folderEyeActive
+                ? "text-[#C97A4E] hover:text-[#E09A6E]"
+                : "text-gray-600 hover:text-gray-400"
+            }`}
+          >
+            {folderEyeActive ? <Eye size={13} /> : <EyeOff size={13} />}
+          </button>
+        )}
+      </div>
       <CollapsibleContent>
         {node.children.map((child) => (
           <TreeNode
@@ -279,10 +360,13 @@ function TreeNode({
             sortRecent={sortRecent}
             busyIds={busyIds}
             collapsed={collapsed}
+            visibility={visibility}
             onToggle={onToggle}
             onSelect={onSelect}
             onCompute={onCompute}
             onDelete={onDelete}
+            onToggleVisible={onToggleVisible}
+            onToggleFolderVisible={onToggleFolderVisible}
           />
         ))}
         <div style={{ paddingLeft: `${14 + node.depth * 14}px` }}>
@@ -291,9 +375,11 @@ function TreeNode({
               key={m.id}
               m={m}
               busy={busyIds.has(m.id)}
+              visible={isMeasurementVisibleOnCanvas(m, visibility)}
               onSelect={onSelect}
               onCompute={onCompute}
               onDelete={onDelete}
+              onToggleVisible={onToggleVisible}
             />
           ))}
         </div>
@@ -306,6 +392,7 @@ function TreeNode({
 
 export function WorkspaceTree() {
   const measurements = useViewerStore((s) => s.measurements);
+  const measurementVisibility = useViewerStore((s) => s.measurementVisibility);
   const measurementSearch = useViewerStore((s) => s.measurementSearch);
   const searchingMeasurements = useViewerStore((s) => s.searchingMeasurements);
   const drawMode = useViewerStore((s) => s.drawMode);
@@ -314,6 +401,8 @@ export function WorkspaceTree() {
   const projectId = useViewerStore((s) => s.manifest?.survey.project_id ?? "");
   const surveyId = useViewerStore((s) => s.surveyId);
   const setMeasurementSearch = useViewerStore((s) => s.setMeasurementSearch);
+  const setMeasurementVisible = useViewerStore((s) => s.setMeasurementVisible);
+  const setMeasurementsVisible = useViewerStore((s) => s.setMeasurementsVisible);
   const actions = useViewerActions();
 
   const [sortRecent, setSortRecent] = useState(false);
@@ -367,6 +456,15 @@ export function WorkspaceTree() {
 
   const toggleAll = () => {
     setCollapsed(allCollapsed ? new Set() : new Set(allNodeIds));
+  };
+
+  /** Folder eye: if any saved item is visible → hide all; else show all. */
+  const toggleFolderVisible = (ids: string[]) => {
+    const anyOn = ids.some((id) => {
+      const m = byId.get(id);
+      return m ? isMeasurementVisibleOnCanvas(m, measurementVisibility) : false;
+    });
+    setMeasurementsVisible(ids, !anyOn);
   };
 
   const treeEmpty = nodes.every((n) => subtreeCount(n) === 0);
@@ -466,10 +564,13 @@ export function WorkspaceTree() {
                 sortRecent={sortRecent}
                 busyIds={busyIds}
                 collapsed={collapsed}
+                visibility={measurementVisibility}
                 onToggle={toggleNode}
                 onSelect={actions.selectMeasurementRow}
                 onCompute={actions.triggerCompute}
                 onDelete={actions.removeMeasurement}
+                onToggleVisible={setMeasurementVisible}
+                onToggleFolderVisible={toggleFolderVisible}
               />
             ))}
         </div>

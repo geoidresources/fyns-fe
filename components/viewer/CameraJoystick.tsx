@@ -10,7 +10,7 @@ import {
   defined,
   type Viewer as CesiumViewer,
 } from "cesium";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Orbit } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Home, Orbit } from "lucide-react";
 
 // Max distance (px) the knob travels from the base center. Kept well inside the
 // base radius so the knob never clips the rim at full deflection.
@@ -62,6 +62,8 @@ interface CameraJoystickProps {
   viewerRef: React.RefObject<CesiumViewer | null>;
   /** Becomes true once the viewer is mounted and safe to drive. */
   ready: boolean;
+  /** Reset the camera to the survey's first framing. */
+  onHome?: () => void;
 }
 
 /**
@@ -70,7 +72,7 @@ interface CameraJoystickProps {
  * toward the horizon (oblique 3D), push down to return toward top-down. Works
  * with mouse, touch and pen via pointer capture.
  */
-export function CameraJoystick({ viewerRef, ready }: CameraJoystickProps) {
+export function CameraJoystick({ viewerRef, ready, onHome }: CameraJoystickProps) {
   const [active, setActive] = useState(false);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
 
@@ -188,10 +190,7 @@ export function CameraJoystick({ viewerRef, ready }: CameraJoystickProps) {
   const dy = knob.y / KNOB_RADIUS;
 
   return (
-    <div className="absolute right-6 bottom-6 z-10 flex flex-col items-center gap-2 select-none">
-      <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
-        Camera angle
-      </span>
+    <div className="absolute left-6 top-6 z-10 flex flex-col items-center gap-2 select-none">
       <div
         ref={baseRef}
         onPointerDown={onPointerDown}
@@ -247,6 +246,18 @@ export function CameraJoystick({ viewerRef, ready }: CameraJoystickProps) {
           <Orbit size={20} strokeWidth={2.25} />
         </div>
       </div>
+
+      {onHome && (
+        <button
+          type="button"
+          onClick={onHome}
+          aria-label="Reset camera to home view"
+          title="Reset camera to home view"
+          className="flex h-10 w-10 items-center justify-center rounded-full border border-[#1E2028] bg-[#12141A]/90 text-gray-400 shadow-2xl backdrop-blur-xl transition-colors hover:border-[#C97A4E]/50 hover:text-[#C97A4E]"
+        >
+          <Home size={16} strokeWidth={2.25} />
+        </button>
+      )}
     </div>
   );
 }

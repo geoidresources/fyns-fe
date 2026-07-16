@@ -131,6 +131,13 @@ export interface ViewerShellData {
   layerControls: LayerControl[];
   designControls: DesignControl[];
 
+  /**
+   * Per-measurement canvas visibility (eye toggles in WorkspaceTree).
+   * Missing keys are hidden — the viewer starts with no stockpiles painted;
+   * geometry appears only after the user turns an eye on.
+   */
+  measurementVisibility: Record<string, boolean>;
+
   busyIds: Set<string>;
   saving: boolean;
   measurementSearch: string;
@@ -160,6 +167,9 @@ export interface ViewerShellActions {
 
   setLayerVisible: (key: string, visible: boolean) => void;
   setLayerOpacity: (key: string, opacity: number) => void;
+  setMeasurementVisible: (id: string, visible: boolean) => void;
+  /** Bulk set — used by folder-level eye toggles (all items in a group). */
+  setMeasurementsVisible: (ids: string[], visible: boolean) => void;
   setView: (patch: Partial<ViewSettings>) => void;
   setCameraPose: (pose: CameraPose | null) => void;
 
@@ -220,6 +230,8 @@ function defaultData(surveyId: string): ViewerShellData {
     measurements: [],
     layerControls: [],
     designControls: [],
+
+    measurementVisibility: {},
 
     busyIds: new Set<string>(),
     saving: false,
@@ -335,6 +347,21 @@ export function createViewerStore(
         ),
       }),
 
+    setMeasurementVisible: (id, visible) =>
+      set({
+        measurementVisibility: {
+          ...get().measurementVisibility,
+          [id]: visible,
+        },
+      }),
+
+    setMeasurementsVisible: (ids, visible) => {
+      if (ids.length === 0) return;
+      const next = { ...get().measurementVisibility };
+      for (const id of ids) next[id] = visible;
+      set({ measurementVisibility: next });
+    },
+
     setView: (patch) => set({ view: { ...get().view, ...patch } }),
     setCameraPose: (pose) => set({ cameraPose: pose }),
 
@@ -438,4 +465,12 @@ export function useViewerStoreApi(): StoreApi<ViewerShellState> {
     );
   }
   return store;
+}
+
+/** Canvas visibility — opt-in only; missing / false means hidden. */
+export function isMeasurementVisibleOnCanvas(
+  m: Pick<Measurement, "id">,
+  visibility: Record<string, boolean>
+): boolean {
+  return visibility[m.id] === true;
 }

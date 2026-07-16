@@ -69,6 +69,8 @@ import { buildPointCloudStyle } from "@/lib/viewer/pointcloud";
 import { USE_WORLD_TERRAIN } from "@/lib/viewer/cesiumIon";
 import {
   ACCENT,
+  DEFAULT_CENTER,
+  bboxToRectangle,
   isThinSurfaceMesh,
   manifestLayersEmpty,
   proxyGcsUrls,
@@ -113,6 +115,7 @@ export function ViewerCanvas() {
   const surveyId = useViewerStore((s) => s.surveyId);
   const manifest = useViewerStore((s) => s.manifest);
   const measurements = useViewerStore((s) => s.measurements);
+  const measurementVisibility = useViewerStore((s) => s.measurementVisibility);
   const layerControls = useViewerStore((s) => s.layerControls);
   const designControls = useViewerStore((s) => s.designControls);
   const measurementSearch = useViewerStore((s) => s.measurementSearch);
@@ -270,6 +273,47 @@ export function ViewerCanvas() {
     },
     [viewerRef]
   );
+
+  /** Reset to the survey's first framing (bbox → tileset bounds → default center). */
+  const goHome = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) return;
+
+    if (manifest) {
+      const rects = [
+        ...(manifest.layers.terrain || []).map((l) => bboxToRectangle(l.bbox)),
+        ...(manifest.layers.ortho || []).map((l) => bboxToRectangle(l.bbox)),
+        ...(manifest.layers.lenses || []).map((l) => bboxToRectangle(l.bbox)),
+        ...(manifest.layers.pointcloud || []).map((l) => bboxToRectangle(l.bbox)),
+      ].filter((r): r is Rectangle => !!r);
+      if (rects.length > 0) {
+        const union = rects.reduce(
+          (acc, r) => Rectangle.union(acc, r, new Rectangle()),
+          rects[0]
+        );
+        flyToRectangle(union);
+        return;
+      }
+    }
+
+    const sphere = surveyBoundsRef.current;
+    if (sphere) {
+      viewer.camera.flyToBoundingSphere(sphere, {
+        duration: 1.8,
+        offset: new HeadingPitchRange(0, CesiumMath.toRadians(-45), sphere.radius * 2.8),
+      });
+      return;
+    }
+
+    viewer.camera.flyTo({
+      destination: Cartesian3.fromDegrees(
+        DEFAULT_CENTER.lng,
+        DEFAULT_CENTER.lat,
+        DEFAULT_CENTER.height
+      ),
+      duration: 2.0,
+    });
+  }, [viewerRef, manifest, flyToRectangle]);
 
   // ------------------------------------------------------- terrain plumbing
   const ensureBaseTerrain = useCallback(async (): Promise<TerrainProvider> => {
@@ -827,6 +871,7 @@ export function ViewerCanvas() {
             });
             const s3 = store.getState();
             s3.setMeasurements([created, ...s3.measurements]); // optimistic — list is newest-first
+            s3.setMeasurementVisible(created.id, true); // show the just-drawn shape
             s3.selectMeasurement(created.id, { fly: false }); // opens the inspector on the draft
             cleanupDraw(); // drop the local draft entity — the datasource takes over
             await refreshMeasurements();
@@ -933,11 +978,13 @@ export function ViewerCanvas() {
     [surveyId, store, refreshMeasurements]
   );
 
-  // Tree-row click: inspect the measurement and frame its geometry (§ non-neg 3
-  // — selecting flies). A map pick, by contrast, does not fly (useScenePicking).
+  // Tree-row click: inspect the measurement, turn its canvas visibility on,
+  // and frame its geometry.
   const selectMeasurementRow = useCallback(
     (m: PanelMeasurement) => {
-      store.getState().selectMeasurement(m.id, { fly: false });
+      const s = store.getState();
+      s.selectMeasurement(m.id, { fly: false });
+      if (!m.demo) s.setMeasurementVisible(m.id, true);
       if (!m.demo && m.geometry) {
         const rect = geometryToRectangle(m.geometry);
         if (rect) flyToRectangle(rect);
@@ -1019,6 +1066,7 @@ export function ViewerCanvas() {
     baseMap,
     layerControls,
     measurements,
+    measurementVisibility,
     terrainExaggeration,
     sunLightingEnabled,
     sunHour,
@@ -1156,12 +1204,14 @@ export function ViewerCanvas() {
               canvas top-center on the measure module. */}
           {isMeasure && <FloatingToolbar />}
 
-          {/* Zero-size anchor: the joystick positions right-6/bottom-6 against
-              it. The detail panel is freely draggable, so we no longer shift
-              for it. The wrapper has no area, so it never intercepts canvas
-              pointer events. */}
-          <div className="absolute bottom-0 right-0 h-0 w-0">
-            <CameraJoystick viewerRef={viewerRef} ready={viewerReady} />
+          {/* Zero-size top-left anchor for the camera joystick. The wrapper has
+              no area, so it never intercepts canvas pointer events. */}
+          <div className="absolute left-0 top-0 h-0 w-0">
+            <CameraJoystick
+              viewerRef={viewerRef}
+              ready={viewerReady}
+              onHome={goHome}
+            />
           </div>
 
           {/* Zone 5 — draggable floating detail (expanded or compact). */}

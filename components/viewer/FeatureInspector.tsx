@@ -45,7 +45,7 @@ import { STYLE_SWATCHES, styleOf, type MeasurementStyle } from "@/lib/viewer/sty
 // after creation") + units dropdown row; Properties | Style tabs; chips →
 // metrics grid (mono) → metadata block (base-method editable via disclosure) →
 // icon action ROWS (Receipt · Run compute · Add to report · Save draft ·
-// Delete) → a mono receipt summary footer. STYLE tab: fill/stroke/label
+// Delete) → STYLE tab: fill/stroke/label
 // controls persisted to params.style (PATCH deep-merge) and applied to the
 // Cesium entities. Draft-first: draft-ness is a chip + a Save row — never a
 // blocking prompt; compute keeps running underneath.
@@ -540,19 +540,6 @@ export function FeatureInspector({
 
   const runLabel = doc ? "Re-run compute" : "Run compute";
 
-  // Mono receipt summary (design footer): the run's provenance at a glance.
-  const receiptSummary = receipt
-    ? [
-        "receipt",
-        receipt.processor ?? null,
-        calcCfg ? `base=${calcCfg.method.replace(/-/g, " ")}` : null,
-        material?.density_t_m3 ? `density=${material.density_t_m3}` : null,
-        calcStamp ? `calc=${calcStamp.slice(11)}` : null,
-      ]
-        .filter(Boolean)
-        .join(" · ")
-    : null;
-
   return (
     <div className={`flex flex-col text-sm text-gray-200 p-3 ${collapsed ? "" : "h-full gap-3 min-h-0"}`}>
       {/* Header — name (pencil to rename, teardown §10) + collapse/close. */}
@@ -796,13 +783,6 @@ export function FeatureInspector({
                     <X size={15} />
                     {isDraft ? "Discard draft" : "Delete"}
                   </button>
-                )}
-
-                {/* Mono receipt summary footer (design). */}
-                {receiptSummary && (
-                  <p className="rounded-md bg-black/30 px-2.5 py-2 font-mono text-[10px] leading-relaxed text-gray-500">
-                    {receiptSummary}
-                  </p>
                 )}
               </div>
             </TabsContent>

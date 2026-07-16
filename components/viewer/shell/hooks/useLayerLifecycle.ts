@@ -14,7 +14,7 @@
 // stay in the refs passed via `deps` (§3.2). Bodies line-identical.
 /* eslint-disable react-hooks/exhaustive-deps */
 
-import { useEffect, type Dispatch, type RefObject, type SetStateAction } from "react";
+import { useEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
 import {
   BoundingSphere,
   Cartesian3,
@@ -75,6 +75,7 @@ export function useLayerLifecycle(deps: {
   baseMap: string;
   layerControls: LayerControl[];
   measurements: import("@/lib/api/assetSvc").Measurement[];
+  measurementVisibility: Record<string, boolean>;
   terrainExaggeration: number;
   sunLightingEnabled: boolean;
   sunHour: number;
@@ -106,6 +107,7 @@ export function useLayerLifecycle(deps: {
     baseMap,
     layerControls,
     measurements,
+    measurementVisibility,
     terrainExaggeration,
     sunLightingEnabled,
     sunHour,
@@ -131,6 +133,12 @@ export function useLayerLifecycle(deps: {
     setLayerControls,
     setDesignControls,
   } = deps;
+
+  // Keep the latest visibility map for the async GeoJSON load callback so a
+  // toggle that lands while load is in flight is not overwritten by a stale
+  // closure when the datasource resolves.
+  const measurementVisibilityRef = useRef(measurementVisibility);
+  measurementVisibilityRef.current = measurementVisibility;
 
   // -------------------------------------------------------- scene setup
   useEffect(() => {
@@ -646,13 +654,16 @@ export function useLayerLifecycle(deps: {
   }, [viewerReady, manifest, layerControls, applyTerrain]);
 
   // -------------------------------------------------- measurement rendering
+  // Opt-in only: the viewer starts empty of stockpiles. A measurement paints
+  // only while its eye is on; hidden ones are omitted from the datasource.
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed()) return;
     let cancelled = false;
 
+    const visibility = measurementVisibilityRef.current;
     const features = measurements
-      .filter((m) => m.geometry)
+      .filter((m) => m.geometry && visibility[m.id] === true)
       .map((m) => ({
         type: "Feature" as const,
         properties: { id: m.id, name: m.name, kind: m.kind, status: m.status },
@@ -672,7 +683,13 @@ export function useLayerLifecycle(deps: {
         // polygon fill/outline, polyline color/width/dash, optional label.
         const byId = new Map(measurements.map((m) => [m.id, m]));
         for (const entity of ds.entities.values) {
-          const id: string | undefined = entity.properties?.id?.getValue?.(JulianDate.now());
+          const raw = entity.properties?.id;
+          const id: string | undefined =
+            typeof raw?.getValue === "function"
+              ? raw.getValue(JulianDate.now())
+              : typeof raw === "string"
+                ? raw
+                : undefined;
           const m = id ? byId.get(id) : undefined;
           if (!m) continue;
           const st = styleOf(m.params);
@@ -737,5 +754,5 @@ export function useLayerLifecycle(deps: {
     return () => {
       cancelled = true;
     };
-  }, [viewerReady, measurements]);
+  }, [viewerReady, measurements, measurementVisibility]);
 }
