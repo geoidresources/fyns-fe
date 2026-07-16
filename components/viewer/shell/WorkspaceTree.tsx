@@ -51,7 +51,7 @@ import {
 } from "@/lib/viewer/workspaceTree";
 import { useViewerStore } from "@/lib/viewer/state/store";
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
-import { metricsOf } from "@/lib/viewer/calc";
+import { metricsOf, resultForKind } from "@/lib/viewer/calc";
 import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 
 // ------------------------------------------------------- ported row helpers
@@ -61,9 +61,9 @@ import type { PanelMeasurement } from "@/lib/viewer/sampleData";
  * bare keys cover client-side plan stats and future per-pile results. */
 function measurementLabel(m: PanelMeasurement): string {
   if (m.demo) return m.name;
-  // metricsOf unwraps the §7.1 v1 result doc (metrics nested under .metrics);
-  // legacy flat rows pass through unchanged.
-  const r = metricsOf(m.result);
+  // The CURRENT kind's stored doc (per-kind results map; legacy fallback) —
+  // the label always matches what the inspector shows for this type.
+  const r = metricsOf(m.demo ? m.result : resultForKind(m));
   const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 });
   if (r) {
     const volume =
@@ -170,6 +170,14 @@ function MeasurementRow({
       >
         {measurementLabel(m)}
       </button>
+      {m.draft && !m.demo && (
+        <span
+          title="Draft — save it from the inspector to keep it"
+          className="shrink-0 rounded-[3px] border border-amber-500/25 px-1 text-[9px] uppercase tracking-wide text-amber-400/90"
+        >
+          draft
+        </span>
+      )}
       {m.demo && (
         <span
           title="Sample data — not from this survey"

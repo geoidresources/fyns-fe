@@ -350,8 +350,15 @@ export interface Measurement {
   geometry?: GeoJsonGeometry;
   params?: Record<string, unknown>;
   status: string; // draft | computing | completed | failed
+  /** Draw-first draft: created the moment a shape is finished, not yet kept.
+   * Promote via updateMeasurement({draft:false}); orthogonal to status. */
+  draft?: boolean;
   result_ref?: string;
+  /** The LATEST run's v1 doc (success or error) — failure display + legacy rows. */
   result?: MeasurementResultDoc;
+  /** Per-calc-type memory: kind → that type's last SUCCESSFUL v1 doc. The type
+   * dropdown is a view switch over this map; compute is explicit Run/Re-run. */
+  results?: Record<string, MeasurementResultDoc>;
   created_at: string;
   updated_at: string;
 }
@@ -362,6 +369,18 @@ export interface CreateMeasurementRequest {
   folder?: string;
   geometry?: GeoJsonGeometry;
   params?: Record<string, unknown>;
+  draft?: boolean;
+}
+
+/** PATCH body — every field optional; omitted = unchanged. `params` is a
+ * PARTIAL object deep-merged server-side over the stored params (§6.1
+ * override semantics); `draft: false` promotes a draw-first draft. */
+export interface UpdateMeasurementRequest {
+  name?: string;
+  folder?: string;
+  kind?: string;
+  params?: Record<string, unknown>;
+  draft?: boolean;
 }
 
 /** Optional `search` filters server-side by measurement name (case-insensitive
@@ -384,6 +403,20 @@ export function createMeasurement(surveyId: string, req: CreateMeasurementReques
 }
 
 /** Dispatches the compute workflow (202). Inputs auto-resolve server-side. */
+/** Partial update (PATCH): rename, re-folder, re-kind, params patch, draft
+ * promotion. Returns the fresh row. */
+export function updateMeasurement(
+  surveyId: string,
+  measurementId: string,
+  body: UpdateMeasurementRequest
+): Promise<Measurement> {
+  return apiFetch<Measurement>(
+    BASE,
+    `/surveys/${surveyId}/measurements/${measurementId}`,
+    { method: "PATCH", body }
+  );
+}
+
 /** Dispatch compute. `body.params` is a partial params object the backend
  * deep-merges over the measurement's stored params AND persists before
  * dispatch (§6.1 — the row always states what ran); `body.force` bypasses the

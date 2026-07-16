@@ -103,6 +103,8 @@ export interface ViewerShellData {
   activeModule: ModuleKey;
   treePanelOpen: boolean;
   detailPanel: "measure" | "inspect" | null;
+  /** UI-only: hide the floating detail without clearing draw/inspect state. */
+  detailPanelCollapsed: boolean;
 
   activeToolKey: string | null;
   drawMode: DrawMode | null;
@@ -114,7 +116,6 @@ export interface ViewerShellData {
   draft: { points: Cartesian3[]; hover: Cartesian3 | null };
 
   selection: Selection | null;
-  isInspectingNew: boolean;
   /** Transient fly-to intent set by `selectMeasurement({fly})`; the
    * ViewerCanvas framing hook (1.3c) consumes it via `clearPendingFly`. Kept
    * as a plain id (not a Cesium handle) so it honors §3.2 containment. */
@@ -142,6 +143,7 @@ export interface ViewerShellData {
 export interface ViewerShellActions {
   setActiveModule: (module: ModuleKey) => void;
   setTreePanelOpen: (open: boolean) => void;
+  setDetailPanelCollapsed: (collapsed: boolean) => void;
 
   startDraw: (mode: DrawMode, opts?: DrawOptions) => void;
   startProbe: (toolKey?: string) => void;
@@ -179,7 +181,6 @@ export interface ViewerShellActions {
   setSearchingMeasurements: (searching: boolean) => void;
   setDraft: (points: Cartesian3[], hover: Cartesian3 | null) => void;
   setProbePoint: (point: LngLatHeight | null) => void;
-  setIsInspectingNew: (isNew: boolean) => void;
 }
 
 export type ViewerShellState = ViewerShellData & ViewerShellActions;
@@ -196,6 +197,7 @@ function defaultData(surveyId: string): ViewerShellData {
     activeModule: "measure",
     treePanelOpen: true,
     detailPanel: null,
+    detailPanelCollapsed: false,
 
     activeToolKey: null,
     drawMode: null,
@@ -207,7 +209,6 @@ function defaultData(surveyId: string): ViewerShellData {
     draft: { points: [], hover: null },
 
     selection: null,
-    isInspectingNew: false,
     pendingFlyToId: null,
 
     cameraPose: null,
@@ -254,6 +255,7 @@ export function createViewerStore(
 
     setActiveModule: (module) => set({ activeModule: module }),
     setTreePanelOpen: (open) => set({ treePanelOpen: open }),
+    setDetailPanelCollapsed: (collapsed) => set({ detailPanelCollapsed: collapsed }),
 
     // Module switching MUST NOT cancel an active draw (§4.1) — startDraw is the
     // only entry that touches drawMode/activeDrawOpts.
@@ -295,30 +297,29 @@ export function createViewerStore(
       set({
         selection: { kind: "measurement", measurementIds: [id] },
         detailPanel: "inspect",
-        isInspectingNew: false,
-        pendingFlyToId: opts?.fly === false ? null : id,
+        detailPanelCollapsed: false,
+            pendingFlyToId: opts?.fly === false ? null : id,
       }),
 
     selectFeature: (props) =>
       set({
         selection: { kind: "feature", measurementIds: [], feature: props },
         detailPanel: "inspect",
-        isInspectingNew: false,
-        pendingFlyToId: null,
+        detailPanelCollapsed: false,
+            pendingFlyToId: null,
       }),
 
     clearSelection: () =>
       set({
         selection: null,
-        isInspectingNew: false,
-        pendingFlyToId: null,
+            pendingFlyToId: null,
         detailPanel: get().detailPanel === "inspect" ? null : get().detailPanel,
       }),
 
     clearPendingFly: () => set({ pendingFlyToId: null }),
 
-    openDetail: (mode) => set({ detailPanel: mode }),
-    closeDetail: () => set({ detailPanel: null }),
+    openDetail: (mode) => set({ detailPanel: mode, detailPanelCollapsed: false }),
+    closeDetail: () => set({ detailPanel: null, detailPanelCollapsed: false }),
 
     setLayerVisible: (key, visible) =>
       set({
@@ -383,7 +384,6 @@ export function createViewerStore(
       set({ searchingMeasurements: searching }),
     setDraft: (points, hover) => set({ draft: { points, hover } }),
     setProbePoint: (point) => set({ probePoint: point }),
-    setIsInspectingNew: (isNew) => set({ isInspectingNew: isNew }),
   }));
 
   if (seed) store.setState(seed);

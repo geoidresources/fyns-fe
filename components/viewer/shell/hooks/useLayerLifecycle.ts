@@ -21,15 +21,25 @@ import {
   Cesium3DTileset,
   ClippingPolygon,
   ClippingPolygonCollection,
+  Color,
+  ColorMaterialProperty,
+  ConstantPositionProperty,
+  ConstantProperty,
   EllipsoidTerrainProvider,
   GeoJsonDataSource,
+  HeightReference,
   ImageryLayer,
   JulianDate,
+  LabelGraphics,
+  LabelStyle,
   Math as CesiumMath,
+  PolylineDashMaterialProperty,
   RequestScheduler,
   UrlTemplateImageryProvider,
   type Viewer as CesiumViewer,
 } from "cesium";
+import { metricsOf, resultForKind } from "@/lib/viewer/calc";
+import { styleOf } from "@/lib/viewer/style";
 import type {
   AssetLayer,
   Manifest,
@@ -658,6 +668,63 @@ export function useLayerLifecycle(deps: {
     })
       .then((ds) => {
         if (cancelled || viewer.isDestroyed()) return;
+        // Per-measurement style (params.style, STYLE tab) over the defaults:
+        // polygon fill/outline, polyline color/width/dash, optional label.
+        const byId = new Map(measurements.map((m) => [m.id, m]));
+        for (const entity of ds.entities.values) {
+          const id: string | undefined = entity.properties?.id?.getValue?.(JulianDate.now());
+          const m = id ? byId.get(id) : undefined;
+          if (!m) continue;
+          const st = styleOf(m.params);
+          const fill = Color.fromCssColorString(st.fill).withAlpha(st.fillOpacity);
+          const stroke = Color.fromCssColorString(st.stroke);
+          const strokeMaterial =
+            st.strokeStyle === "solid"
+              ? new ColorMaterialProperty(stroke)
+              : new PolylineDashMaterialProperty({
+                  color: stroke,
+                  dashLength: st.strokeStyle === "dashed" ? 16 : 6,
+                });
+          if (entity.polygon) {
+            entity.polygon.material = new ColorMaterialProperty(fill);
+          }
+          if (entity.polyline) {
+            entity.polyline.material = strokeMaterial;
+            entity.polyline.width = new ConstantProperty(st.strokeWidth);
+          }
+          if (st.labelVisible && st.labelField !== "none" && m.geometry) {
+            const text =
+              st.labelField === "volume"
+                ? (() => {
+                    const mm = metricsOf(resultForKind(m));
+                    const v = mm.volume_m3 ?? mm.net_change_m3;
+                    return typeof v === "number"
+                      ? `${v.toLocaleString(undefined, { maximumFractionDigits: 0 })} m³`
+                      : m.name;
+                  })()
+                : m.name;
+            // Anchor at the geometry's vertex centroid (good enough for tags).
+            const coords =
+              m.geometry.type === "Polygon"
+                ? ((m.geometry.coordinates as number[][][])[0] ?? [])
+                : ((m.geometry.coordinates as number[][]) ?? []);
+            if (coords.length) {
+              const lng = coords.reduce((a, c) => a + c[0], 0) / coords.length;
+              const lat = coords.reduce((a, c) => a + c[1], 0) / coords.length;
+              entity.position = new ConstantPositionProperty(Cartesian3.fromDegrees(lng, lat));
+              entity.label = new LabelGraphics({
+                text,
+                font: `${st.labelSize}px sans-serif`,
+                fillColor: Color.WHITE,
+                outlineColor: Color.BLACK,
+                outlineWidth: 2,
+                style: LabelStyle.FILL_AND_OUTLINE,
+                heightReference: HeightReference.CLAMP_TO_GROUND,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+              });
+            }
+          }
+        }
         if (measurementDsRef.current) {
           viewer.dataSources.remove(measurementDsRef.current, true);
         }

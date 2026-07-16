@@ -13,10 +13,9 @@
 // through `ViewerActionsProvider` so the zone hosts (which are its descendants)
 // can invoke them while reading DATA from the store directly (§3.6). Chrome in
 // place: FLOATING toolbar over the canvas top-center (measure module), the LEFT
-// dock (layers on survey, collapsed on measure), the RIGHT MeasureSidebar
-// (measurements list + detail on measure), docked StatusBar spanning cols 2–4,
-// the slide-in DetailPanel kept for non-measure feature picking, and the
-// CameraJoystick overlay with the slide-in-aware right offset.
+// dock (measurements list / layers), floating DetailPanel overlay (calc/inspect
+// on measure, feature inspect elsewhere), docked StatusBar spanning cols 2–3,
+// and the CameraJoystick overlay with a detail-panel-aware right offset.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Viewer } from "resium";
@@ -51,22 +50,19 @@ import {
   deleteMeasurement,
   getManifest,
   listMeasurements,
+  updateMeasurement,
 } from "@/lib/api/assetSvc";
 import { ApiError } from "@/lib/api/client";
-import {
-  computeAreaSquareMeters,
-  computeDistanceMeters,
-  computeGrade,
-  computePerimeterMeters,
-  geometryToRectangle,
-  pickScenePosition,
-} from "@/lib/viewer/measure";
+import { geometryToRectangle, pickScenePosition } from "@/lib/viewer/measure";
 import {
   CalcParamsError,
+  LEAN_RENDER,
+  coerceMethodForKind,
   defaultKindFor,
   isVolumeKind,
   kindForCalcType,
   metricsOf,
+  resultForKind,
   surfaceRefsForMethod,
 } from "@/lib/viewer/calc";
 import { buildPointCloudStyle } from "@/lib/viewer/pointcloud";
@@ -77,7 +73,6 @@ import {
   manifestLayersEmpty,
   proxyGcsUrls,
   type LayerHandle,
-  type PendingDraw,
 } from "@/components/viewer/shell/sceneHelpers";
 import {
   useViewerStore,
@@ -96,7 +91,6 @@ import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 import { ModuleRail } from "@/components/viewer/shell/ModuleRail";
 import { TreePanel } from "@/components/viewer/shell/TreePanel";
 import { FloatingToolbar } from "@/components/viewer/shell/FloatingToolbar";
-import { MeasureSidebar } from "@/components/viewer/shell/MeasureSidebar";
 import { DetailPanel } from "@/components/viewer/shell/DetailPanel";
 import { StatusBar } from "@/components/viewer/shell/StatusBar";
 import { CameraJoystick } from "@/components/viewer/CameraJoystick";
@@ -145,10 +139,6 @@ export function ViewerCanvas() {
   const layersEmpty = manifestLayersEmpty(manifest);
 
   // -------------------------------------------------------- local state
-  // The just-drawn draft being named — it has no id in the measurements list,
-  // so it cannot live in the store's id-based selection (§3.3); it is passed to
-  // DetailPanel as a prop.
-  const [draftMeasurement, setDraftMeasurement] = useState<PanelMeasurement | null>(null);
   const [clipInputsVersion, setClipInputsVersion] = useState(0);
 
   // -------------------------------------------------------- refs (§3.2)
@@ -167,7 +157,6 @@ export function ViewerCanvas() {
   const measurementsSigRef = useRef<string>("");
   const searchRef = useRef<string>("");
   const appliedSearchRef = useRef<string>("");
-  const pendingDrawRef = useRef<PendingDraw | null>(null);
   const footprintsRef = useRef<Map<string, Cartesian3[]>>(new Map());
   const meshReadyRef = useRef<Set<string>>(new Set());
   const meshPreloadWaiverRef = useRef<Set<string>>(new Set());
@@ -670,8 +659,6 @@ export function ViewerCanvas() {
     s.cancelDraw();
     s.closeDetail();
     s.clearSelection();
-    setDraftMeasurement(null);
-    pendingDrawRef.current = null;
   }, [store, cleanupDraw, stopProbe]);
 
   const startProbe = useCallback(
@@ -680,11 +667,33 @@ export function ViewerCanvas() {
       const s = store.getState();
       s.startProbe(toolKey);
       s.clearSelection();
-      setDraftMeasurement(null);
-      pendingDrawRef.current = null;
       s.openDetail("measure");
     },
     [store, cleanupDraw]
+  );
+
+  // Dispatch compute for a measurement (drafts included) — the direct HTTP
+  // call into asset-svc; results land on the row via the workflow consumer and
+  // the 5s poll picks them up. Declared BEFORE startDraw, whose finish() auto-
+  // computes freshly created volume drafts.
+  const triggerCompute = useCallback(
+    async (id: string, override?: Record<string, unknown>) => {
+      store.getState().setBusy(id, true);
+      try {
+        await computeMeasurement(surveyId, id, override ? { params: override } : undefined);
+        toast.info("Compute dispatched — result will appear when ready");
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 422) {
+          toast.warning(`Compute not available yet: ${err.message}`);
+        } else if (err instanceof Error) {
+          toast.error(err.message);
+        }
+      } finally {
+        store.getState().setBusy(id, false);
+        refreshMeasurements();
+      }
+    },
+    [surveyId, store, refreshMeasurements]
   );
 
   const startDraw = useCallback(
@@ -693,11 +702,9 @@ export function ViewerCanvas() {
       if (!viewer || viewer.isDestroyed()) return;
       cleanupDraw();
       stopProbe();
-      pendingDrawRef.current = null;
       const s = store.getState();
       s.startDraw(mode, opts);
       s.clearSelection();
-      setDraftMeasurement(null);
       draftPositionsRef.current = [];
 
       draftEntityRef.current = viewer.entities.add({
@@ -743,6 +750,40 @@ export function ViewerCanvas() {
           toast.error(`Need at least ${minPoints} points for a ${mode}`);
           return;
         }
+
+        // Calc params from the panel's config (the same source it edits). An
+        // invalid config (e.g. custom RL without a value) keeps the DRAW alive
+        // — the user fixes the panel and finishes again; nothing is lost.
+        const params: Record<string, unknown> = { ...(opts?.params ?? {}) };
+        if (opts?.slope) params.slope = true;
+        if (isVolumeKind(kind)) {
+          const view = store.getState().view;
+          // Coerced onto the kind's method list — what persists always equals
+          // what the panel displayed (a stale cut/fill pick never rides along).
+          const cfg = coerceMethodForKind(
+            {
+              method: view.volumeMethod,
+              refMode: view.refMode,
+              refElevation: view.refElevation,
+              baseDesignId: view.baseDesignId,
+            },
+            kind
+          );
+          params.volume_method = cfg.method;
+          params.render = LEAN_RENDER; // number-only compute; tiles are a later, explicit ask
+          try {
+            const refs = surfaceRefsForMethod(cfg);
+            params.from = refs.from;
+            params.to = refs.to;
+          } catch (err) {
+            if (err instanceof CalcParamsError) {
+              toast.warning(err.message);
+              return;
+            }
+            throw err;
+          }
+        }
+
         const coords: [number, number][] = pts.map((p) => {
           const c = Cartographic.fromCartesian(p);
           return [
@@ -763,44 +804,38 @@ export function ViewerCanvas() {
         }
         hoverPositionRef.current = null;
 
-        const statPts = pts.slice(0, coords.length);
-        const localStats: Record<string, number> =
+        const geometry =
           mode === "polygon"
-            ? {
-                area_m2: computeAreaSquareMeters(statPts),
-                perimeter_m: computePerimeterMeters(statPts),
-              }
-            : { length_m: computeDistanceMeters(statPts) };
-        if (mode === "polyline" && opts?.slope) {
-          const grade = computeGrade(statPts);
-          if (grade) localStats.grade_percent = Number(grade.percent.toFixed(2));
-        }
+            ? { type: "Polygon", coordinates: [[...coords, coords[0]]] }
+            : { type: "LineString", coordinates: coords };
 
-        const tempMeasurement: PanelMeasurement = {
-          id: `new-${Date.now()}`,
-          client_id: "",
-          survey_id: surveyId,
-          name: "",
-          kind,
-          folder: opts?.folder,
-          status: "draft",
-          created_at: "",
-          updated_at: "",
-          result: localStats,
-        };
-        pendingDrawRef.current = {
-          mode,
-          coords,
-          kind,
-          folder: opts?.folder,
-          slope: opts?.slope,
-          params: opts?.params,
-        };
-        const s2 = store.getState();
-        s2.cancelDraw(); // null out drawMode/activeDrawOpts/activeToolKey + reset draft
-        setDraftMeasurement(tempMeasurement);
-        s2.setIsInspectingNew(true);
-        s2.openDetail("inspect");
+        // DRAFT-FIRST (2026-07-16): persist immediately as a draft row — no
+        // naming gate — so compute can run on it right away through the normal
+        // /compute call; the user promotes it (Save) or discards it from the
+        // inspector. The local draft entity stays visible until the
+        // measurements datasource re-renders the created row.
+        store.getState().cancelDraw(); // null out drawMode/activeDrawOpts/activeToolKey + reset draft mirror
+        void (async () => {
+          try {
+            const created = await createMeasurement(surveyId, {
+              kind,
+              name: `Untitled ${kind.replace(/_/g, " ")}`,
+              folder: opts?.folder,
+              geometry,
+              params,
+              draft: true,
+            });
+            const s3 = store.getState();
+            s3.setMeasurements([created, ...s3.measurements]); // optimistic — list is newest-first
+            s3.selectMeasurement(created.id, { fly: false }); // opens the inspector on the draft
+            cleanupDraw(); // drop the local draft entity — the datasource takes over
+            await refreshMeasurements();
+            if (isVolumeKind(kind)) await triggerCompute(created.id);
+          } catch (err) {
+            if (err instanceof Error) toast.error(`Couldn't create the draft: ${err.message}`);
+            // The drawn shape stays visible (inert); ESC clears it.
+          }
+        })();
       };
 
       const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
@@ -827,7 +862,7 @@ export function ViewerCanvas() {
       drawHandlerRef.current = handler;
       store.getState().openDetail("measure");
     },
-    [store, viewerRef, cleanupDraw, stopProbe, surveyId]
+    [store, viewerRef, cleanupDraw, stopProbe, surveyId, refreshMeasurements, triggerCompute]
   );
 
   const undoLastVertex = useCallback(() => {
@@ -841,87 +876,45 @@ export function ViewerCanvas() {
   }, [store, viewerRef]);
 
   // ------------------------------------------------------------ ops (CRUD)
-  const triggerCompute = useCallback(
-    async (id: string, override?: Record<string, unknown>) => {
-      store.getState().setBusy(id, true);
-      try {
-        await computeMeasurement(surveyId, id, override ? { params: override } : undefined);
-        toast.info("Compute dispatched — result will appear when ready");
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 422) {
-          toast.warning(`Compute not available yet: ${err.message}`);
-        } else if (err instanceof Error) {
-          toast.error(err.message);
-        }
-      } finally {
-        store.getState().setBusy(id, false);
-        refreshMeasurements();
-      }
-    },
-    [surveyId, store, refreshMeasurements]
-  );
-
+  // saveMeasurement PROMOTES a draw-first draft (draft-first, 2026-07-16):
+  // PATCH {name, draft:false}. The row, geometry, params, and any computed
+  // result already exist — saving is just "keep it under this name".
   const saveMeasurement = useCallback(
-    async (name: string) => {
-      if (!pendingDrawRef.current || !name.trim()) return;
+    async (id: string, name: string) => {
+      if (!name.trim()) return;
       store.getState().setSaving(true);
       try {
-        const { mode, coords, kind, folder, slope, params: presetParams } = pendingDrawRef.current;
-        const geometry =
-          mode === "polygon"
-            ? { type: "Polygon", coordinates: [[...coords, coords[0]]] }
-            : { type: "LineString", coordinates: coords };
-
-        const params: Record<string, unknown> = { ...(presetParams ?? {}) };
-        if (slope) params.slope = true;
-        if (isVolumeKind(kind)) {
-          // Persist the panel's base-method config as explicit from/to
-          // SurfaceRefs (§3.1 — "the row always states what ran"; cut_fill has
-          // no server-side default). volume_method stays for display.
-          const view = store.getState().view;
-          params.volume_method = view.volumeMethod;
-          try {
-            const refs = surfaceRefsForMethod({
-              method: view.volumeMethod,
-              refMode: view.refMode,
-              refElevation: view.refElevation,
-              baseDesignId: view.baseDesignId,
-            });
-            params.from = refs.from;
-            params.to = refs.to;
-          } catch (err) {
-            if (err instanceof CalcParamsError) {
-              toast.warning(err.message);
-              store.getState().setSaving(false);
-              return;
-            }
-            throw err;
-          }
-        }
-
-        const created = await createMeasurement(surveyId, {
-          kind,
+        const updated = await updateMeasurement(surveyId, id, {
           name: name.trim(),
-          folder,
-          geometry,
-          params,
+          draft: false,
         });
-        toast.success(`Measurement "${created.name}" created`);
-        cleanupDraw();
-        pendingDrawRef.current = null;
-        const s = store.getState();
-        s.closeDetail();
-        s.clearSelection();
-        setDraftMeasurement(null);
+        toast.success(`Measurement "${updated.name}" saved`);
         await refreshMeasurements();
-        if (isVolumeKind(kind)) await triggerCompute(created.id);
       } catch (err) {
         if (err instanceof Error) toast.error(err.message);
       } finally {
         store.getState().setSaving(false);
       }
     },
-    [surveyId, store, cleanupDraw, refreshMeasurements, triggerCompute]
+    [surveyId, store, refreshMeasurements]
+  );
+
+  // Generic PATCH (rename / re-kind / units / style) + list refresh. Errors
+  // toast; rethrown so callers can skip follow-ups (e.g. recompute-after-rekind).
+  const patchMeasurement = useCallback(
+    async (
+      id: string,
+      body: { name?: string; folder?: string; kind?: string; params?: Record<string, unknown>; draft?: boolean }
+    ) => {
+      try {
+        await updateMeasurement(surveyId, id, body);
+        await refreshMeasurements();
+      } catch (err) {
+        if (err instanceof Error) toast.error(err.message);
+        throw err;
+      }
+    },
+    [surveyId, refreshMeasurements]
   );
 
   const removeMeasurement = useCallback(
@@ -945,7 +938,6 @@ export function ViewerCanvas() {
   const selectMeasurementRow = useCallback(
     (m: PanelMeasurement) => {
       store.getState().selectMeasurement(m.id, { fly: false });
-      setDraftMeasurement(null);
       if (!m.demo && m.geometry) {
         const rect = geometryToRectangle(m.geometry);
         if (rect) flyToRectangle(rect);
@@ -966,7 +958,7 @@ export function ViewerCanvas() {
           kind: m.kind,
           folder: m.folder ?? null,
           status: m.status,
-          ...metricsOf(m.result),
+          ...metricsOf(resultForKind(m)),
         },
         geometry: m.geometry!,
       }));
@@ -1064,6 +1056,7 @@ export function ViewerCanvas() {
       triggerCompute,
       removeMeasurement,
       saveMeasurement,
+      patchMeasurement,
       exportMeasurements,
       handleToggle,
       handleOpacity,
@@ -1089,6 +1082,7 @@ export function ViewerCanvas() {
       triggerCompute,
       removeMeasurement,
       saveMeasurement,
+      patchMeasurement,
       exportMeasurements,
       handleToggle,
       handleOpacity,
@@ -1106,30 +1100,19 @@ export function ViewerCanvas() {
   // ------------------------------------------------------------------ UI
   // PIVOT grid (2026-07-16): col 1 ModuleRail 48px (spans both rows); col 2 the
   // LEFT dock — the module's LIST on every module (measurements tree on
-  // measure, layers on survey; RE-PIVOT 2026-07-16: the user wants the
-  // measurements list back on the left, "how it was"); col 3 the Cesium canvas
-  // with the FLOATING toolbar overlaid top-center (measure module only); col 4
-  // the RIGHT calc/detail dock — Calculation panel while drawing, inspector
-  // when a measurement is selected — which opens ON DEMAND (`detailPanel`
-  // non-null) and collapses to 0 otherwise. Row 2 is the StatusBar spanning
-  // cols 2–4. The slide-in DetailPanel + CameraJoystick are absolute overlays
-  // INSIDE the canvas cell — they MUST NOT resize it (D10). The slide-in is
-  // kept only for NON-measure modules (feature picking on survey); the measure
-  // module's detail lives in the right dock, so the joystick only shifts for
-  // the slide-in.
+  // measure, layers on survey); col 3 the Cesium canvas with the FLOATING
+  // toolbar overlaid top-center (measure module only) and the draggable
+  // DetailPanel (calc/inspect) as an absolute overlay — MUST NOT resize the
+  // canvas (D10). Row 2 is the StatusBar spanning cols 2–3.
   const isMeasure = activeModule === "measure";
   const leftPanelVisible = treePanelOpen; // the list dock, all modules
-  const rightPanelVisible = isMeasure && detailPanel !== null; // calc/detail, on demand
-  const overlayDetailVisible = detailPanel !== null && !isMeasure; // slide-in only off-measure
 
   return (
     <ViewerActionsProvider value={actions}>
       <div
         className="grid h-full w-full bg-[#0A0D14]"
         style={{
-          gridTemplateColumns: `48px ${leftPanelVisible ? "280px" : "0px"} minmax(0, 1fr) ${
-            rightPanelVisible ? "320px" : "0px"
-          }`,
+          gridTemplateColumns: `48px ${leftPanelVisible ? "280px" : "0px"} minmax(0, 1fr)`,
           gridTemplateRows: "minmax(0, 1fr) 24px",
           transition: "grid-template-columns 200ms ease-out",
         }}
@@ -1146,8 +1129,8 @@ export function ViewerCanvas() {
           {leftPanelVisible && <TreePanel />}
         </div>
 
-        {/* Zones 3/4 — canvas cell: the floating toolbar overlays the Cesium
-            container top-center (measure module only). */}
+        {/* Zone 3 — canvas cell: floating toolbar + draggable detail overlay;
+            neither resizes this cell. */}
         <div className="relative min-h-0 min-w-0">
           <div className="absolute inset-0 cesium-container">
             <Viewer
@@ -1174,31 +1157,19 @@ export function ViewerCanvas() {
           {isMeasure && <FloatingToolbar />}
 
           {/* Zero-size anchor: the joystick positions right-6/bottom-6 against
-              it. Off-measure it slides left to clear the open slide-in
-              (12px gutter + 320px panel = 332px); on measure the right dock is
-              a grid column that already shrinks this cell, so no shift. The
-              wrapper has no area, so it never intercepts canvas pointer events. */}
-          <div
-            className="absolute bottom-0 h-0 w-0 transition-[right] duration-200 ease-out"
-            style={{ right: overlayDetailVisible ? 332 : 0 }}
-          >
+              it. The detail panel is freely draggable, so we no longer shift
+              for it. The wrapper has no area, so it never intercepts canvas
+              pointer events. */}
+          <div className="absolute bottom-0 right-0 h-0 w-0">
             <CameraJoystick viewerRef={viewerRef} ready={viewerReady} />
           </div>
 
-          {/* Zone 5 — slide-in detail overlay, kept for NON-measure modules
-              (the measure module inspects inside the right dock instead). */}
-          {!isMeasure && <DetailPanel draftMeasurement={draftMeasurement} />}
+          {/* Zone 5 — draggable floating detail (expanded or compact). */}
+          <DetailPanel />
         </div>
 
-        {/* Right dock — calc/detail (measure module): the Calculation panel
-            while drawing, the inspector once something is selected. Opens on
-            demand (detailPanel non-null); the list stays LEFT. */}
-        <div className="min-h-0 min-w-0 overflow-hidden">
-          {rightPanelVisible && <MeasureSidebar draftMeasurement={draftMeasurement} />}
-        </div>
-
-        {/* Zone 6 — status bar, docked, spanning cols 2–4 */}
-        <div className="col-span-3 min-w-0">
+        {/* Zone 6 — status bar, docked, spanning cols 2–3 */}
+        <div className="col-span-2 min-w-0">
           <StatusBar />
         </div>
       </div>

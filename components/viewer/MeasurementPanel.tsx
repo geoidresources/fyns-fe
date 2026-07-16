@@ -27,7 +27,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { Measurement } from "@/lib/api/assetSvc";
-import { metricsOf } from "@/lib/viewer/calc";
+import { metricsOf, resultForKind } from "@/lib/viewer/calc";
 import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 
 export type DrawMode = "polygon" | "polyline";
@@ -79,7 +79,7 @@ interface MeasurementPanelProps {
  * cover client-side plan stats and future per-pile results. */
 function measurementLabel(m: PanelMeasurement): string {
   if (m.demo) return m.name;
-  const r = metricsOf(m.result); // unwraps the v1 result doc; legacy flat rows pass through
+  const r = metricsOf(m.demo ? m.result : resultForKind(m)); // current kind's doc; legacy passthrough
 
   const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 });
   if (r) {

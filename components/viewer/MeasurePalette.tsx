@@ -5,10 +5,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
-import { X } from "lucide-react";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 
 import { CalcConfig } from "@/components/viewer/CalcConfig";
-import { calcTypesFor } from "@/lib/viewer/calc";
+import { calcTypesFor, coerceMethodForKind } from "@/lib/viewer/calc";
 import { useViewerStore } from "@/lib/viewer/state/store";
 import { formatArea, formatDistance, type LngLatHeight } from "@/lib/viewer/measure";
 
@@ -48,9 +48,14 @@ function ReadoutRow({ label, value }: { label: string; value: string }) {
 export function MeasurePalette({
   readout,
   onClose,
+  onCollapse,
+  collapsed = false,
 }: {
   readout: LiveReadout;
   onClose: () => void;
+  onCollapse?: () => void;
+  /** When true, only the title row is shown (panel chrome stays mounted). */
+  collapsed?: boolean;
 }) {
   const view = useViewerStore((s) => s.view);
   const setView = useViewerStore((s) => s.setView);
@@ -62,14 +67,32 @@ export function MeasurePalette({
   const selectedType = types.find((t) => t.id === view.calcType) ?? types[0] ?? null;
 
   return (
-    <div className="h-full flex flex-col text-sm text-gray-200 p-3 gap-4">
-      <div className="flex items-center justify-between">
-        <h3 className="font-semibold text-base text-gray-100">Calculation</h3>
-        <Button variant="ghost" size="icon" onClick={onClose} className="text-gray-400">
-          <X size={18} />
-        </Button>
+    <div
+      className={`flex flex-col text-sm text-gray-200 p-3 ${collapsed ? "" : "h-full gap-4"}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="min-w-0 truncate font-semibold text-base text-gray-100">Calculation</h3>
+        <div className="flex shrink-0 items-center">
+          {onCollapse && (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={collapsed ? "Expand panel" : "Collapse panel"}
+              aria-expanded={!collapsed}
+              onClick={onCollapse}
+              className="text-gray-400"
+            >
+              {collapsed ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+            </Button>
+          )}
+          <Button variant="ghost" size="icon" onClick={onClose} className="text-gray-400">
+            <X size={18} />
+          </Button>
+        </div>
       </div>
 
+      {!collapsed && (
+        <>
       {/* What to compute — contextual to the geometry the toolbar started. */}
       <div>
         <Label className="text-xs text-gray-400 mb-2 block">What to compute</Label>
@@ -144,18 +167,24 @@ export function MeasurePalette({
       {selectedType?.needsBase && (
         <CalcConfig
           idPrefix="palette"
+          kind={selectedType.kind}
           projectId={projectId}
-          value={{
-            method: view.volumeMethod,
-            refMode: view.refMode,
-            refElevation: view.refElevation,
-            baseDesignId: view.baseDesignId,
-          }}
+          value={coerceMethodForKind(
+            {
+              method: view.volumeMethod,
+              refMode: view.refMode,
+              refElevation: view.refElevation,
+              baseDesignId: view.baseDesignId,
+            },
+            selectedType.kind
+          )}
           onChange={(patch) => {
             const { method, ...rest } = patch;
             setView(method !== undefined ? { ...rest, volumeMethod: method } : rest);
           }}
         />
+      )}
+        </>
       )}
     </div>
   );

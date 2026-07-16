@@ -166,3 +166,54 @@ test("resultErrorOf and provenanceOf expose failure reason and receipt", () => {
   assert.equal(prov?.processor, "volume-compute");
   assert.equal(provenanceOf({ version: 1 }), null);
 });
+
+// --------------------------------------------- kind-aware base methods
+
+test("methodsForKind: stockpile and cut_fill get distinct, stub-free lists", async () => {
+  const { methodsForKind, defaultMethodForKind } = await import("../calc.ts");
+  assert.deepEqual(
+    methodsForKind("stockpile").map((m) => m.id),
+    ["smart-base", "reference-rl"]
+  );
+  assert.deepEqual(
+    methodsForKind("cut_fill").map((m) => m.id),
+    ["previous-survey", "design-surface", "reference-rl"]
+  );
+  // custom-base is engine-ready but has no editor — never offered.
+  assert.ok(!methodsForKind("stockpile").some((m) => m.id === "custom-base"));
+  assert.deepEqual(methodsForKind("area"), []); // non-volume: no base methods
+  assert.equal(defaultMethodForKind("stockpile"), "smart-base");
+  assert.equal(defaultMethodForKind("cut_fill"), "previous-survey");
+  assert.equal(defaultMethodForKind("distance"), null);
+});
+
+test("coerceMethodForKind snaps foreign methods to the kind's default", async () => {
+  const { coerceMethodForKind } = await import("../calc.ts");
+  const smart = { ...DEFAULT_METHOD_STATE, method: "smart-base" };
+  // stockpile keeps smart-base; cut_fill snaps it to previous-survey.
+  assert.equal(coerceMethodForKind(smart, "stockpile").method, "smart-base");
+  assert.equal(coerceMethodForKind(smart, "cut_fill").method, "previous-survey");
+  // valid picks pass through untouched; non-volume kinds never coerce.
+  const design = { ...DEFAULT_METHOD_STATE, method: "design-surface", baseDesignId: "d1" };
+  assert.equal(coerceMethodForKind(design, "cut_fill").method, "design-surface");
+  assert.equal(coerceMethodForKind(design, "cut_fill").baseDesignId, "d1");
+  assert.equal(coerceMethodForKind(smart, "area").method, "smart-base");
+});
+
+// ------------------------------------------------ per-kind result selection
+
+test("resultForKind: map hit, map miss, legacy fallback", async () => {
+  const { resultForKind } = await import("../calc.ts");
+  const spDoc = { version: 1, metrics: { volume_m3: 581 } };
+  const cfDoc = { version: 1, metrics: { net_change_m3: -42 } };
+  // Map hit: each kind sees ITS doc.
+  const m = { kind: "stockpile", results: { stockpile: spDoc, cut_fill: cfDoc } };
+  assert.equal(resultForKind(m), spDoc);
+  assert.equal(resultForKind({ ...m, kind: "cut_fill" }), cfDoc);
+  // Map miss with OTHER kinds computed → null (this type not computed yet).
+  assert.equal(resultForKind({ kind: "area", results: { stockpile: spDoc } }), null);
+  // Legacy row (no map): the single result attributes to the current kind.
+  assert.equal(resultForKind({ kind: "stockpile", result: spDoc }), spDoc);
+  // Nothing anywhere → null.
+  assert.equal(resultForKind({ kind: "stockpile" }), null);
+});

@@ -97,6 +97,40 @@ export const VOLUME_METHODS = [
   { id: "custom-base", label: "Custom base" },
 ] as const;
 
+// Base methods are CALC-TYPE-AWARE (product decision 2026-07-16): a stockpile
+// is "volume above a base" (smart base default, reference RL), while cut/fill
+// compares against a surface (previous survey default, design, reference RL).
+// A stockpile "against previous survey" is just cut/fill — offering it would
+// blur the two types. custom-base is engine-ready but stays OFF the list until
+// the vertex editor exists (no stub options).
+const METHODS_FOR_KIND: Record<string, string[]> = {
+  stockpile: ["smart-base", "reference-rl"],
+  volume: ["smart-base", "reference-rl"], // legacy kind, same semantics
+  cut_fill: ["previous-survey", "design-surface", "reference-rl"],
+};
+
+export function methodsForKind(kind: string): { id: string; label: string }[] {
+  const ids = METHODS_FOR_KIND[kind] ?? [];
+  return ids
+    .map((id) => VOLUME_METHODS.find((m) => m.id === id))
+    .filter((m): m is (typeof VOLUME_METHODS)[number] => !!m)
+    .map((m) => ({ id: m.id, label: m.label }));
+}
+
+/** The kind's default base method (first of its list); null for non-volume. */
+export function defaultMethodForKind(kind: string): string | null {
+  return METHODS_FOR_KIND[kind]?.[0] ?? null;
+}
+
+/** Coerce a method state onto a kind: if the current method isn't offered for
+ * that kind (e.g. smart-base after re-templating to cut_fill), snap to the
+ * kind's default so the UI and the persisted params never disagree. */
+export function coerceMethodForKind(state: CalcMethodState, kind: string): CalcMethodState {
+  const allowed = METHODS_FOR_KIND[kind];
+  if (!allowed || allowed.includes(state.method)) return state;
+  return { ...state, method: allowed[0] };
+}
+
 export type RefMode = "custom" | "lowest_vertex" | "highest_vertex";
 
 /** The base-surface configuration as edited in the panel / inspector. */
@@ -113,6 +147,13 @@ export const DEFAULT_METHOD_STATE: CalcMethodState = {
   refElevation: null,
   baseDesignId: null,
 };
+
+/** Panel-driven computes request a LEAN render: metrics + receipt only. The
+ * §5.2 default (render.heatmap=true) makes every run generate + upload a
+ * gdal2tiles pyramid (zooms 14–18) — the dominant wall-clock cost, none of it
+ * needed for the number the panel shows. The result-views phase will request
+ * {heatmap:true} explicitly when the user opens the 2D cut/fill view. */
+export const LEAN_RENDER = { heatmap: false } as const;
 
 /** A user-fixable config problem (missing RL, no design picked) — the caller
  * toasts the message instead of sending an invalid payload. */
@@ -192,6 +233,22 @@ export function methodFromParams(
 }
 
 // ------------------------------------------------------------- result doc
+
+/** The result doc belonging to the measurement's CURRENT kind. Per-kind docs
+ * live in `results[kind]` (each calc type remembers its last successful run —
+ * the type dropdown is a view switch, never a compute trigger). Legacy rows
+ * that predate the map fall back to the single `result` doc, which is safe to
+ * attribute because re-templating did not exist when they were written. */
+export function resultForKind(m: {
+  kind: string;
+  result?: MeasurementResultDoc;
+  results?: Record<string, MeasurementResultDoc>;
+}): MeasurementResultDoc | null {
+  const doc = m.results?.[m.kind];
+  if (doc) return doc;
+  if (m.results && Object.keys(m.results).length > 0) return null; // other kinds computed, not this one
+  return m.result ?? null; // legacy single-result row
+}
 
 /** Numeric metrics of a measurement result — handles BOTH shapes: the §7.1 v1
  * doc ({version, metrics:{...}, provenance, error}) and legacy flat maps. The

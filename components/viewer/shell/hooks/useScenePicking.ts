@@ -8,8 +8,8 @@
 // swap): the store models selection as ids + feature (§3.3), so per branch
 // `selectMeasurement` / `selectFeature` / `clearSelection` replace the three
 // setters one-for-one. `selectMeasurement`/`selectFeature` already set
-// `detailPanel:"inspect"` + `isInspectingNew:false`, matching the original
-// setRightPanel("inspect") + setIsInspectingNew(false).
+// `detailPanel:"inspect"`, matching the original
+// setRightPanel("inspect") behavior.
 /* eslint-disable react-hooks/exhaustive-deps */
 
 import { useEffect, type RefObject } from "react";

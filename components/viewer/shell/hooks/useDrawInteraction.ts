@@ -78,11 +78,20 @@ export function useDrawInteraction(deps: {
     return () => handler.destroy();
   }, [probing, viewerReady]);
 
-  // ESC cancels an in-flight drawing.
+  // ESC cancels an in-flight drawing / closes the detail panel. With the
+  // draft-first flow this is non-destructive (finished shapes are persisted
+  // rows the moment drawing ends) — the one guard left is inputs: ESC while
+  // typing (e.g. the name or reference-RL field) means "leave the field",
+  // not "close the panel".
   useEffect(() => {
     if (!drawMode && !rightPanel) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") cancelDraw();
+      if (e.key !== "Escape") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
+        return;
+      }
+      cancelDraw();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

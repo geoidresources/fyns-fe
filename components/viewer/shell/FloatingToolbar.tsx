@@ -7,7 +7,7 @@
 // pure GEOMETRY picker — Point / Line / Polygon / Section / Probe / Slope — and
 // carries no template/calculation choice. A tool starts a draw (or probe) with a
 // NEUTRAL kind; which calculation runs over that geometry is chosen later in the
-// MeasureSidebar (§calc-panel). This decouples the shape from the computation,
+// DetailPanel (§calc-panel). This decouples the shape from the computation,
 // exactly as the retired MeasurePalette grid did (it called startDraw with
 // label/slope/toolKey and no kind), just relocated to the toolbar the user liked.
 //

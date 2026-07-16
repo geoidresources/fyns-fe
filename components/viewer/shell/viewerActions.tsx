@@ -32,7 +32,15 @@ export interface ViewerActions {
    * deep-merged + persisted by the backend before dispatch (§6.1). */
   triggerCompute: (id: string, override?: Record<string, unknown>) => void;
   removeMeasurement: (id: string) => void;
-  saveMeasurement: (name: string) => void;
+  /** PROMOTES a draw-first draft: PATCH {name, draft:false} (draft-first flow —
+   * the row/geometry/params/result already exist). */
+  saveMeasurement: (id: string, name: string) => void;
+  /** Generic partial update (rename / re-kind / units / style): PATCH + refresh.
+   * `params` deep-merges server-side (§6.1). Resolves when the list refreshed. */
+  patchMeasurement: (
+    id: string,
+    body: { name?: string; folder?: string; kind?: string; params?: Record<string, unknown>; draft?: boolean }
+  ) => Promise<void>;
   exportMeasurements: () => void;
 
   // Layer / view interaction (scene side effects live in ViewerCanvas).

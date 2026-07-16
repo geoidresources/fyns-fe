@@ -1,22 +1,19 @@
 "use client";
 
-// Zone 5 — DetailPanel + DetailContent (viewer-shell §4.5, amended by the
-// PIVOT 2026-07-16). `DetailContent` is the inner switch — MeasurePalette
-// (`measure`) or FeatureInspector (`inspect`) plus the derived live readout and
-// resolved inspector target. It is reused by TWO hosts:
-//   • DetailPanel — the slide-in overlay, kept for NON-measure modules (a
-//     feature picked on the survey module still inspects here).
-//   • MeasureSidebar — the persistent RIGHT panel on the measure module, where
-//     the pivot puts the selected-measurement detail beneath the list.
+// Zone 5 — DetailPanel + DetailContent (viewer-shell §4.5). `DetailContent` is
+// the inner switch — MeasurePalette (`measure`) or FeatureInspector (`inspect`)
+// plus the derived live readout and resolved inspector target. DetailPanel is
+// a draggable floating overlay. Collapse hides the body but keeps the same
+// 320px chrome + title row mounted, so width/position do not jump.
 //
 // The live readout + inspector target are derived HERE (not in ViewerCanvas) so
 // the ~10 Hz draft mirror re-renders only this leaf, keeping ViewerCanvas off
-// the per-vertex render path (§3.2). `draftMeasurement` is the just-drawn shape
-// being named — it has no id in the measurements list, so it cannot live in the
-// store's id-based selection (§3.3) and is passed as a prop from ViewerCanvas.
+// the per-vertex render path (§3.2). DRAFT-FIRST (2026-07-16): a finished shape
+// is persisted immediately as a draft row, so the inspector target is always
+// id-based store selection — the old draftMeasurement prop threading is gone.
 
-import React, { useMemo } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import React, { useMemo, useRef } from "react";
+import { AnimatePresence, motion, useDragControls, useIsPresent } from "framer-motion";
 
 import { useViewerStore } from "@/lib/viewer/state/store";
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
@@ -28,37 +25,20 @@ import {
   computeGrade,
   computePerimeterMeters,
 } from "@/lib/viewer/measure";
-import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 
-/** The inner detail switch, host-agnostic. `mode` is passed by the host (which
- * already reads `detailPanel` to decide whether to render it) so this leaf does
- * not double-subscribe. */
-export function DetailContent({
-  mode,
-  draftMeasurement,
-}: {
-  mode: "measure" | "inspect";
-  draftMeasurement: PanelMeasurement | null;
-}) {
-  const selection = useViewerStore((s) => s.selection);
-  const isInspectingNew = useViewerStore((s) => s.isInspectingNew);
-  const measurements = useViewerStore((s) => s.measurements);
-  const saving = useViewerStore((s) => s.saving);
-  const busyIds = useViewerStore((s) => s.busyIds);
-  const projectId = useViewerStore((s) => s.manifest?.survey.project_id ?? null);
+const PANEL_WIDTH = 320;
 
-  // Draft mirror + probe read at ~10 Hz — subscribing here isolates the churn.
+const PANEL_SURFACE =
+  "border border-white/[0.06] bg-[#111114]/85 shadow-[0_4px_24px_rgba(0,0,0,0.5)] backdrop-blur-md";
+
+function useLiveReadout(): LiveReadout {
   const probing = useViewerStore((s) => s.probing);
   const probePoint = useViewerStore((s) => s.probePoint);
   const drawMode = useViewerStore((s) => s.drawMode);
   const draft = useViewerStore((s) => s.draft);
   const activeDrawOpts = useViewerStore((s) => s.activeDrawOpts);
 
-  const actions = useViewerActions();
-
-  // Live palette readout — the ported measurement math over committed vertices
-  // plus the rubber-band vertex (SurveyViewer :1977-1997).
-  const readout = useMemo<LiveReadout>(() => {
+  return useMemo<LiveReadout>(() => {
     if (probing) return { mode: "probe", vertexCount: 0, point: probePoint };
     if (drawMode) {
       const pts = draft.hover ? [...draft.points, draft.hover] : draft.points;
@@ -79,19 +59,48 @@ export function DetailContent({
     }
     return { mode: "idle", vertexCount: 0 };
   }, [probing, probePoint, drawMode, draft, activeDrawOpts]);
+}
 
-  // Resolve the inspector target: a freshly-drawn draft (isInspectingNew), else
-  // the selected measurement by id, else null.
-  const inspectMeasurement = isInspectingNew
-    ? draftMeasurement
-    : selection?.kind === "measurement"
+/** The inner detail switch, host-agnostic. `mode` is passed by the host (which
+ * already reads `detailPanel` to decide whether to render it) so this leaf does
+ * not double-subscribe. */
+export function DetailContent({
+  mode,
+  readout,
+  onCollapse,
+  collapsed,
+}: {
+  mode: "measure" | "inspect";
+  readout: LiveReadout;
+  onCollapse?: () => void;
+  collapsed?: boolean;
+}) {
+  const selection = useViewerStore((s) => s.selection);
+  const measurements = useViewerStore((s) => s.measurements);
+  const saving = useViewerStore((s) => s.saving);
+  const busyIds = useViewerStore((s) => s.busyIds);
+  const projectId = useViewerStore((s) => s.manifest?.survey.project_id ?? null);
+
+  const actions = useViewerActions();
+
+  // Resolve the inspector target: the selected measurement by id (drafts are
+  // rows too, draft-first), else null.
+  const inspectMeasurement =
+    selection?.kind === "measurement"
       ? measurements.find((m) => m.id === selection.measurementIds[0]) ?? null
       : null;
   const inspectFeature = selection?.kind === "feature" ? selection.feature ?? null : null;
   const busyId = inspectMeasurement?.id;
 
   if (mode === "measure") {
-    return <MeasurePalette readout={readout} onClose={actions.cancelDraw} />;
+    return (
+      <MeasurePalette
+        readout={readout}
+        onClose={actions.cancelDraw}
+        onCollapse={onCollapse}
+        collapsed={collapsed}
+      />
+    );
   }
   return (
     <FeatureInspector
@@ -99,39 +108,103 @@ export function DetailContent({
       feature={inspectFeature}
       projectId={projectId}
       onClose={actions.cancelDraw}
+      onCollapse={onCollapse}
+      collapsed={collapsed}
       onSave={actions.saveMeasurement}
+      onPatch={actions.patchMeasurement}
       onDelete={actions.removeMeasurement}
       onCompute={actions.triggerCompute}
-      isNew={isInspectingNew}
       saving={saving}
       busy={busyId ? busyIds.has(busyId) : false}
     />
   );
 }
 
-/** Slide-in overlay host — kept for NON-measure modules (the pivot routes the
- * measure module's detail into MeasureSidebar instead, §PIVOT). Floating-surface
- * recipe (§8) at `right-3 top-3 bottom-8 w-[320px]`; springs in from the right
- * (§4.5). MUST NOT resize the canvas (D10) — it is `absolute` in the canvas cell. */
-export function DetailPanel({ draftMeasurement }: { draftMeasurement: PanelMeasurement | null }) {
-  const detailPanel = useViewerStore((s) => s.detailPanel);
+/** The keyed AnimatePresence child, extracted so useIsPresent (which must be
+ * called INSIDE the presence boundary) can drive pointer-events from React
+ * presence state — synchronously "none" the moment exit begins (the fading
+ * ghost must not swallow canvas clicks) and "auto" again on (re)entry. This
+ * deliberately does NOT ride the animation targets: non-animatable values
+ * there apply on driver frames, and a missed/throttled frame would leave an
+ * invisible panel blocking the canvas — or a reopened one inert. */
+function DetailPanelSurface({
+  mode,
+  readout,
+  collapsed,
+  onToggleCollapse,
+  constraintsRef,
+}: {
+  mode: "measure" | "inspect";
+  readout: LiveReadout;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  constraintsRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const dragControls = useDragControls();
+  const isPresent = useIsPresent();
 
   return (
-    <AnimatePresence>
-      {detailPanel && (
-        // One stable key: the panel slides on open/close only; switching
-        // measure ⇄ inspect swaps content in place without re-animating.
-        <motion.div
-          key="detail-panel"
-          initial={{ x: 344, opacity: 0 }}
-          animate={{ x: 0, opacity: 1 }}
-          exit={{ x: 344, opacity: 0 }}
-          transition={{ type: "spring", stiffness: 380, damping: 32 }}
-          className="pointer-events-auto absolute right-3 top-3 bottom-8 z-20 flex w-[320px] flex-col overflow-y-auto rounded-xl border border-white/[0.06] bg-[#111114]/85 shadow-[0_4px_24px_rgba(0,0,0,0.5)] backdrop-blur-md"
-        >
-          <DetailContent mode={detailPanel} draftMeasurement={draftMeasurement} />
-        </motion.div>
-      )}
-    </AnimatePresence>
+    <motion.div
+      drag
+      dragControls={dragControls}
+      dragListener={false}
+      dragMomentum={false}
+      dragConstraints={constraintsRef}
+      initial={{ opacity: 0, scale: 0.98 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.98 }}
+      transition={{ type: "spring", stiffness: 420, damping: 34 }}
+      style={{ width: PANEL_WIDTH, pointerEvents: isPresent ? "auto" : "none" }}
+      className={`absolute right-3 top-3 flex flex-col rounded-xl ${PANEL_SURFACE} ${
+        collapsed ? "" : "max-h-[calc(100%-1.5rem)]"
+      }`}
+    >
+      {/* Centered drag highlighter — only grab target for move. */}
+      <div className="flex shrink-0 items-center justify-center px-2 pt-1.5 pb-0.5">
+        <button
+          type="button"
+          aria-label="Drag to move"
+          onPointerDown={(e) => dragControls.start(e)}
+          className="h-1.5 w-10 cursor-grab rounded-full bg-white/20 transition-colors hover:bg-white/35 active:cursor-grabbing active:bg-white/45"
+        />
+      </div>
+
+      <div className={collapsed ? "shrink-0" : "min-h-0 flex-1 overflow-y-auto"}>
+        <DetailContent
+          mode={mode}
+          readout={readout}
+          collapsed={collapsed}
+          onCollapse={onToggleCollapse}
+        />
+      </div>
+    </motion.div>
+  );
+}
+
+/** Draggable floating overlay. Collapse only drops the body — width stays
+ * 320px and the title row stays mounted. MUST NOT resize the canvas (D10). */
+export function DetailPanel() {
+  const detailPanel = useViewerStore((s) => s.detailPanel);
+  const collapsed = useViewerStore((s) => s.detailPanelCollapsed);
+  const setCollapsed = useViewerStore((s) => s.setDetailPanelCollapsed);
+
+  const readout = useLiveReadout();
+  const constraintsRef = useRef<HTMLDivElement>(null);
+
+  return (
+    <div ref={constraintsRef} className="pointer-events-none absolute inset-0 z-20 overflow-hidden">
+      <AnimatePresence>
+        {detailPanel && (
+          <DetailPanelSurface
+            key="detail-panel"
+            mode={detailPanel}
+            readout={readout}
+            collapsed={collapsed}
+            onToggleCollapse={() => setCollapsed(!collapsed)}
+            constraintsRef={constraintsRef}
+          />
+        )}
+      </AnimatePresence>
+    </div>
   );
 }

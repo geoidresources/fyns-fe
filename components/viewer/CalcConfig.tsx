@@ -19,7 +19,7 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 
 import { listDesigns, type DesignRecord } from "@/lib/api/assetSvc";
-import { VOLUME_METHODS, type CalcMethodState, type RefMode } from "@/lib/viewer/calc";
+import { methodsForKind, type CalcMethodState, type RefMode } from "@/lib/viewer/calc";
 
 const REF_MODES: { id: RefMode; label: string }[] = [
   { id: "lowest_vertex", label: "Lowest boundary point" },
@@ -30,11 +30,15 @@ const REF_MODES: { id: RefMode; label: string }[] = [
 export function CalcConfig({
   value,
   onChange,
+  kind,
   projectId,
   idPrefix = "calc",
 }: {
   value: CalcMethodState;
   onChange: (patch: Partial<CalcMethodState>) => void;
+  /** Measurement kind — the base-method list is CALC-TYPE-AWARE (stockpile:
+   * smart base/reference RL; cut_fill: previous survey/design/reference RL). */
+  kind: string;
   /** For the design picker; null hides the list (no manifest yet). */
   projectId: string | null;
   /** Keeps radio input ids unique when two hosts are mounted at once. */
@@ -69,21 +73,14 @@ export function CalcConfig({
           onValueChange={(method) => onChange({ method })}
           className="gap-1"
         >
-          {VOLUME_METHODS.map((item) => {
-            const disabled = item.id === "custom-base";
-            return (
-              <div key={item.id} className="flex items-center space-x-2">
-                <RadioGroupItem value={item.id} id={`${idPrefix}-${item.id}`} disabled={disabled} />
-                <Label
-                  htmlFor={`${idPrefix}-${item.id}`}
-                  className={`font-normal ${disabled ? "text-gray-600" : "text-gray-300"}`}
-                >
-                  {item.label}
-                  {disabled && <span className="ml-1.5 text-[10px] text-gray-600">later phase</span>}
-                </Label>
-              </div>
-            );
-          })}
+          {methodsForKind(kind).map((item) => (
+            <div key={item.id} className="flex items-center space-x-2">
+              <RadioGroupItem value={item.id} id={`${idPrefix}-${item.id}`} />
+              <Label htmlFor={`${idPrefix}-${item.id}`} className="font-normal text-gray-300">
+                {item.label}
+              </Label>
+            </div>
+          ))}
         </RadioGroup>
       </div>
 
