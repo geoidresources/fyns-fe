@@ -5,22 +5,22 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
-import {
-  AreaChart,
-  Circle,
-  Minus,
-  MousePointer,
-  Pentagon,
-  Scissors,
-  X,
-} from "lucide-react";
+import { X } from "lucide-react";
 
-import type { DrawMode, DrawOptions } from "@/components/viewer/MeasurementPanel";
+import { CalcConfig } from "@/components/viewer/CalcConfig";
+import { calcTypesFor } from "@/lib/viewer/calc";
+import { useViewerStore } from "@/lib/viewer/state/store";
 import { formatArea, formatDistance, type LngLatHeight } from "@/lib/viewer/measure";
 
-// The Measure palette from the design (§7.2): a functional tool grid, a live
-// readout that updates while vertices are placed, and the volume-method
-// selector persisted into the measurement's compute params.
+// The right-panel CALCULATION module (RE-PIVOT 2026-07-16). The geometry tool
+// grid that used to live here moved to the FloatingToolbar; this panel is
+// "what to compute and how" over whatever geometry the toolbar started: a
+// calculation-type picker contextual to the active primitive (lib/viewer/calc
+// CALC_TYPES — persisted as the measurement's kind at save), the live readout,
+// and — for volume-type calculations — the shared CalcConfig base-surface
+// editor whose choices become params.from/params.to SurfaceRefs at save
+// (ViewerCanvas.saveMeasurement). Calc state lives in store.view so the save
+// path reads the same source of truth this panel edits.
 
 /** Live values computed by the viewer while a tool is active. */
 export interface LiveReadout {
@@ -33,47 +33,8 @@ export interface LiveReadout {
   point?: LngLatHeight | null;
 }
 
-export const VOLUME_METHODS = [
-  { id: "smart-base", label: "Smart base" },
-  { id: "reference-rl", label: "Reference RL" },
-  { id: "previous-survey", label: "Previous survey" },
-  { id: "design-surface", label: "Design surface" },
-  { id: "custom-base", label: "Custom base" },
-] as const;
-
-type PaletteToolId = "point" | "line" | "polygon" | "section" | "probe" | "slope";
-
-interface PaletteTool {
-  id: PaletteToolId;
-  icon: React.ComponentType<{ size?: number | string; className?: string }>;
-  label: string;
-  probe?: boolean;
-  draw?: DrawMode;
-  opts?: DrawOptions;
-}
-
-const TOOLS: PaletteTool[] = [
-  { id: "point", icon: MousePointer, label: "Point", probe: true },
-  { id: "line", icon: Minus, label: "Line", draw: "polyline", opts: { label: "Line" } },
-  { id: "polygon", icon: Pentagon, label: "Polygon", draw: "polygon", opts: { label: "Polygon" } },
-  { id: "section", icon: Scissors, label: "Section", draw: "polyline", opts: { label: "Section" } },
-  { id: "probe", icon: Circle, label: "Probe", probe: true },
-  { id: "slope", icon: AreaChart, label: "Slope", draw: "polyline", opts: { label: "Slope", slope: true } },
-];
-
-interface MeasurePaletteProps {
-  activeToolKey: string | null;
-  readout: LiveReadout;
-  volumeMethod: string;
-  onVolumeMethod: (method: string) => void;
-  onStartDraw: (mode: DrawMode, opts?: DrawOptions) => void;
-  onStartProbe: (toolKey?: string) => void;
-  onClose: () => void;
-}
-
-// Namespaced so this palette's buttons never collide with the tool rail or the
-// top draw toolbar in the shared activeToolKey.
-const keyFor = (id: PaletteToolId) => `palette:${id}`;
+// Back-compat re-export — VOLUME_METHODS moved to lib/viewer/calc.ts.
+export { VOLUME_METHODS } from "@/lib/viewer/calc";
 
 function ReadoutRow({ label, value }: { label: string; value: string }) {
   return (
@@ -85,56 +46,54 @@ function ReadoutRow({ label, value }: { label: string; value: string }) {
 }
 
 export function MeasurePalette({
-  activeToolKey,
   readout,
-  volumeMethod,
-  onVolumeMethod,
-  onStartDraw,
-  onStartProbe,
   onClose,
-}: MeasurePaletteProps) {
-  const handle = (t: PaletteTool) => {
-    // Re-clicking the active tool cancels it — starting the same draw again
-    // would call startDraw and discard the in-progress vertices.
-    if (activeToolKey === keyFor(t.id)) {
-      onClose();
-      return;
-    }
-    if (t.probe) onStartProbe(keyFor(t.id));
-    else if (t.draw) onStartDraw(t.draw, { ...t.opts, toolKey: keyFor(t.id) });
-  };
+}: {
+  readout: LiveReadout;
+  onClose: () => void;
+}) {
+  const view = useViewerStore((s) => s.view);
+  const setView = useViewerStore((s) => s.setView);
+  const projectId = useViewerStore((s) => s.manifest?.survey.project_id ?? null);
+
+  const types = calcTypesFor(readout.mode);
+  // The stored pick, reconciled to the current geometry: a stale pick from
+  // another primitive falls back to the mode's first (default) calc.
+  const selectedType = types.find((t) => t.id === view.calcType) ?? types[0] ?? null;
 
   return (
     <div className="h-full flex flex-col text-sm text-gray-200 p-3 gap-4">
       <div className="flex items-center justify-between">
-        <h3 className="font-semibold text-base text-gray-100">Measure</h3>
+        <h3 className="font-semibold text-base text-gray-100">Calculation</h3>
         <Button variant="ghost" size="icon" onClick={onClose} className="text-gray-400">
           <X size={18} />
         </Button>
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
-        {TOOLS.map((t) => {
-          const active = activeToolKey === keyFor(t.id);
-          return (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => handle(t)}
-              aria-pressed={active}
-              className={`rounded-md border p-3 flex flex-col items-center justify-center gap-2 transition-colors ${
-                active
-                  ? "border-[#C97A4E]/60 bg-[#C97A4E]/[0.12] text-[#C97A4E]"
-                  : "bg-[#19191d] border-white/[0.08] hover:bg-white/5"
-              }`}
-            >
-              <t.icon size={20} className={active ? "text-[#C97A4E]" : "text-gray-400"} />
-              <span className={`text-xs ${active ? "text-[#C97A4E]" : "text-gray-300"}`}>
-                {t.label}
-              </span>
-            </button>
-          );
-        })}
+      {/* What to compute — contextual to the geometry the toolbar started. */}
+      <div>
+        <Label className="text-xs text-gray-400 mb-2 block">What to compute</Label>
+        {types.length === 0 ? (
+          <p className="text-xs text-gray-500">
+            Pick a tool in the toolbar and draw on the site to choose a calculation.
+          </p>
+        ) : (
+          <RadioGroup
+            value={selectedType?.id}
+            onValueChange={(calcType) => setView({ calcType })}
+            className="gap-1.5"
+          >
+            {types.map((t) => (
+              <div key={t.id} className="flex items-start space-x-2">
+                <RadioGroupItem value={t.id} id={`ct-${t.id}`} className="mt-0.5" />
+                <Label htmlFor={`ct-${t.id}`} className="flex flex-col gap-0.5 font-normal">
+                  <span className="text-gray-200">{t.label}</span>
+                  <span className="text-[11px] text-gray-500">{t.hint}</span>
+                </Label>
+              </div>
+            ))}
+          </RadioGroup>
+        )}
       </div>
 
       <Card className="bg-[#19191d] border-white/[0.08]">
@@ -180,19 +139,24 @@ export function MeasurePalette({
         </CardContent>
       </Card>
 
-      <div>
-        <Label className="text-xs text-gray-400 mb-2 block">Volume method</Label>
-        <RadioGroup value={volumeMethod} onValueChange={onVolumeMethod} className="gap-1">
-          {VOLUME_METHODS.map((item) => (
-            <div key={item.id} className="flex items-center space-x-2">
-              <RadioGroupItem value={item.id} id={item.id} />
-              <Label htmlFor={item.id} className="text-gray-300 font-normal">
-                {item.label}
-              </Label>
-            </div>
-          ))}
-        </RadioGroup>
-      </div>
+      {/* How — the shared base-surface editor, only for volume-type calcs. The
+          picked method + inputs become params.from/params.to at save. */}
+      {selectedType?.needsBase && (
+        <CalcConfig
+          idPrefix="palette"
+          projectId={projectId}
+          value={{
+            method: view.volumeMethod,
+            refMode: view.refMode,
+            refElevation: view.refElevation,
+            baseDesignId: view.baseDesignId,
+          }}
+          onChange={(patch) => {
+            const { method, ...rest } = patch;
+            setView(method !== undefined ? { ...rest, volumeMethod: method } : rest);
+          }}
+        />
+      )}
     </div>
   );
 }

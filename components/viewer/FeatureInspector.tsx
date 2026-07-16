@@ -4,15 +4,30 @@ import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ChevronRight, Loader2, Play, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Play, X } from "lucide-react";
 import { toast } from "sonner";
 import type { Measurement } from "@/lib/api/assetSvc";
 import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 import { geometryLocalStats } from "@/lib/viewer/measure";
+import { CalcConfig } from "@/components/viewer/CalcConfig";
+import {
+  CalcParamsError,
+  DEFAULT_METHOD_STATE,
+  isVolumeKind,
+  methodFromParams,
+  metricsOf,
+  provenanceOf,
+  resultErrorOf,
+  surfaceRefsForMethod,
+  type CalcMethodState,
+} from "@/lib/viewer/calc";
 
 // Right contextual inspector (§7.1). Three modes:
 //  - a freshly drawn shape being named (isNew) — local plan stats + save;
-//  - a saved measurement — real status + computed result metrics;
+//  - a saved measurement — real status + computed result metrics, the failure
+//    reason when compute failed, an editable base-method config (teardown §2:
+//    "type is mutable after creation") whose edits ride the compute override,
+//    and the provenance "receipt" of the last run;
 //  - a picked map feature (GeoJSON vector / 3D-tiles feature) — the property
 //    inspector ported from rendering-engine-fe's InspectorPanel.
 
@@ -20,10 +35,12 @@ interface FeatureInspectorProps {
   measurement: Measurement | PanelMeasurement | null;
   /** Property bag of a non-measurement feature picked on the map. */
   feature?: Record<string, unknown> | null;
+  /** For the design picker in the editable calc config. */
+  projectId?: string | null;
   onClose: () => void;
   onSave: (name: string) => void;
   onDelete?: (id: string) => void;
-  onCompute?: (id: string) => void;
+  onCompute?: (id: string, override?: Record<string, unknown>) => void;
   isNew: boolean;
   saving: boolean;
   /** A compute/delete request for this measurement is in flight. */
@@ -177,6 +194,7 @@ function PickedFeatureView({
 export function FeatureInspector({
   measurement,
   feature,
+  projectId = null,
   onClose,
   onSave,
   onDelete,
@@ -186,27 +204,44 @@ export function FeatureInspector({
   busy,
 }: FeatureInspectorProps) {
   const [name, setName] = React.useState(measurement?.name || "");
+  // Editable base-method config, seeded from the stored params; null until the
+  // measurement is known to be volume-kind.
+  const [calcCfg, setCalcCfg] = React.useState<CalcMethodState | null>(null);
+  const [showReceipt, setShowReceipt] = React.useState(false);
   const [prevId, setPrevId] = React.useState(measurement?.id);
 
-  // Reset the editable name when a different feature is selected. Adjusting
+  // Reset the editable state when a different feature is selected. Adjusting
   // state during render (instead of in an effect) avoids the cascading
   // re-render the effect caused — https://react.dev/learn/you-might-not-need-an-effect
   if (measurement?.id !== prevId) {
     setPrevId(measurement?.id);
     setName(measurement?.name || "");
+    setCalcCfg(
+      measurement && isVolumeKind(measurement.kind)
+        ? methodFromParams(measurement.params) ?? DEFAULT_METHOD_STATE
+        : null
+    );
+    setShowReceipt(false);
   }
 
   if (feature) return <PickedFeatureView feature={feature} onClose={onClose} />;
   if (!measurement) return null;
 
   const demo = (measurement as PanelMeasurement).demo === true;
-  const isVolume = measurement.kind === "volume";
-  const canCompute = !demo && (measurement.status === "draft" || measurement.status === "failed");
+  const isVolume = isVolumeKind(measurement.kind);
+  // Volume kinds may re-run on completed too (edit method → recompute); the
+  // backend's in-flight gate (409) covers the computing state.
+  const canCompute =
+    !demo &&
+    (measurement.status === "draft" ||
+      measurement.status === "failed" ||
+      (isVolume && measurement.status === "completed"));
 
   // Backend result wins; otherwise fall back to plan stats derived from the
   // stored geometry (client-side, heights not included).
+  const resultMetricMap = metricsOf(measurement.result);
   const localStats =
-    !demo && !measurement.result && measurement.geometry
+    !demo && Object.keys(resultMetricMap).length === 0 && measurement.geometry
       ? geometryLocalStats(measurement.geometry)
       : null;
   const metrics = demo
@@ -216,9 +251,35 @@ export function FeatureInspector({
         { label: "Area", value: "1,420 m²" },
         { label: "Perimeter", value: "142 m" },
       ]
-    : resultMetrics(measurement.result ?? localStats ?? {});
+    : resultMetrics(localStats ?? resultMetricMap);
 
-  const title = isNew ? `Name this ${isVolume ? "polygon" : "polyline"}` : measurement.name;
+  const computeError = demo ? null : resultErrorOf(measurement.result);
+  const receipt = demo ? null : provenanceOf(measurement.result);
+
+  const runCompute = () => {
+    if (!onCompute) return;
+    // Volume kinds always send the edited config as the override — the backend
+    // persists the merge, so the row states what ran (§6.1).
+    if (isVolume && calcCfg) {
+      try {
+        const refs = surfaceRefsForMethod(calcCfg);
+        onCompute(measurement.id, {
+          volume_method: calcCfg.method,
+          from: refs.from,
+          to: refs.to,
+        });
+      } catch (err) {
+        if (err instanceof CalcParamsError) toast.warning(err.message);
+        else throw err;
+      }
+      return;
+    }
+    onCompute(measurement.id);
+  };
+
+  const title = isNew
+    ? `Name this ${measurement.geometry?.type === "LineString" ? "polyline" : "polygon"}`
+    : measurement.name;
 
   return (
     <div className="h-full flex flex-col text-sm text-gray-200 p-3 gap-4 min-h-0">
@@ -232,9 +293,9 @@ export function FeatureInspector({
       {isNew ? (
         <>
           <p className="text-xs text-gray-500 -mt-3">
-            {isVolume
-              ? "Saved as a volume measurement and computed against the survey DSM."
-              : "Saved as a cross-section measurement."}
+            {`Saved as a ${measurement.kind.replace(/_/g, " ")} measurement${
+              isVolume ? " and computed with the configured base surface" : ""
+            }.`}
             {measurement.folder ? ` Filed under “${measurement.folder}”.` : ""}
           </p>
           {metrics.length > 0 && <MetricsGrid metrics={metrics} />}
@@ -277,14 +338,30 @@ export function FeatureInspector({
               )}
             </div>
 
+            {/* Failure reason — the v1 result doc's error block (class +
+                message straight from the processor's Permanent error). */}
+            {measurement.status === "failed" && (
+              <div className="rounded-lg border border-red-500/20 bg-red-500/[0.08] p-3 text-xs">
+                <p className="font-medium text-red-400">
+                  Compute failed{computeError ? ` · ${computeError.class.replace(/_/g, " ")}` : ""}
+                </p>
+                <p className="mt-1 text-red-300/80">
+                  {computeError?.message ??
+                    "No failure detail was recorded for this run. Re-run compute to retry."}
+                </p>
+              </div>
+            )}
+
             {metrics.length > 0 ? (
               <MetricsGrid metrics={metrics} />
             ) : (
-              <p className="rounded-lg bg-[#19191d] p-3 text-xs text-gray-500">
-                {measurement.status === "computing"
-                  ? "Computing — results will appear here shortly."
-                  : "No computed metrics yet. Run compute to populate volume and area."}
-              </p>
+              measurement.status !== "failed" && (
+                <p className="rounded-lg bg-[#19191d] p-3 text-xs text-gray-500">
+                  {measurement.status === "computing"
+                    ? "Computing — results will appear here shortly."
+                    : "No computed metrics yet. Run compute to populate volume and area."}
+                </p>
+              )
             )}
 
             {localStats && metrics.length > 0 && (
@@ -299,12 +376,24 @@ export function FeatureInspector({
                 <p>Density: 2.5 t/m³</p>
               </div>
             ) : (
-              <div className="text-gray-400 space-y-1 text-xs">
-                {typeof measurement.params?.volume_method === "string" && (
-                  <p>Base method: {String(measurement.params.volume_method).replace(/-/g, " ")}</p>
+              <>
+                {/* Editable calc config (volume kinds) — same component as the
+                    drawing panel; edits ride the next Run compute as the §6.1
+                    params override. Replaces the old static "Base method" line. */}
+                {isVolume && calcCfg && (
+                  <CalcConfig
+                    idPrefix="inspect"
+                    projectId={projectId}
+                    value={calcCfg}
+                    onChange={(patch) => setCalcCfg((c) => ({ ...(c ?? DEFAULT_METHOD_STATE), ...patch }))}
+                  />
                 )}
-                {measurement.updated_at && <p>Updated: {measurement.updated_at.slice(0, 16).replace("T", " ")}</p>}
-              </div>
+                <div className="text-gray-400 space-y-1 text-xs">
+                  {measurement.updated_at && (
+                    <p>Updated: {measurement.updated_at.slice(0, 16).replace("T", " ")}</p>
+                  )}
+                </div>
+              </>
             )}
 
             <div className="mt-auto flex flex-col gap-1">
@@ -312,23 +401,52 @@ export function FeatureInspector({
                 <Button
                   variant="ghost"
                   disabled={busy}
-                  onClick={() => onCompute(measurement.id)}
+                  onClick={runCompute}
                   className="justify-between text-gray-300"
                 >
                   <span className="flex items-center gap-2">
                     {busy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-                    Run compute
+                    {measurement.status === "completed" ? "Re-run compute" : "Run compute"}
                   </span>
                   <ChevronRight size={16} />
                 </Button>
               )}
-              <Button
-                variant="ghost"
-                className="justify-between text-gray-300"
-                onClick={() => toast.info("Receipt — coming soon")}
-              >
-                Receipt <ChevronRight size={16} />
-              </Button>
+              {receipt && (
+                <>
+                  <Button
+                    variant="ghost"
+                    className="justify-between text-gray-300"
+                    onClick={() => setShowReceipt((v) => !v)}
+                  >
+                    Receipt {showReceipt ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  </Button>
+                  {showReceipt && (
+                    <div className="rounded-lg border border-white/[0.08] bg-[#19191d] p-2.5 text-[11px] text-gray-400 space-y-1.5">
+                      {receipt.processor && (
+                        <p>
+                          <span className="text-gray-500">Processor:</span> {receipt.processor}
+                        </p>
+                      )}
+                      {receipt.tools && Object.keys(receipt.tools).length > 0 && (
+                        <p>
+                          <span className="text-gray-500">Tools:</span>{" "}
+                          {Object.entries(receipt.tools)
+                            .map(([k, v]) => `${k} ${v}`)
+                            .join(" · ")}
+                        </p>
+                      )}
+                      {receipt.effective !== undefined && (
+                        <>
+                          <p className="text-gray-500">Effective parameters (as run):</p>
+                          <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-all rounded bg-black/40 p-2 font-mono text-[10px] leading-relaxed text-gray-400">
+                            {JSON.stringify(receipt.effective, null, 2)}
+                          </pre>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
               {!demo && onDelete && (
                 <Button
                   variant="destructive"

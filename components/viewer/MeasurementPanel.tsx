@@ -26,16 +26,28 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import type { Measurement } from "@/lib/api/assetSvc";
+import { metricsOf } from "@/lib/viewer/calc";
 import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 
 export type DrawMode = "polygon" | "polyline";
 
-/** Preset carried by a draw tool: backend kind, target folder, palette label,
- * whether the polyline readout should report a grade (slope tool), and the
- * namespaced key of the toolbar button that launched it (so exactly that one
- * button highlights — multiple toolbars are on screen at once). */
+/** Preset carried by a draw tool: backend kind, compute params, target folder,
+ * palette label, whether the polyline readout should report a grade (slope
+ * tool), and the namespaced key of the toolbar button that launched it (so
+ * exactly that one button highlights — multiple toolbars are on screen at
+ * once).
+ *
+ * `params` carries pre-filled SurfaceRefs so a template lands its compute
+ * inputs at draw time (template seam, viewer-shell §3.3/§4.3).
+ *
+ * `kind` is the full `Measurement["kind"]` (§3.3/§4.3) so template ids like
+ * `cut_fill`/`contour`/`tin` flow through `startDraw`. Widened in task 1.3c once
+ * SurveyViewer — which pinned `const kind: "volume" | "cross_section"` at its
+ * :1737 — was deleted, unblocking the template seam. */
 export interface DrawOptions {
-  kind?: "volume" | "cross_section";
+  kind?: Measurement["kind"];
+  params?: Record<string, unknown>;
   folder?: string;
   label?: string;
   slope?: boolean;
@@ -67,7 +79,8 @@ interface MeasurementPanelProps {
  * cover client-side plan stats and future per-pile results. */
 function measurementLabel(m: PanelMeasurement): string {
   if (m.demo) return m.name;
-  const r = m.result;
+  const r = metricsOf(m.result); // unwraps the v1 result doc; legacy flat rows pass through
+
   const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 });
   if (r) {
     const volume = r.total_volume_m3 ?? r.total_adjusted_volume_m3 ?? r.volume_m3 ?? r.adjusted_volume_m3;

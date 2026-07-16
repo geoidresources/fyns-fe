@@ -288,6 +288,30 @@ export interface CutFillEntry {
   diff_raster_url?: string;
 }
 
+// The §7.1 v1 result document stored verbatim on measurements.result by the
+// measurement-result consumer: metrics + artifacts + provenance ("receipt") on
+// success, error {class, message} on failure. Legacy rows are flat metric maps —
+// the index signature admits them; read via lib/viewer/calc.ts metricsOf().
+export interface MeasurementResultDoc {
+  version?: number;
+  semantics?: string;
+  metrics?: Record<string, number>;
+  artifacts?: {
+    diff_raster_url?: string;
+    heatmap_tiles_url?: string;
+    base_surface_url?: string;
+    bbox?: number[];
+  };
+  provenance?: {
+    processor?: string;
+    effective?: Record<string, unknown>;
+    inputs?: unknown[];
+    tools?: Record<string, string>;
+  };
+  error?: { class: string; message: string };
+  [key: string]: unknown;
+}
+
 export interface MeasurementSummary {
   id: string;
   kind: string;
@@ -297,7 +321,7 @@ export interface MeasurementSummary {
   params?: Record<string, unknown>;
   status: string; // draft | computing | completed | failed
   result_ref?: string;
-  result?: Record<string, number>;
+  result?: MeasurementResultDoc;
 }
 
 export interface Manifest {
@@ -327,7 +351,7 @@ export interface Measurement {
   params?: Record<string, unknown>;
   status: string; // draft | computing | completed | failed
   result_ref?: string;
-  result?: Record<string, number>;
+  result?: MeasurementResultDoc;
   created_at: string;
   updated_at: string;
 }
@@ -360,14 +384,19 @@ export function createMeasurement(surveyId: string, req: CreateMeasurementReques
 }
 
 /** Dispatches the compute workflow (202). Inputs auto-resolve server-side. */
+/** Dispatch compute. `body.params` is a partial params object the backend
+ * deep-merges over the measurement's stored params AND persists before
+ * dispatch (§6.1 — the row always states what ran); `body.force` bypasses the
+ * compute-in-flight 409. Empty body = run with stored params. */
 export function computeMeasurement(
   surveyId: string,
-  measurementId: string
+  measurementId: string,
+  body?: { params?: Record<string, unknown>; force?: boolean }
 ): Promise<{ workflow_id: string; status: string }> {
   return apiFetch<{ workflow_id: string; status: string }>(
     BASE,
     `/surveys/${surveyId}/measurements/${measurementId}/compute`,
-    { method: "POST", body: {} }
+    { method: "POST", body: body ?? {} }
   );
 }
 
