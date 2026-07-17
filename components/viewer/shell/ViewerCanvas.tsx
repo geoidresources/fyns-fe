@@ -125,6 +125,11 @@ import { useLayerLifecycle } from "@/components/viewer/shell/hooks/useLayerLifec
 // already close to the ground — mirrors scroll-wheel zoom.
 const ZOOM_STEP_FACTOR = 0.4;
 
+// Screen-space radius (px) around the FIRST draft vertex that counts as
+// "clicked the origin": closing the ring. With the Line tool this converts the
+// open chain into a polygon; with the Polygon tool it jumps to calc selection.
+const ORIGIN_SNAP_PX = 15;
+
 export function ViewerCanvas() {
   const { viewerRef, viewerReady, handleViewerRef, baseImageryRef } = useCesiumViewer();
   const store = useViewerStoreApi();
@@ -188,6 +193,14 @@ export function ViewerCanvas() {
    * auto-closing so the erased edge actually disappears until finish. */
   const polygonOpenRef = useRef(false);
   const eraseHighlightRef = useRef<Entity | null>(null);
+  /** Cursor is hovering the FIRST draft vertex (snap-to-close-the-ring cue). */
+  const nearOriginRef = useRef(false);
+  /** Halo entity over the origin vertex while `nearOriginRef` is true. */
+  const originHaloRef = useRef<Entity | null>(null);
+  /** Self-handle so in-session handlers can RESTART the draw session (the
+   * Line→polygon close-out) without a recursive self-reference inside the
+   * startDraw useCallback; assigned in an effect below. */
+  const startDrawSelfRef = useRef<((mode: DrawMode, opts?: DrawOptions) => void) | null>(null);
   const previousToolKeyRef = useRef<string | null>(null);
   /** Seed vertices into the next startDraw (edit existing / revive session). */
   const seedPointsRef = useRef<Cartesian3[] | null>(null);
@@ -757,11 +770,14 @@ export function ViewerCanvas() {
       for (const entity of draftVertexEntitiesRef.current) viewer.entities.remove(entity);
       for (const entity of draftSegmentLabelEntitiesRef.current) viewer.entities.remove(entity);
       if (eraseHighlightRef.current) viewer.entities.remove(eraseHighlightRef.current);
+      if (originHaloRef.current) viewer.entities.remove(originHaloRef.current);
     }
     draftEntityRef.current = null;
     draftVertexEntitiesRef.current = [];
     draftSegmentLabelEntitiesRef.current = [];
     eraseHighlightRef.current = null;
+    originHaloRef.current = null;
+    nearOriginRef.current = false;
     draftPositionsRef.current = [];
     redoPositionsRef.current = [];
     hoverPositionRef.current = null;
@@ -782,7 +798,10 @@ export function ViewerCanvas() {
     eraseHighlightRef.current = null;
   }, [viewerRef]);
 
-  const addDraftPolylineDecorations = useCallback(
+  // Per-vertex accent dot for EVERY draw mode (each placed vertex stays
+  // highlighted), plus a segment length label when `previous` is passed
+  // (polyline modes only — polygon edges skip labels).
+  const addDraftDecorations = useCallback(
     (position: Cartesian3, previous?: Cartesian3) => {
       const viewer = viewerRef.current;
       if (!viewer || viewer.isDestroyed()) return;
@@ -821,7 +840,7 @@ export function ViewerCanvas() {
     [viewerRef]
   );
 
-  const rebuildDraftPolylineDecorations = useCallback(() => {
+  const rebuildDraftDecorations = useCallback(() => {
     const viewer = viewerRef.current;
     if (!viewer || viewer.isDestroyed()) return;
     for (const entity of draftVertexEntitiesRef.current) viewer.entities.remove(entity);
@@ -830,9 +849,9 @@ export function ViewerCanvas() {
     draftSegmentLabelEntitiesRef.current = [];
     const pts = draftPositionsRef.current;
     for (let i = 0; i < pts.length; i++) {
-      addDraftPolylineDecorations(pts[i], i > 0 ? pts[i - 1] : undefined);
+      addDraftDecorations(pts[i], i > 0 ? pts[i - 1] : undefined);
     }
-  }, [viewerRef, addDraftPolylineDecorations]);
+  }, [viewerRef, addDraftDecorations]);
 
   // Clears the probe marker + probe readout. The `probing` flag itself is reset
   // by the store `startDraw`/`cancelDraw` actions that every caller invokes.
@@ -948,13 +967,12 @@ export function ViewerCanvas() {
       }
 
       draftEntityRef.current = viewer.entities.add({
-        position:
-          mode === "polyline"
-            ? new CallbackPositionProperty(() => {
-                const pts = draftPositionsRef.current;
-                return hoverPositionRef.current ?? pts[pts.length - 1];
-              }, false)
-            : undefined,
+        // Anchors the live segment label (below) at the cursor for EVERY mode —
+        // polyline/polygon graphics ignore entity.position, so this is safe.
+        position: new CallbackPositionProperty(() => {
+          const pts = draftPositionsRef.current;
+          return hoverPositionRef.current ?? pts[pts.length - 1];
+        }, false),
         polyline: {
           positions: new CallbackProperty(() => {
             const pts = draftPositionsRef.current;
@@ -983,9 +1001,9 @@ export function ViewerCanvas() {
                 classificationType: ClassificationType.BOTH,
               }
             : undefined,
-        label:
-          mode === "polyline"
-            ? {
+        // Live segment readout for EVERY draw mode: distance from the last
+        // placed vertex to the cursor (plus rise for slope tools).
+        label: {
                 show: new CallbackProperty(() => {
                   const pts = draftPositionsRef.current;
                   const hover = hoverPositionRef.current;
@@ -1011,12 +1029,38 @@ export function ViewerCanvas() {
                 horizontalOrigin: HorizontalOrigin.LEFT,
                 verticalOrigin: VerticalOrigin.TOP,
                 disableDepthTestDistance: Number.POSITIVE_INFINITY,
-              }
-            : undefined,
+        },
       });
-      if (mode === "polyline" && draftPositionsRef.current.length > 0) {
-        rebuildDraftPolylineDecorations();
+      if (draftPositionsRef.current.length > 0) {
+        rebuildDraftDecorations();
       }
+
+      // Origin snap halo — lights up when the cursor is close enough to the
+      // first vertex to close the ring (Line→polygon close-out / polygon done).
+      originHaloRef.current = viewer.entities.add({
+        position: new CallbackPositionProperty(
+          () => draftPositionsRef.current[0] ?? Cartesian3.ZERO,
+          false
+        ),
+        point: {
+          pixelSize: 18,
+          color: ACCENT.withAlpha(0.25),
+          outlineColor: Color.WHITE,
+          outlineWidth: 2,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          show: new CallbackProperty(() => nearOriginRef.current, false),
+        },
+      });
+
+      // Screen-space proximity to the FIRST vertex — the close-the-loop
+      // target. Needs ≥3 vertices: fewer cannot form a ring.
+      const nearFirstVertex = (screenPos: Cartesian2): boolean => {
+        const pts = draftPositionsRef.current;
+        if (pts.length < 3) return false;
+        const p0 = viewer.scene.cartesianToCanvasCoordinates(pts[0]);
+        if (!p0) return false;
+        return Math.hypot(screenPos.x - p0.x, screenPos.y - p0.y) <= ORIGIN_SNAP_PX;
+      };
 
       const finish = () => {
         // Kind resolves at FINISH time (not startDraw) so the calc type picked
@@ -1151,14 +1195,37 @@ export function ViewerCanvas() {
 
       const bindDrawClick = () => {
         handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
+          // Clicking the ORIGIN vertex closes the ring: a polygon draw jumps
+          // straight to calc selection (same as right-click); a LINE draw
+          // becomes a polygon — the Line tool can outline polygons too, and
+          // returning to the origin is what closes + re-types the draft.
+          if (nearFirstVertex(event.position)) {
+            nearOriginRef.current = false;
+            if (mode === "polygon") {
+              releaseForCalc();
+              return;
+            }
+            seedPointsRef.current = [...draftPositionsRef.current];
+            startDrawSelfRef.current?.("polygon", { label: "Polygon", toolKey: "palette:polygon" });
+            // Mirror releaseForCalc on the NEW session: the outline is done —
+            // lock vertex placement, arm double-click finish, open the calc.
+            awaitingCalcRef.current = true;
+            const h = drawHandlerRef.current;
+            h?.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
+            h?.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
+            bindFinishDblClickRef.current?.();
+            store.setState({ activeToolKey: null });
+            store.getState().openDetail("measure");
+            toast.success("Shape closed — now a polygon. Choose a calculation, then double-click to run.");
+            return;
+          }
           const pos = pickScenePosition(viewer, event.position);
           if (pos) {
             const previous = draftPositionsRef.current[draftPositionsRef.current.length - 1];
             if (previous && Cartesian3.distance(previous, pos) < 0.01) return;
 
-            if (mode === "polyline") {
-              addDraftPolylineDecorations(pos, previous);
-            }
+            // Highlight EVERY placed vertex + label the segment it closes.
+            addDraftDecorations(pos, previous);
 
             redoPositionsRef.current = [];
             draftPositionsRef.current = [...draftPositionsRef.current, pos];
@@ -1169,11 +1236,16 @@ export function ViewerCanvas() {
         }, ScreenSpaceEventType.LEFT_CLICK);
         handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
           const pos = pickScenePosition(viewer, movement.endPosition);
-          hoverPositionRef.current = pos;
+          // Magnetize the hover onto the origin when close enough — the
+          // preview visibly locks shut and the halo invites the closing click.
+          const snap = nearFirstVertex(movement.endPosition);
+          nearOriginRef.current = snap;
+          const hover = snap ? draftPositionsRef.current[0] : pos;
+          hoverPositionRef.current = hover;
           const now = performance.now();
           if (now - hoverThrottleRef.current > 100) {
             hoverThrottleRef.current = now;
-            store.getState().setDraft(draftPositionsRef.current, pos);
+            store.getState().setDraft(draftPositionsRef.current, hover);
           }
           viewer.scene.requestRender();
         }, ScreenSpaceEventType.MOUSE_MOVE);
@@ -1257,7 +1329,9 @@ export function ViewerCanvas() {
           }
           draftPositionsRef.current = next;
           redoPositionsRef.current = [];
-          if (mode === "polyline") rebuildDraftPolylineDecorations();
+          // Rebuild dots + labels for BOTH modes — a polygon erase rotates the
+          // ring, so the consecutive-pair set (and thus the labels) changes.
+          rebuildDraftDecorations();
           store.getState().setDraft(next, null);
           viewer.scene.requestRender();
           const minPoints = mode === "polygon" ? 3 : 2;
@@ -1318,14 +1392,21 @@ export function ViewerCanvas() {
       surveyId,
       refreshMeasurements,
       triggerCompute,
-      addDraftPolylineDecorations,
-      rebuildDraftPolylineDecorations,
+      addDraftDecorations,
+      rebuildDraftDecorations,
       clearEraseHighlight,
     ]
   );
 
   // Eraser is a pick mode: click a draft segment to delete that edge. Works on
   // an in-progress drawing OR a selected measurement (e.g. a finished stockpile).
+  // Keep the self-handle current (assigned in an effect, not during render,
+  // per react-hooks/refs) — used by the Line→polygon close-out inside the
+  // draw session's own click handler.
+  useEffect(() => {
+    startDrawSelfRef.current = startDraw;
+  }, [startDraw]);
+
   const eraseDraft = useCallback(() => {
     const s = store.getState();
     const viewer = viewerRef.current;
@@ -1447,11 +1528,11 @@ export function ViewerCanvas() {
     }
 
     const previous = draftPositionsRef.current[draftPositionsRef.current.length - 1];
-    if (mode === "polyline") addDraftPolylineDecorations(position, previous);
+    addDraftDecorations(position, previous);
     draftPositionsRef.current = [...draftPositionsRef.current, position];
     store.getState().setDraft(draftPositionsRef.current, hoverPositionRef.current);
     viewerRef.current?.scene.requestRender();
-  }, [store, viewerRef, addDraftPolylineDecorations]);
+  }, [store, viewerRef, addDraftDecorations]);
 
   // ------------------------------------------------------------ ops (CRUD)
   // saveMeasurement PROMOTES a draw-first draft (draft-first, 2026-07-16):
