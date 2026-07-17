@@ -117,6 +117,11 @@ import { useDrawInteraction } from "@/components/viewer/shell/hooks/useDrawInter
 import { useScenePicking } from "@/components/viewer/shell/hooks/useScenePicking";
 import { useLayerLifecycle } from "@/components/viewer/shell/hooks/useLayerLifecycle";
 
+// Zoom-button step: a fraction of the camera's CURRENT altitude, not a fixed
+// meter amount, so one click feels the same whether orbiting the whole site or
+// already close to the ground — mirrors scroll-wheel zoom.
+const ZOOM_STEP_FACTOR = 0.4;
+
 export function ViewerCanvas() {
   const { viewerRef, viewerReady, handleViewerRef, baseImageryRef } = useCesiumViewer();
   const store = useViewerStoreApi();
@@ -326,6 +331,41 @@ export function ViewerCanvas() {
       duration: 2.0,
     });
   }, [viewerRef, manifest, flyToRectangle]);
+
+  const zoomIn = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) return;
+    const camera = viewer.scene.camera;
+    camera.zoomIn(Math.max(camera.positionCartographic.height, 1) * ZOOM_STEP_FACTOR);
+    viewer.scene.requestRender(); // requestRenderMode is on
+  }, [viewerRef]);
+  const zoomOut = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) return;
+    const camera = viewer.scene.camera;
+    camera.zoomOut(Math.max(camera.positionCartographic.height, 1) * ZOOM_STEP_FACTOR);
+    viewer.scene.requestRender();
+  }, [viewerRef]);
+
+  // Fullscreen toggle for the whole viewer shell (toolbar/panels stay usable,
+  // matching Cesium's own fullscreenButton target convention) — replaces it
+  // since it's disabled below (`fullscreenButton={false}`) in favor of this
+  // themed control. State tracks the browser's actual fullscreenElement so it
+  // stays correct if the user exits via Esc instead of the button.
+  const shellRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement === shellRef.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+    } else {
+      void shellRef.current?.requestFullscreen();
+    }
+  }, []);
 
   // ------------------------------------------------------- terrain plumbing
   const ensureBaseTerrain = useCallback(async (): Promise<TerrainProvider> => {
@@ -1288,6 +1328,7 @@ export function ViewerCanvas() {
   return (
     <ViewerActionsProvider value={actions}>
       <div
+        ref={shellRef}
         className="grid h-full w-full bg-[#0A0D14]"
         style={{
           gridTemplateColumns: `48px ${leftPanelVisible ? "280px" : "0px"} minmax(0, 1fr)`,
@@ -1341,6 +1382,10 @@ export function ViewerCanvas() {
               viewerRef={viewerRef}
               ready={viewerReady}
               onHome={goHome}
+              onZoomIn={zoomIn}
+              onZoomOut={zoomOut}
+              isFullscreen={isFullscreen}
+              onToggleFullscreen={toggleFullscreen}
             />
           </div>
 

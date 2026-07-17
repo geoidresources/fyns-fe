@@ -10,11 +10,22 @@ import {
   defined,
   type Viewer as CesiumViewer,
 } from "cesium";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Home, Orbit } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Home,
+  Maximize,
+  Minimize,
+  Minus,
+  Orbit,
+  Plus,
+} from "lucide-react";
 
 // Max distance (px) the knob travels from the base center. Kept well inside the
 // base radius so the knob never clips the rim at full deflection.
-const KNOB_RADIUS = 30;
+const KNOB_RADIUS = 20;
 
 // Angular speed at full knob deflection (radians / second). Scaled by the
 // normalized deflection and the frame delta so the orbit feels frame-rate
@@ -64,6 +75,13 @@ interface CameraJoystickProps {
   ready: boolean;
   /** Reset the camera to the survey's first framing. */
   onHome?: () => void;
+  /** Step the camera forward/backward along its view vector. */
+  onZoomIn?: () => void;
+  onZoomOut?: () => void;
+  /** Current fullscreen state, so the button shows the right icon. */
+  isFullscreen?: boolean;
+  /** Toggle fullscreen on the viewer shell. */
+  onToggleFullscreen?: () => void;
 }
 
 /**
@@ -72,7 +90,15 @@ interface CameraJoystickProps {
  * toward the horizon (oblique 3D), push down to return toward top-down. Works
  * with mouse, touch and pen via pointer capture.
  */
-export function CameraJoystick({ viewerRef, ready, onHome }: CameraJoystickProps) {
+export function CameraJoystick({
+  viewerRef,
+  ready,
+  onHome,
+  onZoomIn,
+  onZoomOut,
+  isFullscreen,
+  onToggleFullscreen,
+}: CameraJoystickProps) {
   const [active, setActive] = useState(false);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
 
@@ -199,11 +225,10 @@ export function CameraJoystick({ viewerRef, ready, onHome }: CameraJoystickProps
         onPointerCancel={endDrag}
         aria-label="Hold and drag to change the camera angle"
         title="Hold and drag to change the camera angle"
-        className={`relative h-28 w-28 rounded-full border bg-[#12141A]/90 backdrop-blur-xl shadow-2xl touch-none transition-colors ${
-          active
-            ? "border-[#C97A4E]/60 cursor-grabbing"
-            : "border-[#1E2028] cursor-grab hover:border-[#2A2D35]"
-        }`}
+        className={`relative h-15 w-15 rounded-full border bg-[#12141A]/90 backdrop-blur-xl shadow-2xl touch-none transition-colors ${active
+          ? "border-[#C97A4E]/60 cursor-grabbing"
+          : "border-[#1E2028] cursor-grab hover:border-[#2A2D35]"
+          }`}
       >
         {/* Crosshair guides */}
         <div className="pointer-events-none absolute left-1/2 top-3 bottom-3 w-px -translate-x-1/2 bg-white/5" />
@@ -211,29 +236,29 @@ export function CameraJoystick({ viewerRef, ready, onHome }: CameraJoystickProps
 
         {/* Directional hints — brighten toward the side being pushed */}
         <ChevronUp
-          size={14}
-          className="pointer-events-none absolute left-1/2 top-1.5 -translate-x-1/2 transition-colors"
-          style={{ color: dy < -0.15 ? "#C97A4E" : "#4B5563" }}
+          size={17}
+          className="pointer-events-none absolute left-1/2 -top-1.5 -translate-x-1/2 transition-colors"
+          style={{ color: dy < -0.20 ? "#C97A4E" : "#4B5563" }}
         />
         <ChevronDown
-          size={14}
-          className="pointer-events-none absolute left-1/2 bottom-1.5 -translate-x-1/2 transition-colors"
+          size={17}
+          className="pointer-events-none absolute left-1/2 -bottom-1.5 -translate-x-1/2 transition-colors"
           style={{ color: dy > 0.15 ? "#C97A4E" : "#4B5563" }}
         />
         <ChevronLeft
-          size={14}
-          className="pointer-events-none absolute top-1/2 left-1.5 -translate-y-1/2 transition-colors"
+          size={17}
+          className="pointer-events-none absolute top-1/2 -left-1.5 -translate-y-1/2 transition-colors"
           style={{ color: dx < -0.15 ? "#C97A4E" : "#4B5563" }}
         />
         <ChevronRight
-          size={14}
-          className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 transition-colors"
+          size={17}
+          className="pointer-events-none absolute top-1/2 -right-1.5 -translate-y-1/2 transition-colors"
           style={{ color: dx > 0.15 ? "#C97A4E" : "#4B5563" }}
         />
 
         {/* Knob */}
         <div
-          className="pointer-events-none absolute left-1/2 top-1/2 flex h-12 w-12 items-center justify-center rounded-full border border-[#C97A4E]/40 text-[#0A0D14]"
+          className="pointer-events-none absolute left-1/2 top-1/2 flex h-6 w-6 items-center justify-center rounded-full border border-[#C97A4E]/40 text-[#0A0D14]"
           style={{
             background: "linear-gradient(to bottom, #C97A4E, #b06941)",
             transform: `translate(calc(-50% + ${knob.x}px), calc(-50% + ${knob.y}px))`,
@@ -243,7 +268,7 @@ export function CameraJoystick({ viewerRef, ready, onHome }: CameraJoystickProps
               : "0 0 10px rgba(201,122,78,0.25)",
           }}
         >
-          <Orbit size={20} strokeWidth={2.25} />
+          <Orbit size={12} strokeWidth={2.25} />
         </div>
       </div>
 
@@ -253,9 +278,49 @@ export function CameraJoystick({ viewerRef, ready, onHome }: CameraJoystickProps
           onClick={onHome}
           aria-label="Reset camera to home view"
           title="Reset camera to home view"
-          className="flex h-10 w-10 items-center justify-center rounded-full border border-[#1E2028] bg-[#12141A]/90 text-gray-400 shadow-2xl backdrop-blur-xl transition-colors hover:border-[#C97A4E]/50 hover:text-[#C97A4E]"
+          className="flex h-6 w-6 items-center justify-center rounded-full border border-[#1E2028] bg-[#12141A]/90 text-gray-400 shadow-2xl backdrop-blur-xl transition-colors hover:border-[#C97A4E]/50 hover:text-[#C97A4E]"
         >
-          <Home size={16} strokeWidth={2.25} />
+          <Home size={12} strokeWidth={2.25} />
+        </button>
+      )}
+
+      {(onZoomIn || onZoomOut) && (
+        <div className="flex w-6 flex-col overflow-hidden rounded-full border border-[#1E2028] bg-[#12141A]/90 shadow-2xl backdrop-blur-xl">
+          {onZoomIn && (
+            <button
+              type="button"
+              onClick={onZoomIn}
+              aria-label="Zoom in"
+              title="Zoom in"
+              className="flex h-6 w-6 items-center justify-center text-gray-400 transition-colors hover:bg-white/5 hover:text-[#C97A4E]"
+            >
+              <Plus size={12} strokeWidth={2.25} />
+            </button>
+          )}
+          {onZoomIn && onZoomOut && <div className="h-px w-full bg-[#1E2028]" />}
+          {onZoomOut && (
+            <button
+              type="button"
+              onClick={onZoomOut}
+              aria-label="Zoom out"
+              title="Zoom out"
+              className="flex h-6 w-6 items-center justify-center text-gray-400 transition-colors hover:bg-white/5 hover:text-[#C97A4E]"
+            >
+              <Minus size={12} strokeWidth={2.25} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {onToggleFullscreen && (
+        <button
+          type="button"
+          onClick={onToggleFullscreen}
+          aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+          title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+          className="flex h-6 w-6 items-center justify-center rounded-full border border-[#1E2028] bg-[#12141A]/90 text-gray-400 shadow-2xl backdrop-blur-xl transition-colors hover:border-[#C97A4E]/50 hover:text-[#C97A4E]"
+        >
+          {isFullscreen ? <Minimize size={12} strokeWidth={2.25} /> : <Maximize size={12} strokeWidth={2.25} />}
         </button>
       )}
     </div>

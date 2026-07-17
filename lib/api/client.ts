@@ -42,9 +42,43 @@ interface ApiFetchOptions {
   signal?: AbortSignal;
 }
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+// Per-attempt cap. A hung backend must never leave the request pending forever
+// (spinner stuck); with the transient-retry below, a shorter per-attempt budget
+// surfaces a bad attempt sooner instead of blocking the whole load on one slow call.
+const DEFAULT_TIMEOUT_MS = 20_000;
+// Transient blips (a rolling backend restart, a dropped connection) self-heal on
+// idempotent reads. Small linear backoff; POST/PATCH/DELETE never auto-retry.
+const MAX_GET_RETRIES = 2;
+const RETRY_BACKOFF_MS = 250;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Worth retrying an idempotent request: a raw network failure (TypeError
+ * "Failed to fetch"), a request timeout (408), or a 5xx. NOT 4xx (auth,
+ * validation, not-found) — those are deterministic and must surface at once. */
+function isTransient(err: unknown): boolean {
+  if (err instanceof ApiError) return err.status === 408 || err.status >= 500;
+  return true; // a non-ApiError escaping apiFetchOnce is a fetch/network error
+}
 
 export async function apiFetch<T>(baseUrl: string, path: string, opts: ApiFetchOptions = {}): Promise<T> {
+  // Only idempotent GETs auto-retry (retrying a POST could double-submit); a
+  // caller-supplied signal means the caller owns cancellation, so don't retry.
+  const retries = (opts.method ?? "GET") === "GET" && !opts.signal ? MAX_GET_RETRIES : 0;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await apiFetchOnce<T>(baseUrl, path, opts);
+    } catch (err) {
+      lastErr = err;
+      if (attempt === retries || !isTransient(err)) throw err;
+      await sleep(RETRY_BACKOFF_MS * (attempt + 1)); // 250ms, 500ms
+    }
+  }
+  throw lastErr;
+}
+
+async function apiFetchOnce<T>(baseUrl: string, path: string, opts: ApiFetchOptions): Promise<T> {
   const headers: Record<string, string> = {};
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
   if (!opts.noAuth) {
@@ -56,8 +90,8 @@ export async function apiFetch<T>(baseUrl: string, path: string, opts: ApiFetchO
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  // Without a timeout a hung backend leaves the request pending forever and the
-  // UI stuck on a spinner. A caller-supplied signal takes precedence.
+  // A caller-supplied signal takes precedence; otherwise each attempt gets its
+  // own fresh timeout signal.
   const signal = opts.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
 
   let res: Response;
