@@ -449,6 +449,82 @@ export function deleteMeasurement(surveyId: string, measurementId: string): Prom
   });
 }
 
+// ------------------------------------------------------------------ folders
+
+/** A folder row (viewer-shell §6.2). parent_id null = workspace (depth 0);
+ * children nest to depth 5. Project-scoped — persists across surveys. */
+export interface FolderRecord {
+  id: string;
+  client_id: string;
+  project_id: string;
+  parent_id: string | null;
+  name: string;
+  depth: number;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** FROZEN wire node for GET /projects/:id/folder-tree — `itemIds` is
+ * deliberately camelCase (contract §6.1/§6.2), matching the FE tree type. */
+export interface FolderTreeNode {
+  id: string;
+  name: string;
+  kind: "workspace" | "folder";
+  depth: number;
+  children: FolderTreeNode[];
+  itemIds: string[];
+}
+
+/** The whole project tree in one call; each node's itemIds filtered to the
+ * given survey's measurements. */
+export function getFolderTree(
+  projectId: string,
+  surveyId: string
+): Promise<{ workspaces: FolderTreeNode[] }> {
+  return apiFetch<{ workspaces: FolderTreeNode[] }>(
+    BASE,
+    `/projects/${projectId}/folder-tree?survey_id=${encodeURIComponent(surveyId)}`
+  );
+}
+
+/** Create a folder; omit parent_id (or pass null) for a top-level workspace. */
+export function createFolder(req: {
+  project_id: string;
+  parent_id?: string | null;
+  name: string;
+}): Promise<FolderRecord> {
+  return apiFetch<FolderRecord>(BASE, "/folders", { method: "POST", body: req });
+}
+
+/** Rename / reposition / move a folder. `parent_id` is THREE-WAY: omit the key
+ * to leave the parent alone; null promotes to a workspace (root); a string
+ * moves under that parent (server revalidates depth/cycle/tenant). */
+export function updateFolder(
+  folderId: string,
+  body: { name?: string; parent_id?: string | null; position?: number }
+): Promise<FolderRecord> {
+  return apiFetch<FolderRecord>(BASE, `/folders/${folderId}`, { method: "PATCH", body });
+}
+
+/** Hard delete; cascades to child folders + memberships. Measurements
+ * SURVIVE — they simply fall back to Ungrouped. */
+export function deleteFolder(folderId: string): Promise<void> {
+  return apiFetch<void>(BASE, `/folders/${folderId}`, { method: "DELETE" });
+}
+
+/** Batch add/remove measurement membership; returns the folder's resulting
+ * full membership (all surveys). */
+export function updateFolderItems(
+  folderId: string,
+  body: { add?: string[]; remove?: string[] }
+): Promise<{ item_ids: string[] }> {
+  return apiFetch<{ item_ids: string[] }>(BASE, `/folders/${folderId}/items`, {
+    method: "PUT",
+    body,
+  });
+}
+
 /** The instant-compute tier's §7.1-shaped result: computed synchronously in
  * PostGIS from the measurement's CURRENT stored params, NOT persisted. Metrics
  * carry the SAME keys as a worker doc (net_change_m3, volume_m3, area_m2, …) so

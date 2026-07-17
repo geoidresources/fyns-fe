@@ -1,23 +1,22 @@
 "use client";
 
-// WorkspaceTree (viewer-shell §6.3 base / §4.2) — the `measure` module's zone-2
-// content, replacing the rendered MeasurementPanel (whose FILE stays: it is the
-// home of the DrawMode/DrawOptions types the store consumes).
+// WorkspaceTree (viewer-shell §6.3 / §4.2) — the `measure` module's zone-2
+// content. Structure comes from the `TreeSource` seam (§6.1): 1.6 swapped in
+// `folderApiTreeSource` (asset-svc folders backend, §6.2) — real folder CRUD
+// (create / inline-rename / delete) and native HTML5 drag-and-drop: drag a
+// measurement onto a folder to group it (root/Ungrouped = ungroup), drag a
+// folder onto a folder to nest it (root = promote to workspace). Cycle/depth
+// guards run client-side (canDropFolder) and again server-side (§6.2).
+// When the folders backend is unreachable the source degrades to the legacy
+// read-only folder-string tree and every folder affordance hides.
 //
-// Structure comes from the `TreeSource` seam (§6.1): 1.3 ships
-// `legacyFolderTreeSource` (workspace → folders nested by splitting
-// `measurement.folder` on "/") and 1.6 swaps in `folderApiTreeSource` by
-// changing ONE line here. Row/status behaviors are ported from
-// MeasurementPanel: status dots, result-suffixed labels, hover
-// compute/delete actions, demo badges, quick-draw + sort + filter +
-// collapse-all toolbar, and the server-debounced search box (the store's
-// `measurementSearch` — useMeasurementsPoll debounces 300 ms and refetches).
-//
-// DATA comes from store selectors; Cesium-bound callbacks come from
-// `useViewerActions()` (§3.6 / the 1.3c-i actions seam). Quick-draw buttons
-// mint `tree:*` tool keys (§3.5).
+// Row/status behaviors are ported from MeasurementPanel: status dots,
+// result-suffixed labels, hover compute/delete actions, demo badges, sort +
+// filter + collapse-all toolbar, and the server-debounced search box. (The
+// quick-draw polygon/polyline buttons were removed — the floating canvas
+// toolbar owns drawing.)
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpDown,
   ChevronRight,
@@ -25,16 +24,17 @@ import {
   EyeOff,
   Filter,
   Folder,
+  FolderPlus,
   FolderTree,
   FoldVertical,
-  Hexagon,
   Loader2,
+  Pencil,
   Play,
   Search,
-  Spline,
   Trash2,
 } from "lucide-react";
 import { motion } from "framer-motion";
+import { toast } from "sonner";
 
 import {
   Collapsible,
@@ -48,9 +48,20 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import {
-  legacyFolderTreeSource,
+  canDropFolder,
+  findNode,
+  folderMembership,
+  nextFolderName,
+  MAX_FOLDER_DEPTH,
   type WorkspaceTreeNode,
 } from "@/lib/viewer/workspaceTree";
+import { folderApiTreeSource } from "@/lib/viewer/folderTreeSource";
+import {
+  createFolder,
+  deleteFolder,
+  updateFolder,
+  updateFolderItems,
+} from "@/lib/api/assetSvc";
 import {
   isMeasurementVisibleOnCanvas,
   useViewerStore,
@@ -154,12 +165,43 @@ function collectSubtreeItemIds(node: WorkspaceTreeNode): string[] {
   return ids;
 }
 
+// ------------------------------------------------------------- DnD plumbing
+
+/** What's being dragged (set at dragstart, same-window only — dataTransfer
+ * payloads are unreadable during dragover, so guards read this instead). */
+interface DragPayload {
+  kind: "measurement" | "folder";
+  id: string;
+}
+
+interface DndHandlers {
+  ready: boolean;
+  dropTargetId: string | null;
+  startMeasurement: (e: React.DragEvent, id: string) => void;
+  startFolder: (e: React.DragEvent, node: WorkspaceTreeNode) => void;
+  end: () => void;
+  overNode: (e: React.DragEvent, node: WorkspaceTreeNode) => void;
+  leaveNode: (node: WorkspaceTreeNode) => void;
+  dropNode: (e: React.DragEvent, node: WorkspaceTreeNode) => void;
+}
+
+interface FolderOps {
+  ready: boolean;
+  renamingId: string | null;
+  create: (parent: WorkspaceTreeNode | null) => void;
+  renameStart: (id: string) => void;
+  renameCommit: (node: WorkspaceTreeNode, name: string) => void;
+  renameCancel: () => void;
+  remove: (node: WorkspaceTreeNode) => void;
+}
+
 // -------------------------------------------------------------- measurement row
 
 function MeasurementRow({
   m,
   busy,
   visible,
+  dnd,
   onSelect,
   onCompute,
   onDelete,
@@ -168,6 +210,7 @@ function MeasurementRow({
   m: PanelMeasurement;
   busy: boolean;
   visible: boolean;
+  dnd: DndHandlers;
   onSelect: (m: PanelMeasurement) => void;
   onCompute: (id: string) => void;
   onDelete: (id: string) => void;
@@ -175,13 +218,19 @@ function MeasurementRow({
 }) {
   const canCompute = m.status === "draft" || m.status === "failed";
   const showDot = !m.demo && m.status !== "completed";
+  const draggable = dnd.ready && !m.demo;
   return (
     <div
+      data-m-id={m.id}
+      draggable={draggable}
+      onDragStart={draggable ? (e) => dnd.startMeasurement(e, m.id) : undefined}
+      onDragEnd={draggable ? dnd.end : undefined}
+      title={draggable ? "Drag onto a folder to group" : undefined}
       className={`group flex h-7 items-center gap-2 rounded-[4px] px-2 transition-colors ${
         visible
           ? "bg-[#C97A4E]/10 hover:bg-[#C97A4E]/15"
           : "hover:bg-white/[0.03]"
-      }`}
+      } ${draggable ? "cursor-grab active:cursor-grabbing" : ""}`}
     >
       {showDot && <StatusDot status={m.status} />}
       <button
@@ -254,15 +303,56 @@ function MeasurementRow({
   );
 }
 
+// ------------------------------------------------------------ inline rename
+
+function RenameInput({
+  initial,
+  onCommit,
+  onCancel,
+}: {
+  initial: string;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const committed = useRef(false);
+  const commit = () => {
+    if (committed.current) return;
+    committed.current = true;
+    onCommit(value);
+  };
+  return (
+    <input
+      autoFocus
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onFocus={(e) => e.currentTarget.select()}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") {
+          committed.current = true;
+          onCancel();
+        }
+      }}
+      onClick={(e) => e.stopPropagation()}
+      className="h-5 min-w-0 flex-1 rounded-[3px] border border-[#C97A4E]/60 bg-[#19191d] px-1 text-xs text-[#F3F4F6] focus-visible:outline-none"
+    />
+  );
+}
+
 // ------------------------------------------------------------------ tree node
 
 function TreeNode({
   node,
+  level,
   byId,
   sortRecent,
   busyIds,
   collapsed,
   visibility,
+  folderOps,
+  dnd,
   onToggle,
   onSelect,
   onCompute,
@@ -271,11 +361,14 @@ function TreeNode({
   onToggleFolderVisible,
 }: {
   node: WorkspaceTreeNode;
+  level: number;
   byId: Map<string, PanelMeasurement>;
   sortRecent: boolean;
   busyIds: Set<string>;
   collapsed: Set<string>;
   visibility: Record<string, boolean>;
+  folderOps: FolderOps;
+  dnd: DndHandlers;
   onToggle: (id: string) => void;
   onSelect: (m: PanelMeasurement) => void;
   onCompute: (id: string) => void;
@@ -286,6 +379,11 @@ function TreeNode({
   const open = !collapsed.has(node.id);
   const isWorkspace = node.kind === "workspace";
   const NodeIcon = isWorkspace ? FolderTree : Folder;
+  // Real backend folders get CRUD affordances + are draggable; the pinned
+  // root and Ungrouped are client-side fixtures.
+  const isReal = !node.synthetic && folderOps.ready;
+  const renaming = folderOps.renamingId === node.id;
+  const isDropTarget = dnd.dropTargetId === node.id;
 
   // Resolve + sort this node's direct items. Default sorts by name; the
   // toggle switches to most-recently-updated first (ported behavior).
@@ -310,8 +408,19 @@ function TreeNode({
   return (
     <Collapsible open={open} onOpenChange={() => onToggle(node.id)}>
       <div
-        className="group flex h-8 w-full items-center gap-1.5 rounded-[4px] px-2 hover:bg-white/[0.03]"
-        style={{ paddingLeft: `${8 + node.depth * 14}px` }}
+        data-node-id={node.id}
+        draggable={isReal && dnd.ready && !renaming}
+        onDragStart={isReal ? (e) => dnd.startFolder(e, node) : undefined}
+        onDragEnd={isReal ? dnd.end : undefined}
+        onDragOver={(e) => dnd.overNode(e, node)}
+        onDragLeave={() => dnd.leaveNode(node)}
+        onDrop={(e) => dnd.dropNode(e, node)}
+        className={`group flex h-8 w-full items-center gap-1.5 rounded-[4px] px-2 transition-colors ${
+          isDropTarget
+            ? "bg-[#C97A4E]/15 ring-1 ring-inset ring-[#C97A4E]/60"
+            : "hover:bg-white/[0.03]"
+        }`}
+        style={{ paddingLeft: `${8 + level * 14}px` }}
       >
         <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
           <ChevronRight
@@ -319,19 +428,74 @@ function TreeNode({
             className={`shrink-0 text-gray-500 transition-transform ${open ? "rotate-90" : ""}`}
           />
           <NodeIcon size={14} className="shrink-0 text-gray-500" />
-          <span
-            className={`min-w-0 flex-1 truncate text-left text-xs ${
-              isWorkspace
-                ? "font-medium text-[#F3F4F6]"
-                : folderEyeActive
-                  ? "text-[#F3F4F6]"
-                  : "text-[#a1a1aa]"
-            }`}
-          >
-            {node.name}
-          </span>
-          <span className="shrink-0 text-[11px] text-[#71717a]">({subtreeCount(node)})</span>
+          {renaming ? (
+            <RenameInput
+              initial={node.name}
+              onCommit={(name) => folderOps.renameCommit(node, name)}
+              onCancel={folderOps.renameCancel}
+            />
+          ) : (
+            <span
+              className={`min-w-0 flex-1 truncate text-left text-xs ${
+                isWorkspace
+                  ? "font-medium text-[#F3F4F6]"
+                  : folderEyeActive
+                    ? "text-[#F3F4F6]"
+                    : "text-[#a1a1aa]"
+              }`}
+            >
+              {node.name}
+            </span>
+          )}
+          {!renaming && (
+            <span className="shrink-0 text-[11px] text-[#71717a]">({subtreeCount(node)})</span>
+          )}
         </CollapsibleTrigger>
+
+        {/* Folder management — real backend folders only. */}
+        {isReal && !renaming && (
+          <div className="hidden shrink-0 items-center gap-1 group-hover:flex">
+            {node.depth < MAX_FOLDER_DEPTH && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  folderOps.create(node);
+                }}
+                title="New subfolder"
+                className="text-gray-500 transition-colors hover:text-[#C97A4E]"
+              >
+                <FolderPlus size={12} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                folderOps.renameStart(node.id);
+              }}
+              title="Rename folder"
+              className="text-gray-500 transition-colors hover:text-gray-200"
+            >
+              <Pencil size={11} />
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                folderOps.remove(node);
+              }}
+              title="Delete folder (measurements move to Ungrouped)"
+              className="text-gray-500 transition-colors hover:text-red-400"
+            >
+              <Trash2 size={12} />
+            </button>
+          </div>
+        )}
+
         {toggleableIds.length > 0 && (
           <button
             type="button"
@@ -356,11 +520,14 @@ function TreeNode({
           <TreeNode
             key={child.id}
             node={child}
+            level={level + 1}
             byId={byId}
             sortRecent={sortRecent}
             busyIds={busyIds}
             collapsed={collapsed}
             visibility={visibility}
+            folderOps={folderOps}
+            dnd={dnd}
             onToggle={onToggle}
             onSelect={onSelect}
             onCompute={onCompute}
@@ -369,13 +536,14 @@ function TreeNode({
             onToggleFolderVisible={onToggleFolderVisible}
           />
         ))}
-        <div style={{ paddingLeft: `${14 + node.depth * 14}px` }}>
+        <div style={{ paddingLeft: `${14 + level * 14}px` }}>
           {items.map((m) => (
             <MeasurementRow
               key={m.id}
               m={m}
               busy={busyIds.has(m.id)}
               visible={isMeasurementVisibleOnCanvas(m, visibility)}
+              dnd={dnd}
               onSelect={onSelect}
               onCompute={onCompute}
               onDelete={onDelete}
@@ -397,7 +565,6 @@ export function WorkspaceTree() {
   const searchingMeasurements = useViewerStore((s) => s.searchingMeasurements);
   const drawMode = useViewerStore((s) => s.drawMode);
   const busyIds = useViewerStore((s) => s.busyIds);
-  const activeToolKey = useViewerStore((s) => s.activeToolKey);
   const projectId = useViewerStore((s) => s.manifest?.survey.project_id ?? "");
   const surveyId = useViewerStore((s) => s.surveyId);
   const setMeasurementSearch = useViewerStore((s) => s.setMeasurementSearch);
@@ -409,18 +576,31 @@ export function WorkspaceTree() {
   const [completedOnly, setCompletedOnly] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [nodes, setNodes] = useState<WorkspaceTreeNode[]>([]);
+  // The UNfiltered backend workspaces (membership map, name dedupe, drop
+  // guards); null = folders backend unavailable → legacy read-only tree.
+  const [rawWorkspaces, setRawWorkspaces] = useState<WorkspaceTreeNode[] | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const dragRef = useRef<DragPayload | null>(null);
 
   // Name search runs server-side (`measurements` already reflects the query);
   // only the completed-only filter is client-side, applied BEFORE the tree
-  // builds so empty folders drop out (ported MeasurementPanel behavior).
+  // builds so empty folders drop out while filtering (ported behavior).
   const visible = useMemo(
     () => (completedOnly ? measurements.filter((m) => m.status === "completed") : measurements),
     [measurements, completedOnly]
   );
+  const filtering = completedOnly || measurementSearch.trim().length > 0;
 
-  // The TreeSource seam (§6.1): swap this one line for `folderApiTreeSource`
-  // in 1.6 once the folders backend (1.5) is consumed.
-  const source = useMemo(() => legacyFolderTreeSource(visible), [visible]);
+  // The TreeSource seam (§6.1): folderApiTreeSource (1.6). refreshTick forces
+  // a re-load after every folder mutation.
+  const source = useMemo(
+    () =>
+      folderApiTreeSource(visible, { pruneEmpty: filtering, onRaw: setRawWorkspaces }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [visible, filtering, refreshTick]
+  );
 
   useEffect(() => {
     let alive = true;
@@ -467,7 +647,153 @@ export function WorkspaceTree() {
     setMeasurementsVisible(ids, !anyOn);
   };
 
-  const treeEmpty = nodes.every((n) => subtreeCount(n) === 0);
+  // ------------------------------------------------------- folder mutations
+
+  const refresh = () => setRefreshTick((t) => t + 1);
+  const mutationError = (err: unknown, fallback: string) =>
+    toast.error(err instanceof Error && err.message ? err.message : fallback);
+
+  const folderOps: FolderOps = {
+    ready: rawWorkspaces !== null,
+    renamingId,
+    create: (parent) => {
+      if (rawWorkspaces === null || !projectId) {
+        toast.error("Folders are unavailable right now");
+        return;
+      }
+      // parent === null (toolbar) → top-level; parent real → subfolder. The
+      // synthetic root also means top-level (drop-created path).
+      const parentReal = parent && !parent.synthetic ? parent : null;
+      const siblings = parentReal
+        ? (findNode(rawWorkspaces, parentReal.id)?.children ?? [])
+        : rawWorkspaces;
+      const name = nextFolderName(siblings);
+      createFolder({
+        project_id: projectId,
+        parent_id: parentReal ? parentReal.id : null,
+        name,
+      })
+        .then((created) => {
+          // Reveal the new row and drop straight into rename mode.
+          setCollapsed((prev) => {
+            const next = new Set(prev);
+            if (parentReal) next.delete(parentReal.id);
+            return next;
+          });
+          setRenamingId(created.id);
+          refresh();
+        })
+        .catch((err) => mutationError(err, "Could not create the folder"));
+    },
+    renameStart: setRenamingId,
+    renameCommit: (node, name) => {
+      setRenamingId(null);
+      const next = name.trim();
+      if (!next || next === node.name) return;
+      updateFolder(node.id, { name: next })
+        .then(refresh)
+        .catch((err) => mutationError(err, "Could not rename the folder"));
+    },
+    renameCancel: () => setRenamingId(null),
+    remove: (node) => {
+      deleteFolder(node.id)
+        .then(() => {
+          toast.success("Folder deleted — its measurements moved to Ungrouped");
+          refresh();
+        })
+        .catch((err) => mutationError(err, "Could not delete the folder"));
+    },
+  };
+
+  // ------------------------------------------------------------ DnD wiring
+
+  const moveMeasurement = async (mid: string, target: WorkspaceTreeNode) => {
+    if (rawWorkspaces === null) return;
+    const membership = folderMembership(rawWorkspaces).get(mid) ?? [];
+    const targetReal = !target.synthetic;
+    const ops: Promise<unknown>[] = [];
+    if (targetReal && !membership.includes(target.id)) {
+      ops.push(updateFolderItems(target.id, { add: [mid] }));
+    }
+    for (const fid of membership) {
+      if (!targetReal || fid !== target.id) {
+        ops.push(updateFolderItems(fid, { remove: [mid] }));
+      }
+    }
+    if (ops.length === 0) return; // dropped where it already lives
+    try {
+      await Promise.all(ops);
+      refresh();
+    } catch (err) {
+      mutationError(err, "Could not move the measurement");
+      refresh(); // partial moves: reconcile with the backend's actual state
+    }
+  };
+
+  const moveFolder = async (fid: string, target: WorkspaceTreeNode) => {
+    if (rawWorkspaces === null) return;
+    const dragged = findNode(rawWorkspaces, fid);
+    if (!dragged || !canDropFolder(dragged, target)) return;
+    try {
+      await updateFolder(fid, {
+        parent_id: target.synthetic === "root" ? null : target.id,
+      });
+      refresh();
+    } catch (err) {
+      mutationError(err, "Could not move the folder");
+    }
+  };
+
+  const dnd: DndHandlers = {
+    ready: rawWorkspaces !== null,
+    dropTargetId,
+    startMeasurement: (e, id) => {
+      dragRef.current = { kind: "measurement", id };
+      e.dataTransfer.setData("application/x-geoid-measurement", id);
+      e.dataTransfer.effectAllowed = "move";
+    },
+    startFolder: (e, node) => {
+      dragRef.current = { kind: "folder", id: node.id };
+      e.dataTransfer.setData("application/x-geoid-folder", node.id);
+      e.dataTransfer.effectAllowed = "move";
+      e.stopPropagation();
+    },
+    end: () => {
+      dragRef.current = null;
+      setDropTargetId(null);
+    },
+    overNode: (e, node) => {
+      const drag = dragRef.current;
+      if (!drag || rawWorkspaces === null) return;
+      let ok = false;
+      if (drag.kind === "measurement") {
+        ok = true; // folders group; root/Ungrouped ungroup
+      } else {
+        const dragged = findNode(rawWorkspaces, drag.id);
+        ok = !!dragged && canDropFolder(dragged, node);
+      }
+      if (ok) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        if (dropTargetId !== node.id) setDropTargetId(node.id);
+      }
+    },
+    leaveNode: (node) => {
+      setDropTargetId((prev) => (prev === node.id ? null : prev));
+    },
+    dropNode: (e, node) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const drag = dragRef.current;
+      dragRef.current = null;
+      setDropTargetId(null);
+      if (!drag) return;
+      if (drag.kind === "measurement") void moveMeasurement(drag.id, node);
+      else void moveFolder(drag.id, node);
+    },
+  };
+
+  const treeEmpty = nodes.every((n) => subtreeCount(n) === 0 && n.children.length === 0);
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -476,29 +802,12 @@ export function WorkspaceTree() {
           Measurements
         </div>
 
-        {/* Toolbar — quick-draw (tree:* keys, §3.5), sort, filter, collapse-all. */}
+        {/* Toolbar — new folder, sort, filter, collapse-all. (The quick-draw
+            polygon/polyline buttons were removed — the floating canvas toolbar
+            owns drawing.) */}
         <div className="flex items-center gap-1 px-1 pb-2">
-          <ToolbarButton
-            label="Draw polygon (area / volume)"
-            active={activeToolKey === "tree:polygon"}
-            onClick={() =>
-              activeToolKey === "tree:polygon"
-                ? actions.cancelDraw()
-                : actions.startDraw("polygon", { toolKey: "tree:polygon" })
-            }
-          >
-            <Hexagon size={13} />
-          </ToolbarButton>
-          <ToolbarButton
-            label="Draw polyline (cross-section)"
-            active={activeToolKey === "tree:polyline"}
-            onClick={() =>
-              activeToolKey === "tree:polyline"
-                ? actions.cancelDraw()
-                : actions.startDraw("polyline", { toolKey: "tree:polyline" })
-            }
-          >
-            <Spline size={13} />
+          <ToolbarButton label="New folder" onClick={() => folderOps.create(null)}>
+            <FolderPlus size={13} />
           </ToolbarButton>
           <ToolbarButton
             label={sortRecent ? "Sorting by recent" : "Sorting by name"}
@@ -560,11 +869,14 @@ export function WorkspaceTree() {
               <TreeNode
                 key={node.id}
                 node={node}
+                level={0}
                 byId={byId}
                 sortRecent={sortRecent}
                 busyIds={busyIds}
                 collapsed={collapsed}
                 visibility={measurementVisibility}
+                folderOps={folderOps}
+                dnd={dnd}
                 onToggle={toggleNode}
                 onSelect={actions.selectMeasurementRow}
                 onCompute={actions.triggerCompute}
