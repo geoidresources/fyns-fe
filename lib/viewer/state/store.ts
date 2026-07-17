@@ -41,7 +41,6 @@ export type ModuleKey =
   | "survey"
   | "designs"
   | "media"
-  | "outputs"
   | "hydro"
   | "crew"
   | "machines";

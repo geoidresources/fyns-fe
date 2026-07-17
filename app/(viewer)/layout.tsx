@@ -1,7 +1,8 @@
-// Dedicated `(viewer)` route group (viewer-shell §1, D1 — ADOPTED). Full-bleed
-// server component: the viewer owns the whole viewport, so the dashboard
-// `Sidebar`+`Topbar` (from `app/(dashboard)/layout.tsx`) are NOT in this tree.
-// The module rail inside `ViewerShell` replaces them (§1.3).
+// Dedicated `(viewer)` route group (viewer-shell §1, D1 — ADOPTED). The
+// dashboard `Topbar` is still NOT in this tree, but the dashboard `Sidebar`
+// (the global app rail) IS kept here on the far left so the user can jump to
+// sites / upload / files / settings without leaving the viewer — it sits just
+// left of the viewer's own module rail (inside `ViewerShell`), which stays.
 //
 // `app/layout.tsx` still owns `<html>/<body>`, fonts and `<Toaster>`, so
 // `(dashboard)` and `(viewer)` are NOT multiple root layouts — navigating
@@ -9,6 +10,7 @@
 // The group parens are elided from the URL, so routes remain `/viewer/:surveyId`.
 
 import React from "react";
+import { Sidebar } from "@/components/dashboard/Sidebar";
 
 export default function ViewerLayout({
   children,
@@ -16,8 +18,9 @@ export default function ViewerLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="h-screen w-screen overflow-hidden bg-[#0A0D14]">
-      {children}
+    <div className="flex h-screen w-screen overflow-hidden bg-[#0A0D14]">
+      <Sidebar />
+      <div className="min-w-0 flex-1 overflow-hidden">{children}</div>
     </div>
   );
 }

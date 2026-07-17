@@ -3,8 +3,10 @@
 // Zone 1 — ModuleRail (viewer-shell §2.1/§4.1, polished in 1.3c-ii). The 48px
 // vertical rail that replaces the dashboard chrome on viewer routes. Top →
 // bottom: Logo (→ /globe — the viewer's exit, replacing the old in-panel back
-// arrow), divider, the eight modules (Measure + Survey live, the rest disabled
-// with a phase tooltip, D7), spacer, Help (phase stub), Avatar (→ /settings).
+// arrow), divider, the modules (Measure + Survey live, the rest disabled with a
+// phase tooltip, D7). Outputs moved to the globe rail (project/survey source
+// data downloads, §"Files"); Help/Avatar removed — the globe rail's own
+// profile button covers account access.
 //
 // Behavior (§4.1): clicking a live module sets `activeModule` and opens the
 // tree if collapsed; clicking the ALREADY-active module toggles
@@ -12,21 +14,16 @@
 // touches `activeModule`/`treePanelOpen`, never the draw state.
 
 import React from "react";
-import Link from "next/link";
 import {
   DraftingCompass,
   Droplets,
-  HelpCircle,
   Image as ImageIcon,
   Layers,
   Ruler,
   Truck,
-  UserRound,
   Users,
-  Waypoints,
   type LucideIcon,
 } from "lucide-react";
-import { toast } from "sonner";
 
 import { Logo } from "@/components/ui/Logo";
 import {
@@ -52,7 +49,6 @@ const MODULES: ModuleDef[] = [
   { key: "survey", label: "Survey", icon: Layers, live: true },
   { key: "designs", label: "Designs", icon: DraftingCompass, live: false },
   { key: "media", label: "Media", icon: ImageIcon, live: false },
-  { key: "outputs", label: "Outputs", icon: Waypoints, live: false },
   { key: "hydro", label: "Hydro", icon: Droplets, live: false },
   { key: "crew", label: "Crew", icon: Users, live: false },
   { key: "machines", label: "Machines", icon: Truck, live: false },
@@ -133,37 +129,6 @@ export function ModuleRail() {
             );
           })}
         </div>
-
-        <div className="flex-1" />
-
-        {/* Help — phase stub. */}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Help"
-              onClick={() => toast.info("Help & docs — coming in a later phase")}
-              className="flex size-9 items-center justify-center rounded-[6px] text-gray-500 transition-colors hover:bg-white/[0.04] hover:text-gray-200"
-            >
-              <HelpCircle size={18} />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="right">Help</TooltipContent>
-        </Tooltip>
-
-        {/* Avatar → /settings (§1.3 — replaces the dashboard Topbar avatar). */}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Link
-              href="/settings"
-              aria-label="Account settings"
-              className="mt-1 flex size-8 items-center justify-center rounded-full bg-[#2A2D35] text-gray-400 transition-colors hover:bg-[#343741] hover:text-gray-200"
-            >
-              <UserRound size={16} />
-            </Link>
-          </TooltipTrigger>
-          <TooltipContent side="right">Account settings</TooltipContent>
-        </Tooltip>
       </nav>
     </TooltipProvider>
   );

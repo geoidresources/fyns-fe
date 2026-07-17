@@ -74,6 +74,18 @@ export function getClient(): AuthClient | null {
   }
 }
 
+// Raw (unparsed) reads — for callers driving `useSyncExternalStore`, which
+// needs a snapshot that's referentially stable when unchanged. Strings compare
+// by value, so two reads of the same stored JSON are `Object.is`-equal; a
+// freshly `JSON.parse`d object (getUser/getClient above) never would be, which
+// would make React treat every render as a store change.
+export function getUserRaw(): string | null {
+  return readItem(USER_KEY);
+}
+export function getClientRaw(): string | null {
+  return readItem(CLIENT_KEY);
+}
+
 export function setSession(session: Session, remember = false) {
   if (!isBrowser) return;
   const store = remember ? localStorage : sessionStorage;

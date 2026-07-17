@@ -33,7 +33,6 @@ import type { ModuleKey } from "@/lib/viewer/state/store";
 const MODULE_TITLES: Record<Exclude<ModuleKey, "measure" | "survey">, string> = {
   designs: "Designs",
   media: "Media",
-  outputs: "Outputs",
   hydro: "Hydro",
   crew: "Crew",
   machines: "Machines",
