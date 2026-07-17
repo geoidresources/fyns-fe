@@ -160,6 +160,94 @@ export function formatHeight(heightMeters?: number): string {
   return `${heightMeters.toFixed(1)} m`;
 }
 
+// --------------------------------------------------------- segment picking
+
+/** 2D distance from point P to segment AB (pixel or planar units). */
+export function distancePointToSegment2D(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): number {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const lenSq = abx * abx + aby * aby;
+  if (lenSq < 1e-12) return Math.hypot(px - ax, py - ay);
+  let t = ((px - ax) * abx + (py - ay) * aby) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + t * abx), py - (ay + t * aby));
+}
+
+/**
+ * Nearest draft segment under a canvas click. Returns segment start index
+ * (edge points[i]→points[i+1], or last→first when closed), or null if none
+ * within maxPixelDistance (screen) / maxDistanceMeters (3D fallback).
+ */
+export function findNearestSegmentIndex(
+  viewer: CesiumViewer,
+  points: Cartesian3[],
+  windowPosition: Cartesian2,
+  options?: { closed?: boolean; maxPixelDistance?: number; maxDistanceMeters?: number }
+): number | null {
+  const closed = options?.closed ?? false;
+  const maxPx = options?.maxPixelDistance ?? 28;
+  const maxM = options?.maxDistanceMeters ?? 25;
+  if (points.length < 2) return null;
+
+  const scene = viewer.scene;
+  const nSeg = closed ? points.length : points.length - 1;
+  let bestIdx = -1;
+  let bestDist = Infinity;
+
+  for (let i = 0; i < nSeg; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    const a2 = scene.cartesianToCanvasCoordinates(a);
+    const b2 = scene.cartesianToCanvasCoordinates(b);
+    if (!defined(a2) || !defined(b2)) continue;
+    const d = distancePointToSegment2D(windowPosition.x, windowPosition.y, a2.x, a2.y, b2.x, b2.y);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+  if (bestIdx >= 0 && bestDist <= maxPx) return bestIdx;
+
+  // Terrain-clamped drafts often fail canvas projection — fall back to 3D.
+  const click = pickScenePosition(viewer, windowPosition);
+  if (!click) return null;
+  bestIdx = -1;
+  bestDist = Infinity;
+  for (let i = 0; i < nSeg; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    const d = distancePointToSegment3D(click, a, b);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+  if (bestIdx < 0 || bestDist > maxM) return null;
+  return bestIdx;
+}
+
+/** 3D distance from point P to segment AB in meters. */
+export function distancePointToSegment3D(p: Cartesian3, a: Cartesian3, b: Cartesian3): number {
+  const ab = Cartesian3.subtract(b, a, new Cartesian3());
+  const ap = Cartesian3.subtract(p, a, new Cartesian3());
+  const lenSq = Cartesian3.magnitudeSquared(ab);
+  if (lenSq < 1e-12) return Cartesian3.distance(p, a);
+  let t = Cartesian3.dot(ap, ab) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const closest = Cartesian3.add(a, Cartesian3.multiplyByScalar(ab, t, new Cartesian3()), new Cartesian3());
+  return Cartesian3.distance(p, closest);
+}
+
+// (Segment-erase semantics live in lib/viewer/eraser.ts — pure and
+// Cesium-free so they unit-test without the geometry stack.)
+
 // --------------------------------------------------------- picked features
 
 /** Ensures a picked property bag always has an id + display name. */

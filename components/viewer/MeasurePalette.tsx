@@ -60,6 +60,8 @@ export function MeasurePalette({
   const view = useViewerStore((s) => s.view);
   const setView = useViewerStore((s) => s.setView);
   const projectId = useViewerStore((s) => s.manifest?.survey.project_id ?? null);
+  const activeToolKey = useViewerStore((s) => s.activeToolKey);
+  const awaitingCalc = readout.mode !== "idle" && readout.mode !== "probe" && !activeToolKey;
 
   const types = calcTypesFor(readout.mode);
   // The stored pick, reconciled to the current geometry: a stale pick from
@@ -101,21 +103,28 @@ export function MeasurePalette({
             Pick a tool in the toolbar and draw on the site to choose a calculation.
           </p>
         ) : (
-          <RadioGroup
-            value={selectedType?.id}
-            onValueChange={(calcType) => setView({ calcType })}
-            className="gap-1.5"
-          >
-            {types.map((t) => (
-              <div key={t.id} className="flex items-start space-x-2">
-                <RadioGroupItem value={t.id} id={`ct-${t.id}`} className="mt-0.5" />
-                <Label htmlFor={`ct-${t.id}`} className="flex flex-col gap-0.5 font-normal">
-                  <span className="text-gray-200">{t.label}</span>
-                  <span className="text-[11px] text-gray-500">{t.hint}</span>
-                </Label>
-              </div>
-            ))}
-          </RadioGroup>
+          <>
+            <RadioGroup
+              value={selectedType?.id}
+              onValueChange={(calcType) => setView({ calcType })}
+              className="gap-1.5"
+            >
+              {types.map((t) => (
+                <div key={t.id} className="flex items-start space-x-2">
+                  <RadioGroupItem value={t.id} id={`ct-${t.id}`} className="mt-0.5" />
+                  <Label htmlFor={`ct-${t.id}`} className="flex flex-col gap-0.5 font-normal">
+                    <span className="text-gray-200">{t.label}</span>
+                    <span className="text-[11px] text-gray-500">{t.hint}</span>
+                  </Label>
+                </div>
+              ))}
+            </RadioGroup>
+            <p className="mt-2 text-[11px] text-gray-500">
+              {awaitingCalc
+                ? "Double-click the drawing to calculate, or press Esc to discard."
+                : "Right-click when ready to choose a calculation. Esc discards."}
+            </p>
+          </>
         )}
       </div>
 

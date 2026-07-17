@@ -274,7 +274,8 @@ export function MeasurementPanel({
 
         {drawMode && (
           <p className="px-2 py-1.5 text-[11px] text-gray-500">
-            Click the globe to add vertices. Double-click or right-click to finish.
+            Click the globe to add vertices. Right-click to choose a calculation. Double-click to
+            calculate. Esc discards.
           </p>
         )}
 

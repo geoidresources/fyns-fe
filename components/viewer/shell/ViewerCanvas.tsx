@@ -61,9 +61,12 @@ import { ApiError } from "@/lib/api/client";
 import {
   computeGrade,
   computeDistanceMeters,
+  findNearestSegmentIndex,
+  geometryPositions,
   geometryToRectangle,
   pickScenePosition,
 } from "@/lib/viewer/measure";
+import { eraseSegment } from "@/lib/viewer/eraser";
 import {
   CalcParamsError,
   LEAN_RENDER,
@@ -169,8 +172,27 @@ export function ViewerCanvas() {
   const draftEntityRef = useRef<Entity | null>(null);
   const draftVertexEntitiesRef = useRef<Entity[]>([]);
   const draftSegmentLabelEntitiesRef = useRef<Entity[]>([]);
+  const redoPositionsRef = useRef<Cartesian3[]>([]);
   const hoverPositionRef = useRef<Cartesian3 | null>(null);
   const hoverThrottleRef = useRef(0);
+  /** True after right-click locked the draft for calc selection (no vertex placement). */
+  const awaitingCalcRef = useRef(false);
+  /** Restores vertex-placement clicks when leaving eraser mode mid-draw. */
+  const bindDrawClickRef = useRef<(() => void) | null>(null);
+  /** Arms segment-pick clicks while the eraser is active. */
+  const bindEraseClickRef = useRef<(() => void) | null>(null);
+  /** Binds double-click → finish (the measurement-edit eraser needs it bound
+   * WITHOUT going through releaseForCalc). */
+  const bindFinishDblClickRef = useRef<(() => void) | null>(null);
+  /** True once the eraser opened a polygon ring — the draft preview stops
+   * auto-closing so the erased edge actually disappears until finish. */
+  const polygonOpenRef = useRef(false);
+  const eraseHighlightRef = useRef<Entity | null>(null);
+  const previousToolKeyRef = useRef<string | null>(null);
+  /** Seed vertices into the next startDraw (edit existing / revive session). */
+  const seedPointsRef = useRef<Cartesian3[] | null>(null);
+  /** When set, finish() PATCHes this measurement instead of creating a new one. */
+  const editingMeasurementIdRef = useRef<string | null>(null);
   const probeEntityRef = useRef<Entity | null>(null);
   const measurementDsRef = useRef<GeoJsonDataSource | null>(null);
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
@@ -734,14 +756,83 @@ export function ViewerCanvas() {
     if (viewer && !viewer.isDestroyed()) {
       for (const entity of draftVertexEntitiesRef.current) viewer.entities.remove(entity);
       for (const entity of draftSegmentLabelEntitiesRef.current) viewer.entities.remove(entity);
+      if (eraseHighlightRef.current) viewer.entities.remove(eraseHighlightRef.current);
     }
     draftEntityRef.current = null;
     draftVertexEntitiesRef.current = [];
     draftSegmentLabelEntitiesRef.current = [];
+    eraseHighlightRef.current = null;
     draftPositionsRef.current = [];
+    redoPositionsRef.current = [];
     hoverPositionRef.current = null;
+    awaitingCalcRef.current = false;
+    bindDrawClickRef.current = null;
+    bindEraseClickRef.current = null;
+    bindFinishDblClickRef.current = null;
+    polygonOpenRef.current = false;
+    previousToolKeyRef.current = null;
     store.getState().setDraft([], null);
   }, [store, viewerRef]);
+
+  const clearEraseHighlight = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (viewer && !viewer.isDestroyed() && eraseHighlightRef.current) {
+      viewer.entities.remove(eraseHighlightRef.current);
+    }
+    eraseHighlightRef.current = null;
+  }, [viewerRef]);
+
+  const addDraftPolylineDecorations = useCallback(
+    (position: Cartesian3, previous?: Cartesian3) => {
+      const viewer = viewerRef.current;
+      if (!viewer || viewer.isDestroyed()) return;
+
+      draftVertexEntitiesRef.current.push(
+        viewer.entities.add({
+          position,
+          point: {
+            pixelSize: 8,
+            color: ACCENT,
+            outlineColor: Color.WHITE,
+            outlineWidth: 2,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        })
+      );
+      if (previous) {
+        draftSegmentLabelEntitiesRef.current.push(
+          viewer.entities.add({
+            position: Cartesian3.midpoint(previous, position, new Cartesian3()),
+            label: {
+              text: `${computeDistanceMeters([previous, position]).toFixed(2)} m`,
+              font: "14px sans-serif",
+              fillColor: Color.WHITE,
+              showBackground: true,
+              backgroundColor: Color.fromCssColorString("#18181B").withAlpha(0.9),
+              backgroundPadding: new Cartesian2(8, 6),
+              pixelOffset: new Cartesian2(0, -16),
+              verticalOrigin: VerticalOrigin.BOTTOM,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          })
+        );
+      }
+    },
+    [viewerRef]
+  );
+
+  const rebuildDraftPolylineDecorations = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) return;
+    for (const entity of draftVertexEntitiesRef.current) viewer.entities.remove(entity);
+    for (const entity of draftSegmentLabelEntitiesRef.current) viewer.entities.remove(entity);
+    draftVertexEntitiesRef.current = [];
+    draftSegmentLabelEntitiesRef.current = [];
+    const pts = draftPositionsRef.current;
+    for (let i = 0; i < pts.length; i++) {
+      addDraftPolylineDecorations(pts[i], i > 0 ? pts[i - 1] : undefined);
+    }
+  }, [viewerRef, addDraftPolylineDecorations]);
 
   // Clears the probe marker + probe readout. The `probing` flag itself is reset
   // by the store `startDraw`/`cancelDraw` actions that every caller invokes.
@@ -755,12 +846,21 @@ export function ViewerCanvas() {
   }, [store, viewerRef]);
 
   const cancelDraw = useCallback(() => {
+    const s = store.getState();
+    const editId = editingMeasurementIdRef.current;
+    const hadDraft =
+      s.drawMode !== null ||
+      s.probing ||
+      draftPositionsRef.current.length > 0 ||
+      !!draftEntityRef.current;
     cleanupDraw();
     stopProbe();
-    const s = store.getState();
+    editingMeasurementIdRef.current = null;
+    if (editId) s.setMeasurementVisible(editId, true);
     s.cancelDraw();
     s.closeDetail();
     s.clearSelection();
+    if (hadDraft) toast.info("Drawing discarded");
   }, [store, cleanupDraw, stopProbe]);
 
   const startProbe = useCallback(
@@ -840,7 +940,12 @@ export function ViewerCanvas() {
       const s = store.getState();
       s.startDraw(mode, opts);
       s.clearSelection();
-      draftPositionsRef.current = [];
+      const seeded = seedPointsRef.current;
+      seedPointsRef.current = null;
+      draftPositionsRef.current = seeded?.length ? [...seeded] : [];
+      if (draftPositionsRef.current.length > 0) {
+        s.setDraft(draftPositionsRef.current, null);
+      }
 
       draftEntityRef.current = viewer.entities.add({
         position:
@@ -856,7 +961,9 @@ export function ViewerCanvas() {
             const hover = hoverPositionRef.current;
             const all = hover ? [...pts, hover] : pts;
             if (all.length < 2) return [];
-            return mode === "polygon" ? [...all, all[0]] : all;
+            // An eraser-opened ring previews UN-closed — the erased edge is
+            // genuinely gone until finish re-closes the ring.
+            return mode === "polygon" && !polygonOpenRef.current ? [...all, all[0]] : all;
           }, false),
           width: 3,
           material: ACCENT,
@@ -870,6 +977,8 @@ export function ViewerCanvas() {
                   const hover = hoverPositionRef.current;
                   return new PolygonHierarchy(hover ? [...pts, hover] : pts);
                 }, false),
+                // Fill implies closure — hide it while the ring is open.
+                show: new CallbackProperty(() => !polygonOpenRef.current, false),
                 material: ACCENT.withAlpha(0.2),
                 classificationType: ClassificationType.BOTH,
               }
@@ -905,6 +1014,9 @@ export function ViewerCanvas() {
               }
             : undefined,
       });
+      if (mode === "polyline" && draftPositionsRef.current.length > 0) {
+        rebuildDraftPolylineDecorations();
+      }
 
       const finish = () => {
         // Kind resolves at FINISH time (not startDraw) so the calc type picked
@@ -926,9 +1038,14 @@ export function ViewerCanvas() {
         // Calc params from the panel's config (the same source it edits). An
         // invalid config (e.g. custom RL without a value) keeps the DRAW alive
         // — the user fixes the panel and finishes again; nothing is lost.
+        const editIdEarly = editingMeasurementIdRef.current;
+        const existing = editIdEarly
+          ? store.getState().measurements.find((m) => m.id === editIdEarly)
+          : null;
+        const resolvedKind = existing?.kind ?? kind;
         const params: Record<string, unknown> = { ...(opts?.params ?? {}) };
         if (opts?.slope) params.slope = true;
-        if (isVolumeKind(kind)) {
+        if (isVolumeKind(resolvedKind)) {
           const view = store.getState().view;
           // Coerced onto the kind's method list — what persists always equals
           // what the panel displayed (a stale cut/fill pick never rides along).
@@ -939,7 +1056,7 @@ export function ViewerCanvas() {
               refElevation: view.refElevation,
               baseDesignId: view.baseDesignId,
             },
-            kind
+            resolvedKind
           );
           params.volume_method = cfg.method;
           params.render = LEAN_RENDER; // number-only compute; tiles are a later, explicit ask
@@ -986,12 +1103,27 @@ export function ViewerCanvas() {
         // /compute call; the user promotes it (Save) or discards it from the
         // inspector. The local draft entity stays visible until the
         // measurements datasource re-renders the created row.
+        // Editing an existing measurement (eraser on a selected stockpile, etc.)
+        // PATCHes geometry in place instead of creating a new row.
+        const editId = editingMeasurementIdRef.current;
+        editingMeasurementIdRef.current = null;
         store.getState().cancelDraw(); // null out drawMode/activeDrawOpts/activeToolKey + reset draft mirror
         void (async () => {
           try {
+            if (editId) {
+              await updateMeasurement(surveyId, editId, { geometry });
+              const s3 = store.getState();
+              s3.setMeasurementVisible(editId, true);
+              s3.selectMeasurement(editId, { fly: false });
+              cleanupDraw();
+              await refreshMeasurements();
+              toast.success("Geometry updated");
+              if (isVolumeKind(resolvedKind)) await triggerCompute(editId);
+              return;
+            }
             const created = await createMeasurement(surveyId, {
-              kind,
-              name: `Untitled ${kind.replace(/_/g, " ")}`,
+              kind: resolvedKind,
+              name: `Untitled ${resolvedKind.replace(/_/g, " ")}`,
               folder: opts?.folder,
               geometry,
               params,
@@ -1003,7 +1135,7 @@ export function ViewerCanvas() {
             s3.selectMeasurement(created.id, { fly: false }); // opens the inspector on the draft
             cleanupDraw(); // drop the local draft entity — the datasource takes over
             await refreshMeasurements();
-            if (isVolumeKind(kind)) await triggerCompute(created.id);
+            if (isVolumeKind(resolvedKind)) await triggerCompute(created.id);
           } catch (err) {
             if (err instanceof Error) toast.error(`Couldn't create the draft: ${err.message}`);
             // The drawn shape stays visible (inert); ESC clears it.
@@ -1012,75 +1144,291 @@ export function ViewerCanvas() {
       };
 
       const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
-      handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
-        const pos = pickScenePosition(viewer, event.position);
-        if (pos) {
-          const previous = draftPositionsRef.current[draftPositionsRef.current.length - 1];
-          if (previous && Cartesian3.distance(previous, pos) < 0.01) return;
+      awaitingCalcRef.current = false;
+      previousToolKeyRef.current = opts?.toolKey ?? null;
+      polygonOpenRef.current = false; // fresh session: rings preview closed
+      clearEraseHighlight();
 
-          if (mode === "polyline") {
-            draftVertexEntitiesRef.current.push(
-              viewer.entities.add({
-                position: pos,
-                point: {
-                  pixelSize: 8,
-                  color: ACCENT,
-                  outlineColor: Color.WHITE,
-                  outlineWidth: 2,
-                  disableDepthTestDistance: Number.POSITIVE_INFINITY,
-                },
-              })
-            );
-            if (previous) {
-              draftSegmentLabelEntitiesRef.current.push(
-                viewer.entities.add({
-                  position: Cartesian3.midpoint(previous, pos, new Cartesian3()),
-                  label: {
-                    text: `${computeDistanceMeters([previous, pos]).toFixed(2)} m`,
-                    font: "14px sans-serif",
-                    fillColor: Color.WHITE,
-                    showBackground: true,
-                    backgroundColor: Color.fromCssColorString("#18181B").withAlpha(0.9),
-                    backgroundPadding: new Cartesian2(8, 6),
-                    pixelOffset: new Cartesian2(0, -16),
-                    verticalOrigin: VerticalOrigin.BOTTOM,
-                    disableDepthTestDistance: Number.POSITIVE_INFINITY,
-                  },
-                })
-              );
+      const bindDrawClick = () => {
+        handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
+          const pos = pickScenePosition(viewer, event.position);
+          if (pos) {
+            const previous = draftPositionsRef.current[draftPositionsRef.current.length - 1];
+            if (previous && Cartesian3.distance(previous, pos) < 0.01) return;
+
+            if (mode === "polyline") {
+              addDraftPolylineDecorations(pos, previous);
             }
+
+            redoPositionsRef.current = [];
+            draftPositionsRef.current = [...draftPositionsRef.current, pos];
+            hoverPositionRef.current = null;
+            store.getState().setDraft(draftPositionsRef.current, null);
+            viewer.scene.requestRender();
+          }
+        }, ScreenSpaceEventType.LEFT_CLICK);
+        handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
+          const pos = pickScenePosition(viewer, movement.endPosition);
+          hoverPositionRef.current = pos;
+          const now = performance.now();
+          if (now - hoverThrottleRef.current > 100) {
+            hoverThrottleRef.current = now;
+            store.getState().setDraft(draftPositionsRef.current, pos);
+          }
+          viewer.scene.requestRender();
+        }, ScreenSpaceEventType.MOUSE_MOVE);
+      };
+
+      const bindEraseClick = () => {
+        handler.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
+        hoverPositionRef.current = null;
+        store.getState().setDraft(draftPositionsRef.current, null);
+
+        handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
+          const pts = draftPositionsRef.current;
+          const idx = findNearestSegmentIndex(viewer, pts, movement.endPosition, {
+            closed: mode === "polygon",
+            maxPixelDistance: 28,
+          });
+          clearEraseHighlight();
+          if (idx === null || pts.length < 2) {
+            viewer.scene.requestRender();
+            return;
+          }
+          const a = pts[idx];
+          const b = pts[(idx + 1) % pts.length];
+          eraseHighlightRef.current = viewer.entities.add({
+            polyline: {
+              positions: [a, b],
+              width: 5,
+              material: Color.WHITE.withAlpha(0.85),
+              clampToGround: true,
+            },
+          });
+          viewer.scene.requestRender();
+        }, ScreenSpaceEventType.MOUSE_MOVE);
+
+        handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
+          const pts = draftPositionsRef.current;
+          const idx = findNearestSegmentIndex(viewer, pts, event.position, {
+            closed: mode === "polygon",
+            maxPixelDistance: 28,
+          });
+          if (idx === null) {
+            toast.info("No segment under the cursor — click closer to a line");
+            return;
+          }
+          const next = eraseSegment(pts, idx, mode === "polygon");
+          if (next === null) return;
+          clearEraseHighlight();
+
+          if (next.length === 0) {
+            // A lone line's only segment: erasing it erases the LINE itself —
+            // the measurement when editing one, else the whole draft.
+            const editId = editingMeasurementIdRef.current;
+            editingMeasurementIdRef.current = null;
+            cleanupDraw();
+            const s = store.getState();
+            s.cancelDraw();
+            s.closeDetail();
+            s.clearSelection();
+            if (editId) {
+              void (async () => {
+                try {
+                  await deleteMeasurement(surveyId, editId);
+                  toast.success("Line erased");
+                } catch (err) {
+                  if (err instanceof Error) toast.error(err.message);
+                } finally {
+                  void refreshMeasurements();
+                }
+              })();
+            } else {
+              toast.success("Line erased");
+            }
+            return;
           }
 
-          draftPositionsRef.current = [...draftPositionsRef.current, pos];
-          hoverPositionRef.current = null;
-          store.getState().setDraft(draftPositionsRef.current, null);
+          if (mode === "polygon") {
+            // Ring reopened at the erased edge (all vertices kept): preview
+            // stops auto-closing, new vertices append INTO the gap, finish
+            // re-closes across whatever remains.
+            polygonOpenRef.current = true;
+          }
+          draftPositionsRef.current = next;
+          redoPositionsRef.current = [];
+          if (mode === "polyline") rebuildDraftPolylineDecorations();
+          store.getState().setDraft(next, null);
           viewer.scene.requestRender();
+          const minPoints = mode === "polygon" ? 3 : 2;
+          if (next.length < minPoints) {
+            toast.info("Segment erased — add more vertices before calculating");
+          } else if (mode === "polygon") {
+            toast.info("Edge erased — add vertices in the gap, or double-click to close and save");
+          }
+        }, ScreenSpaceEventType.LEFT_CLICK);
+      };
+
+      bindDrawClickRef.current = bindDrawClick;
+      bindEraseClickRef.current = bindEraseClick;
+      bindFinishDblClickRef.current = () => {
+        handler.setInputAction(() => finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+      };
+
+      // Right-click: stop placing vertices, unclip the toolbar tool, and open
+      // calculation options for this drawing. Double-click afterward runs the
+      // selected calculation (finish).
+      const releaseForCalc = () => {
+        const pts = draftPositionsRef.current;
+        const minPoints = mode === "polygon" ? 3 : 2;
+        if (pts.length === 0) {
+          cancelDraw();
+          return;
         }
-      }, ScreenSpaceEventType.LEFT_CLICK);
-      handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
-        const pos = pickScenePosition(viewer, movement.endPosition);
-        hoverPositionRef.current = pos;
-        const now = performance.now();
-        if (now - hoverThrottleRef.current > 100) {
-          hoverThrottleRef.current = now;
-          store.getState().setDraft(draftPositionsRef.current, pos);
+        if (pts.length < minPoints) {
+          toast.error(`Need at least ${minPoints} points for a ${mode}`);
+          return;
         }
+
+        clearEraseHighlight();
+        handler.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
+        handler.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
+        hoverPositionRef.current = null;
+        awaitingCalcRef.current = true;
+        store.getState().setDraft(pts, null);
+        // Unclip the toolkit button; keep drawMode so the Calculation panel
+        // still offers geometry-specific options.
+        store.setState({ activeToolKey: null });
+        store.getState().openDetail("measure");
+        handler.setInputAction(() => finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
         viewer.scene.requestRender();
-      }, ScreenSpaceEventType.MOUSE_MOVE);
-      handler.setInputAction(() => finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
-      handler.setInputAction(() => finish(), ScreenSpaceEventType.RIGHT_CLICK);
+      };
+
+      bindDrawClick();
+      handler.setInputAction(() => releaseForCalc(), ScreenSpaceEventType.RIGHT_CLICK);
       drawHandlerRef.current = handler;
       store.getState().openDetail("measure");
     },
-    [store, viewerRef, cleanupDraw, stopProbe, surveyId, refreshMeasurements, triggerCompute]
+    [
+      store,
+      viewerRef,
+      cleanupDraw,
+      stopProbe,
+      cancelDraw,
+      surveyId,
+      refreshMeasurements,
+      triggerCompute,
+      addDraftPolylineDecorations,
+      rebuildDraftPolylineDecorations,
+      clearEraseHighlight,
+    ]
   );
+
+  // Eraser is a pick mode: click a draft segment to delete that edge. Works on
+  // an in-progress drawing OR a selected measurement (e.g. a finished stockpile).
+  const eraseDraft = useCallback(() => {
+    const s = store.getState();
+    const viewer = viewerRef.current;
+
+    if (s.probing) {
+      if (!s.probePoint && !probeEntityRef.current) {
+        toast.info("Nothing to erase — sample a point first");
+        return;
+      }
+      s.setProbePoint(null);
+      if (viewer && !viewer.isDestroyed() && probeEntityRef.current) {
+        viewer.entities.remove(probeEntityRef.current);
+      }
+      probeEntityRef.current = null;
+      viewer?.scene.requestRender();
+      return;
+    }
+
+    // Revive draft verts from the store mirror if refs were cleared (HMR / etc.).
+    if (draftPositionsRef.current.length < 2 && s.draft.points.length >= 2) {
+      draftPositionsRef.current = [...s.draft.points];
+    }
+
+    // Toggle eraser off.
+    if (s.activeToolKey === "palette:eraser" && s.drawMode && drawHandlerRef.current) {
+      clearEraseHighlight();
+      if (awaitingCalcRef.current) {
+        drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
+        drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
+        store.setState({ activeToolKey: null });
+      } else {
+        bindDrawClickRef.current?.();
+        store.setState({ activeToolKey: previousToolKeyRef.current });
+      }
+      return;
+    }
+
+    // In-progress draw: arm segment picking.
+    if (s.drawMode) {
+      if (draftPositionsRef.current.length < 2) {
+        toast.info("Nothing to erase — need a line between two vertices");
+        return;
+      }
+      if (!drawHandlerRef.current || !bindEraseClickRef.current) {
+        // Handler was lost — re-seed and restart the draw session, then erase.
+        seedPointsRef.current = [...draftPositionsRef.current];
+        const opts = s.activeDrawOpts ?? undefined;
+        startDraw(s.drawMode, { ...opts, toolKey: opts?.toolKey ?? previousToolKeyRef.current ?? undefined });
+      }
+      previousToolKeyRef.current = s.activeToolKey ?? previousToolKeyRef.current;
+      bindEraseClickRef.current?.();
+      store.setState({ activeToolKey: "palette:eraser" });
+      toast.info("Click a segment to erase it");
+      return;
+    }
+
+    // Selected measurement (stockpile / line / etc.): load geometry into an edit session.
+    const selectedId =
+      s.selection?.kind === "measurement" ? s.selection.measurementIds[0] : null;
+    const selected = selectedId ? s.measurements.find((m) => m.id === selectedId) : null;
+    if (!selected?.geometry) {
+      toast.info("Nothing to erase — draw a shape or select a measurement first");
+      return;
+    }
+    const pts = geometryPositions(selected.geometry);
+    const mode: DrawMode | null =
+      selected.geometry.type === "Polygon"
+        ? "polygon"
+        : selected.geometry.type === "LineString"
+          ? "polyline"
+          : null;
+    if (!mode || pts.length < 2) {
+      toast.info("Nothing to erase — this measurement has no erasable segments");
+      return;
+    }
+
+    editingMeasurementIdRef.current = selected.id;
+    seedPointsRef.current = pts;
+    s.setMeasurementVisible(selected.id, false);
+    startDraw(mode, { label: selected.name, toolKey: "palette:eraser" });
+    awaitingCalcRef.current = true;
+    // Lock for calc/edit: no new vertices until eraser exits; double-click
+    // saves — bindFinishDblClickRef arms it (this path never goes through
+    // releaseForCalc, which is where drawing normally gains that binding).
+    if (drawHandlerRef.current) {
+      drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
+      drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
+    }
+    bindEraseClickRef.current?.();
+    bindFinishDblClickRef.current?.();
+    store.setState({ activeToolKey: "palette:eraser" });
+    store.getState().openDetail("measure");
+    toast.info("Click a segment to erase it — double-click when done");
+  }, [store, viewerRef, clearEraseHighlight, startDraw]);
 
   const undoLastVertex = useCallback(() => {
     if (!store.getState().drawMode || draftPositionsRef.current.length === 0) {
       toast.info("Nothing to undo — place a vertex first");
       return;
     }
+    const position = draftPositionsRef.current[draftPositionsRef.current.length - 1];
     draftPositionsRef.current = draftPositionsRef.current.slice(0, -1);
+    redoPositionsRef.current.push(position);
     const viewer = viewerRef.current;
     const vertex = draftVertexEntitiesRef.current.pop();
     if (viewer && vertex) viewer.entities.remove(vertex);
@@ -1089,6 +1437,21 @@ export function ViewerCanvas() {
     store.getState().setDraft(draftPositionsRef.current, hoverPositionRef.current);
     viewerRef.current?.scene.requestRender();
   }, [store, viewerRef]);
+
+  const redoLastVertex = useCallback(() => {
+    const mode = store.getState().drawMode;
+    const position = redoPositionsRef.current.pop();
+    if (!mode || !position) {
+      toast.info("Nothing to redo");
+      return;
+    }
+
+    const previous = draftPositionsRef.current[draftPositionsRef.current.length - 1];
+    if (mode === "polyline") addDraftPolylineDecorations(position, previous);
+    draftPositionsRef.current = [...draftPositionsRef.current, position];
+    store.getState().setDraft(draftPositionsRef.current, hoverPositionRef.current);
+    viewerRef.current?.scene.requestRender();
+  }, [store, viewerRef, addDraftPolylineDecorations]);
 
   // ------------------------------------------------------------ ops (CRUD)
   // saveMeasurement PROMOTES a draw-first draft (draft-first, 2026-07-16):
@@ -1269,7 +1632,9 @@ export function ViewerCanvas() {
       startDraw,
       startProbe,
       cancelDraw,
+      eraseDraft,
       undoLastVertex,
+      redoLastVertex,
       selectMeasurementRow,
       triggerCompute,
       removeMeasurement,
@@ -1295,7 +1660,9 @@ export function ViewerCanvas() {
       startDraw,
       startProbe,
       cancelDraw,
+      eraseDraft,
       undoLastVertex,
+      redoLastVertex,
       selectMeasurementRow,
       triggerCompute,
       removeMeasurement,

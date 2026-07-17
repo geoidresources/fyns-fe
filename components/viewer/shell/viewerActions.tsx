@@ -24,7 +24,9 @@ export interface ViewerActions {
   startDraw: (mode: DrawMode, opts?: DrawOptions) => void;
   startProbe: (toolKey?: string) => void;
   cancelDraw: () => void;
+  eraseDraft: () => void;
   undoLastVertex: () => void;
+  redoLastVertex: () => void;
 
   // Measurement CRUD + framing.
   selectMeasurementRow: (m: PanelMeasurement) => void;

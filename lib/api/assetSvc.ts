@@ -379,6 +379,7 @@ export interface UpdateMeasurementRequest {
   name?: string;
   folder?: string;
   kind?: string;
+  geometry?: GeoJsonGeometry;
   params?: Record<string, unknown>;
   draft?: boolean;
 }

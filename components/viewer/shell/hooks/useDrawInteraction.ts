@@ -9,7 +9,7 @@
 // line-identical.
 /* eslint-disable react-hooks/exhaustive-deps */
 
-import { useEffect, type RefObject } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 import {
   Color,
   ConstantPositionProperty,
@@ -74,28 +74,35 @@ export function useDrawInteraction(deps: {
       }
       viewer.scene.requestRender();
     }, ScreenSpaceEventType.LEFT_CLICK);
+    // Right-click exits probe so scene picking / cursor use resumes.
+    handler.setInputAction(() => cancelDraw(), ScreenSpaceEventType.RIGHT_CLICK);
 
     return () => handler.destroy();
-  }, [probing, viewerReady]);
+  }, [probing, viewerReady, cancelDraw]);
 
-  // ESC cancels an in-flight drawing / closes the detail panel. With the
-  // draft-first flow this is non-destructive (finished shapes are persisted
-  // rows the moment drawing ends) — the one guard left is inputs: ESC while
-  // typing (e.g. the name or reference-RL field) means "leave the field",
-  // not "close the panel".
+  // ESC discards an in-flight or right-click-locked drawing / closes the detail
+  // panel. Inputs are excluded so Escape means "leave the field", not discard.
   useEffect(() => {
-    if (!drawMode && !rightPanel) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
         return;
       }
+      const drawing = !!drawMode || probing;
+      if (!drawing && !rightPanel) return;
+      e.preventDefault();
       cancelDraw();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [drawMode, rightPanel, cancelDraw]);
+  }, [drawMode, probing, rightPanel, cancelDraw]);
 
-  useEffect(() => () => cleanupDraw(), [cleanupDraw]);
+  // Unmount-only Cesium teardown. Keep cleanupDraw out of the effect deps so a
+  // callback identity change cannot wipe an in-progress draw mid-session.
+  const cleanupDrawRef = useRef(cleanupDraw);
+  useEffect(() => {
+    cleanupDrawRef.current = cleanupDraw;
+  }, [cleanupDraw]);
+  useEffect(() => () => cleanupDrawRef.current(), []);
 }

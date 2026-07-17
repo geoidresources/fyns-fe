@@ -14,7 +14,8 @@
 // Store wiring (§3.5): startDraw/startProbe/cancelDraw via useViewerActions; the
 // single lit button is the one whose `palette:<id>` key === activeToolKey; and
 // re-clicking the live tool cancels it (re-running startDraw would discard the
-// in-progress vertices). Undo removes the last vertex; Snap is a Phase-2 stub.
+// in-progress vertices). Eraser is a pick mode — click a segment to delete it.
+// Undo/Redo step through vertices, and Snap is a Phase-2 stub.
 
 import React, { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -25,6 +26,7 @@ import {
   Minus,
   MousePointer,
   Pentagon,
+  Redo2,
   Scissors,
   Undo2,
 } from "lucide-react";
@@ -164,11 +166,20 @@ export function FloatingToolbar() {
 
       <div className="mx-1 h-5 w-px bg-white/[0.08]" />
 
+      {/* Eraser is HIDDEN for now (product call 2026-07-17) — the tool itself
+          (actions.eraseDraft + segment semantics in lib/viewer/eraser.ts)
+          stays wired; restore by re-adding a ToolPill for it here. */}
       <ToolPill
         label="Undo"
         icon={<Undo2 size={18} />}
         active={false}
         onClick={actions.undoLastVertex}
+      />
+      <ToolPill
+        label="Redo"
+        icon={<Redo2 size={18} />}
+        active={false}
+        onClick={actions.redoLastVertex}
       />
       <ToolPill
         label="Snap"
