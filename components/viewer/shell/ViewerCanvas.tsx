@@ -52,6 +52,7 @@ import {
   computeMeasurement,
   createMeasurement,
   deleteMeasurement,
+  estimateMeasurement,
   getManifest,
   listMeasurements,
   updateMeasurement,
@@ -737,12 +738,45 @@ export function ViewerCanvas() {
   // call into asset-svc; results land on the row via the workflow consumer and
   // the 5s poll picks them up. Declared BEFORE startDraw, whose finish() auto-
   // computes freshly created volume drafts.
+  // Best-effort instant estimate for a volume measurement's CURRENT stored
+  // params (call AFTER any override is persisted). Sets the ephemeral store
+  // estimate on success; a fallback-shaped ApiError (custom_base, unregistered
+  // surface, timeout, busy) is swallowed so the authoritative worker stands
+  // alone. Superseded by the worker doc once it lands (resultForKind wins).
+  const runEstimate = useCallback(
+    async (id: string) => {
+      const m = store.getState().measurements.find((x) => x.id === id);
+      if (!m || !isVolumeKind(m.kind)) return;
+      try {
+        const est = await estimateMeasurement(surveyId, id);
+        store.getState().setEstimate(id, m.kind, est);
+      } catch {
+        // instant tier can't serve this method/state — worker path continues
+      }
+    },
+    [surveyId, store]
+  );
+
   const triggerCompute = useCallback(
     async (id: string, override?: Record<string, unknown>) => {
       store.getState().setBusy(id, true);
       try {
-        await computeMeasurement(surveyId, id, override ? { params: override } : undefined);
-        toast.info("Compute dispatched — result will appear when ready");
+        // computeMeasurement persists the override (§6.1). A PROMOTED method
+        // (§6) returns status "completed" — computed synchronously in PostGIS
+        // and already persisted, so the refresh below shows the final doc and no
+        // preview is needed. Otherwise the async worker is running: fire the
+        // instant estimate so a number appears while it computes.
+        const res = await computeMeasurement(
+          surveyId,
+          id,
+          override ? { params: override } : undefined
+        );
+        if (res.status === "completed") {
+          toast.success("Computed");
+        } else {
+          void runEstimate(id);
+          toast.info("Compute dispatched — result will appear when ready");
+        }
       } catch (err) {
         if (err instanceof ApiError && err.status === 422) {
           toast.warning(`Compute not available yet: ${err.message}`);
@@ -754,7 +788,7 @@ export function ViewerCanvas() {
         refreshMeasurements();
       }
     },
-    [surveyId, store, refreshMeasurements]
+    [surveyId, store, refreshMeasurements, runEstimate]
   );
 
   const startDraw = useCallback(

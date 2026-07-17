@@ -15,7 +15,7 @@
 import React, { useMemo, useRef } from "react";
 import { AnimatePresence, motion, useDragControls, useIsPresent } from "framer-motion";
 
-import { useViewerStore } from "@/lib/viewer/state/store";
+import { estimateKey, useViewerStore } from "@/lib/viewer/state/store";
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
 import { MeasurePalette, type LiveReadout } from "@/components/viewer/MeasurePalette";
 import { FeatureInspector } from "@/components/viewer/FeatureInspector";
@@ -79,6 +79,8 @@ export function DetailContent({
   const measurements = useViewerStore((s) => s.measurements);
   const saving = useViewerStore((s) => s.saving);
   const busyIds = useViewerStore((s) => s.busyIds);
+  const estimates = useViewerStore((s) => s.estimates);
+  const clearEstimate = useViewerStore((s) => s.clearEstimate);
   const projectId = useViewerStore((s) => s.manifest?.survey.project_id ?? null);
 
   const actions = useViewerActions();
@@ -91,6 +93,11 @@ export function DetailContent({
       : null;
   const inspectFeature = selection?.kind === "feature" ? selection.feature ?? null : null;
   const busyId = inspectMeasurement?.id;
+  // The instant estimate for the inspected measurement's CURRENT kind (the type
+  // dropdown is a per-kind view switch); superseded once the worker doc lands.
+  const estimate = inspectMeasurement
+    ? estimates[estimateKey(inspectMeasurement.id, inspectMeasurement.kind)] ?? null
+    : null;
 
   if (mode === "measure") {
     return (
@@ -114,6 +121,10 @@ export function DetailContent({
       onPatch={actions.patchMeasurement}
       onDelete={actions.removeMeasurement}
       onCompute={actions.triggerCompute}
+      estimate={estimate}
+      onClearEstimate={
+        inspectMeasurement ? () => clearEstimate(inspectMeasurement.id) : undefined
+      }
       saving={saving}
       busy={busyId ? busyIds.has(busyId) : false}
     />

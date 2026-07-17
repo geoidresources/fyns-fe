@@ -18,7 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { Measurement } from "@/lib/api/assetSvc";
+import type { EstimateResult, Measurement } from "@/lib/api/assetSvc";
 import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 import { geometryLocalStats } from "@/lib/viewer/measure";
 import { CalcConfig } from "@/components/viewer/CalcConfig";
@@ -70,6 +70,11 @@ interface FeatureInspectorProps {
   ) => Promise<void>;
   onDelete?: (id: string) => void;
   onCompute?: (id: string, override?: Record<string, unknown>) => void;
+  /** The instant PostGIS estimate for this measurement's current kind, shown
+   * (with an "Instant" badge) until the authoritative worker doc lands. */
+  estimate?: EstimateResult | null;
+  /** Drop the stale estimate (called when the kind/method changes). */
+  onClearEstimate?: () => void;
   saving: boolean;
   /** A compute/delete request for this measurement is in flight. */
   busy?: boolean;
@@ -99,22 +104,54 @@ const METRIC_LABELS: [key: string, label: string][] = [
   ["profile_point_count", "Samples"],
 ];
 
+// Per-kind curated grids — the compute/estimate metric map carries the FULL
+// worker-parity set (cut/fill/net/moved split, material-adjusted splits,
+// sample_count) for every volume result, but a panel shows only the headline
+// numbers for that kind. For a stockpile the cut/fill/net/moved keys just
+// restate Volume, so they are deliberately omitted here.
+const METRICS_BY_KIND: Record<string, [key: string, label: string][]> = {
+  volume: [["volume_m3", "Volume"], ["fill_tonnage_t", "Tonnage"], ["area_m2", "Area"]],
+  stockpile: [["volume_m3", "Volume"], ["fill_tonnage_t", "Tonnage"], ["area_m2", "Area"]],
+  cut_fill: [
+    ["cut_volume_m3", "Cut"],
+    ["fill_volume_m3", "Fill"],
+    ["net_change_m3", "Net change"],
+    ["area_m2", "Area"],
+  ],
+};
+
+// Internal / debug metrics never shown in the grid (they are provenance, not
+// results — sample_count, and the material-adjusted splits which surface as
+// Tonnage instead).
+const HIDDEN_METRICS = new Set([
+  "sample_count",
+  "cut_adjusted_volume_m3",
+  "fill_adjusted_volume_m3",
+]);
+
 function formatMetric(value: number): string {
   const abs = Math.abs(value);
   const digits = abs > 0 && abs < 10 ? 1 : 0;
   return value.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
-/** "haul_distance_m" → "Haul distance m" for result keys we don't know. */
+/** "haul_distance_m" → "Haul distance" for result keys we don't know (the unit
+ * suffix is dropped — convertForDisplay re-attaches the display unit). */
 function prettifyKey(key: string): string {
-  const words = key.replace(/_/g, " ").trim();
+  const words = key
+    .replace(/_(m3|m2|t|m|percent|count)$/, "")
+    .replace(/_/g, " ")
+    .trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
-/** Metric map → display rows, converted into the measurement's unit system. */
+/** Metric map → display rows, converted into the measurement's unit system.
+ * A `kind` with a curated grid shows ONLY that grid; other kinds fall back to
+ * the generic label table plus any remaining (non-internal) keys. */
 function resultMetrics(
   result: Record<string, number>,
-  system: UnitSystem
+  system: UnitSystem,
+  kind?: string
 ): { label: string; value: string }[] {
   const rows: { label: string; value: string }[] = [];
   const seen = new Set<string>();
@@ -122,15 +159,18 @@ function resultMetrics(
     const c = convertForDisplay(key, value, system);
     rows.push({ label, value: `${formatMetric(c.value)}${c.unit ? ` ${c.unit}` : ""}` });
   };
-  for (const [key, label] of METRIC_LABELS) {
+  const curated = kind ? METRICS_BY_KIND[kind] : undefined;
+  for (const [key, label] of curated ?? METRIC_LABELS) {
     const value = result[key];
     if (typeof value === "number" && Number.isFinite(value)) {
       push(key, label, value);
       seen.add(key);
     }
   }
+  if (curated) return rows; // curated kinds surface only their headline set
   for (const [key, value] of Object.entries(result)) {
-    if (seen.has(key) || typeof value !== "number" || !Number.isFinite(value)) continue;
+    if (seen.has(key) || HIDDEN_METRICS.has(key) || typeof value !== "number" || !Number.isFinite(value))
+      continue;
     push(key, prettifyKey(key), value);
   }
   return rows;
@@ -364,6 +404,8 @@ export function FeatureInspector({
   onPatch,
   onDelete,
   onCompute,
+  estimate,
+  onClearEstimate,
   saving,
   busy,
 }: FeatureInspectorProps) {
@@ -427,8 +469,19 @@ export function FeatureInspector({
   // is only surfaced when this kind has no successful doc to show.
   const doc = demo ? null : resultForKind(measurement);
   const resultMetricMap = metricsOf(doc);
+  const computing = measurement.status === "computing";
+  const showFailure = !demo && measurement.status === "failed" && !doc;
+  // Instant estimate fills the panel before the authoritative worker doc lands.
+  // It wins whenever there is no doc yet OR a (re-)compute is in flight — during
+  // a re-run the estimate reflects the PENDING params, so it should supersede
+  // the now-stale prior doc. A settled doc (not computing) wins; a failure wins.
+  const estimateMetricMap =
+    !demo && !showFailure && (!doc || computing) && estimate && Object.keys(estimate.metrics).length > 0
+      ? estimate.metrics
+      : null;
+  const showingEstimate = !!estimateMetricMap;
   const localStats =
-    !demo && Object.keys(resultMetricMap).length === 0 && measurement.geometry
+    !demo && !doc && !showingEstimate && measurement.geometry
       ? geometryLocalStats(measurement.geometry)
       : null;
   const metrics = demo
@@ -438,10 +491,8 @@ export function FeatureInspector({
         { label: "Area", value: "1,420 m²" },
         { label: "Perimeter", value: "142 m" },
       ]
-    : resultMetrics(localStats ?? resultMetricMap, unitSystem);
+    : resultMetrics(localStats ?? estimateMetricMap ?? resultMetricMap, unitSystem, measurement.kind);
 
-  const computing = measurement.status === "computing";
-  const showFailure = !demo && measurement.status === "failed" && !doc;
   const computeError = showFailure ? resultErrorOf(measurement.result) : null;
   const receipt = demo ? null : provenanceOf(doc);
   // Chip reflects the SELECTED kind: computing (row-level) → this kind's doc →
@@ -471,6 +522,7 @@ export function FeatureInspector({
 
   const changeType = (kind: string) => {
     if (!canPatch || kind === measurement.kind) return;
+    onClearEstimate?.(); // the old kind's instant number no longer applies
     const params: Record<string, unknown> = {};
     if (isVolumeKind(kind)) {
       // Re-templating snaps the base method onto the new kind's list (a
@@ -656,6 +708,19 @@ export function FeatureInspector({
                       : "No computed metrics yet. Run compute to populate volume and area."}
                   </p>
                 )
+              )}
+
+              {showingEstimate && (
+                <div className="-mt-1 flex items-center gap-1.5 text-[10px]">
+                  <span className="inline-flex items-center rounded-full bg-sky-400/10 px-1.5 py-0.5 font-medium uppercase tracking-wide text-sky-300">
+                    Instant
+                  </span>
+                  <span className="text-gray-500">
+                    {computing
+                      ? `PostGIS · ${estimate?.provenance.query_ms ?? 0} ms — refining with the full compute…`
+                      : "PostGIS estimate · Run compute for the authoritative result."}
+                  </span>
+                </div>
               )}
 
               {localStats && metrics.length > 0 && (

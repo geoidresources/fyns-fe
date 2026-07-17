@@ -24,11 +24,15 @@ import {
 } from "react";
 import type { Cartesian3 } from "cesium";
 
-import type { Manifest, Measurement } from "@/lib/api/assetSvc";
+import type { EstimateResult, Manifest, Measurement } from "@/lib/api/assetSvc";
 import type { Project } from "@/lib/api/userSvc";
 import type { LayerControl, DesignControl } from "@/components/viewer/LayerPanel";
 import type { DrawMode, DrawOptions } from "@/components/viewer/MeasurementPanel";
 import type { LngLatHeight } from "@/lib/viewer/measure";
+
+/** Key for the ephemeral `estimates` map — one instant estimate per
+ * (measurement, kind), mirroring the per-kind results map. */
+export const estimateKey = (id: string, kind: string) => `${id}:${kind}`;
 
 // ------------------------------------------------------------------ value types
 
@@ -138,6 +142,14 @@ export interface ViewerShellData {
    */
   measurementVisibility: Record<string, boolean>;
 
+  /**
+   * Ephemeral instant estimates, keyed `${measurementId}:${kind}` (mirrors the
+   * per-kind results map). Display-only — the moment the authoritative worker
+   * doc lands for that kind it takes precedence (resultForKind wins). Set by the
+   * estimate-first trigger; cleared when the params/kind change makes it stale.
+   */
+  estimates: Record<string, EstimateResult>;
+
   busyIds: Set<string>;
   saving: boolean;
   measurementSearch: string;
@@ -170,6 +182,11 @@ export interface ViewerShellActions {
   setMeasurementVisible: (id: string, visible: boolean) => void;
   /** Bulk set — used by folder-level eye toggles (all items in a group). */
   setMeasurementsVisible: (ids: string[], visible: boolean) => void;
+  /** Store/replace the instant estimate for a measurement+kind. */
+  setEstimate: (id: string, kind: string, estimate: EstimateResult) => void;
+  /** Drop a measurement's estimate for a kind (stale on param change), or all
+   * of its kinds when `kind` is omitted. */
+  clearEstimate: (id: string, kind?: string) => void;
   setView: (patch: Partial<ViewSettings>) => void;
   setCameraPose: (pose: CameraPose | null) => void;
 
@@ -232,6 +249,7 @@ function defaultData(surveyId: string): ViewerShellData {
     designControls: [],
 
     measurementVisibility: {},
+    estimates: {},
 
     busyIds: new Set<string>(),
     saving: false,
@@ -360,6 +378,20 @@ export function createViewerStore(
       const next = { ...get().measurementVisibility };
       for (const id of ids) next[id] = visible;
       set({ measurementVisibility: next });
+    },
+
+    setEstimate: (id, kind, estimate) =>
+      set({ estimates: { ...get().estimates, [estimateKey(id, kind)]: estimate } }),
+
+    clearEstimate: (id, kind) => {
+      const prefix = `${id}:`;
+      const next: Record<string, EstimateResult> = {};
+      const drop = kind ? estimateKey(id, kind) : null;
+      for (const [k, v] of Object.entries(get().estimates)) {
+        if (drop ? k === drop : k.startsWith(prefix)) continue;
+        next[k] = v;
+      }
+      set({ estimates: next });
     },
 
     setView: (patch) => set({ view: { ...get().view, ...patch } }),
