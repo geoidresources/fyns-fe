@@ -34,6 +34,7 @@ import {
   LabelStyle,
   Math as CesiumMath,
   PolylineDashMaterialProperty,
+  PolylineGraphics,
   RequestScheduler,
   UrlTemplateImageryProvider,
   type Viewer as CesiumViewer,
@@ -699,11 +700,27 @@ export function useLayerLifecycle(deps: {
             st.strokeStyle === "solid"
               ? new ColorMaterialProperty(stroke)
               : new PolylineDashMaterialProperty({
-                  color: stroke,
-                  dashLength: st.strokeStyle === "dashed" ? 16 : 6,
-                });
+                color: stroke,
+                dashLength: 16,
+                dashPattern: st.strokeStyle === "dashed" ? 0x00ff : 0x1111,
+              });
           if (entity.polygon) {
             entity.polygon.material = new ColorMaterialProperty(fill);
+            entity.polygon.outline = new ConstantProperty(false);
+
+            // GeoJSON polygons do not get a polyline entity, so render the
+            // user-drawn exterior ring separately to support width and dashes.
+            if (m.geometry?.type === "Polygon") {
+              const ring = (m.geometry.coordinates as number[][][])[0] ?? [];
+              if (ring.length > 1) {
+                entity.polyline = new PolylineGraphics({
+                  positions: ring.map(([lng, lat]) => Cartesian3.fromDegrees(lng, lat)),
+                  material: strokeMaterial,
+                  width: st.strokeWidth,
+                  clampToGround: true,
+                });
+              }
+            }
           }
           if (entity.polyline) {
             entity.polyline.material = strokeMaterial;
@@ -713,12 +730,12 @@ export function useLayerLifecycle(deps: {
             const text =
               st.labelField === "volume"
                 ? (() => {
-                    const mm = metricsOf(resultForKind(m));
-                    const v = mm.volume_m3 ?? mm.net_change_m3;
-                    return typeof v === "number"
-                      ? `${v.toLocaleString(undefined, { maximumFractionDigits: 0 })} m³`
-                      : m.name;
-                  })()
+                  const mm = metricsOf(resultForKind(m));
+                  const v = mm.volume_m3 ?? mm.net_change_m3;
+                  return typeof v === "number"
+                    ? `${v.toLocaleString(undefined, { maximumFractionDigits: 0 })} m³`
+                    : m.name;
+                })()
                 : m.name;
             // Anchor at the geometry's vertex centroid (good enough for tags).
             const coords =

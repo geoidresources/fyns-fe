@@ -21,7 +21,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Viewer } from "resium";
 import {
   BoundingSphere,
+  CallbackPositionProperty,
   CallbackProperty,
+  Cartesian2,
   Cartesian3,
   Cartographic,
   Cesium3DTileStyle,
@@ -34,11 +36,13 @@ import {
   Entity,
   GeoJsonDataSource,
   HeadingPitchRange,
+  HorizontalOrigin,
   Math as CesiumMath,
   PolygonHierarchy,
   Rectangle,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
+  VerticalOrigin,
   type TerrainProvider,
   createWorldTerrainAsync,
 } from "cesium";
@@ -53,7 +57,12 @@ import {
   updateMeasurement,
 } from "@/lib/api/assetSvc";
 import { ApiError } from "@/lib/api/client";
-import { geometryToRectangle, pickScenePosition } from "@/lib/viewer/measure";
+import {
+  computeGrade,
+  computeDistanceMeters,
+  geometryToRectangle,
+  pickScenePosition,
+} from "@/lib/viewer/measure";
 import {
   CalcParamsError,
   LEAN_RENDER,
@@ -152,6 +161,8 @@ export function ViewerCanvas() {
   const drawHandlerRef = useRef<ScreenSpaceEventHandler | null>(null);
   const draftPositionsRef = useRef<Cartesian3[]>([]);
   const draftEntityRef = useRef<Entity | null>(null);
+  const draftVertexEntitiesRef = useRef<Entity[]>([]);
+  const draftSegmentLabelEntitiesRef = useRef<Entity[]>([]);
   const hoverPositionRef = useRef<Cartesian3 | null>(null);
   const hoverThrottleRef = useRef(0);
   const probeEntityRef = useRef<Entity | null>(null);
@@ -679,7 +690,13 @@ export function ViewerCanvas() {
     if (viewer && !viewer.isDestroyed() && draftEntityRef.current) {
       viewer.entities.remove(draftEntityRef.current);
     }
+    if (viewer && !viewer.isDestroyed()) {
+      for (const entity of draftVertexEntitiesRef.current) viewer.entities.remove(entity);
+      for (const entity of draftSegmentLabelEntitiesRef.current) viewer.entities.remove(entity);
+    }
     draftEntityRef.current = null;
+    draftVertexEntitiesRef.current = [];
+    draftSegmentLabelEntitiesRef.current = [];
     draftPositionsRef.current = [];
     hoverPositionRef.current = null;
     store.getState().setDraft([], null);
@@ -752,6 +769,13 @@ export function ViewerCanvas() {
       draftPositionsRef.current = [];
 
       draftEntityRef.current = viewer.entities.add({
+        position:
+          mode === "polyline"
+            ? new CallbackPositionProperty(() => {
+                const pts = draftPositionsRef.current;
+                return hoverPositionRef.current ?? pts[pts.length - 1];
+              }, false)
+            : undefined,
         polyline: {
           positions: new CallbackProperty(() => {
             const pts = draftPositionsRef.current;
@@ -774,6 +798,36 @@ export function ViewerCanvas() {
                 }, false),
                 material: ACCENT.withAlpha(0.2),
                 classificationType: ClassificationType.BOTH,
+              }
+            : undefined,
+        label:
+          mode === "polyline"
+            ? {
+                show: new CallbackProperty(() => {
+                  const pts = draftPositionsRef.current;
+                  const hover = hoverPositionRef.current;
+                  return !!hover && pts.length > 0 && computeDistanceMeters([pts[pts.length - 1], hover]) > 0.01;
+                }, false),
+                text: new CallbackProperty(() => {
+                  const pts = draftPositionsRef.current;
+                  const hover = hoverPositionRef.current;
+                  if (!hover || pts.length === 0) return "";
+                  const segment = [pts[pts.length - 1], hover];
+                  const distance = computeDistanceMeters(segment);
+                  const grade = opts?.slope ? computeGrade(segment) : null;
+                  if (!grade) return `${distance.toFixed(2)} m`;
+                  const arrow = grade.riseMeters >= 0 ? "↑" : "↓";
+                  return `${distance.toFixed(2)} m\n${arrow} ${Math.abs(grade.riseMeters).toFixed(2)} m`;
+                }, false),
+                font: "16px sans-serif",
+                fillColor: Color.WHITE,
+                showBackground: true,
+                backgroundColor: Color.fromCssColorString("#18181B").withAlpha(0.9),
+                backgroundPadding: new Cartesian2(10, 7),
+                pixelOffset: new Cartesian2(18, 16),
+                horizontalOrigin: HorizontalOrigin.LEFT,
+                verticalOrigin: VerticalOrigin.TOP,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
               }
             : undefined,
       });
@@ -887,8 +941,45 @@ export function ViewerCanvas() {
       handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
         const pos = pickScenePosition(viewer, event.position);
         if (pos) {
+          const previous = draftPositionsRef.current[draftPositionsRef.current.length - 1];
+          if (previous && Cartesian3.distance(previous, pos) < 0.01) return;
+
+          if (mode === "polyline") {
+            draftVertexEntitiesRef.current.push(
+              viewer.entities.add({
+                position: pos,
+                point: {
+                  pixelSize: 8,
+                  color: ACCENT,
+                  outlineColor: Color.WHITE,
+                  outlineWidth: 2,
+                  disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                },
+              })
+            );
+            if (previous) {
+              draftSegmentLabelEntitiesRef.current.push(
+                viewer.entities.add({
+                  position: Cartesian3.midpoint(previous, pos, new Cartesian3()),
+                  label: {
+                    text: `${computeDistanceMeters([previous, pos]).toFixed(2)} m`,
+                    font: "14px sans-serif",
+                    fillColor: Color.WHITE,
+                    showBackground: true,
+                    backgroundColor: Color.fromCssColorString("#18181B").withAlpha(0.9),
+                    backgroundPadding: new Cartesian2(8, 6),
+                    pixelOffset: new Cartesian2(0, -16),
+                    verticalOrigin: VerticalOrigin.BOTTOM,
+                    disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                  },
+                })
+              );
+            }
+          }
+
           draftPositionsRef.current = [...draftPositionsRef.current, pos];
-          store.getState().setDraft(draftPositionsRef.current, hoverPositionRef.current);
+          hoverPositionRef.current = null;
+          store.getState().setDraft(draftPositionsRef.current, null);
           viewer.scene.requestRender();
         }
       }, ScreenSpaceEventType.LEFT_CLICK);
@@ -916,6 +1007,11 @@ export function ViewerCanvas() {
       return;
     }
     draftPositionsRef.current = draftPositionsRef.current.slice(0, -1);
+    const viewer = viewerRef.current;
+    const vertex = draftVertexEntitiesRef.current.pop();
+    if (viewer && vertex) viewer.entities.remove(vertex);
+    const segmentLabel = draftSegmentLabelEntitiesRef.current.pop();
+    if (viewer && segmentLabel) viewer.entities.remove(segmentLabel);
     store.getState().setDraft(draftPositionsRef.current, hoverPositionRef.current);
     viewerRef.current?.scene.requestRender();
   }, [store, viewerRef]);
