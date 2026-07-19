@@ -25,6 +25,21 @@ export interface ViewerActions {
   startProbe: (toolKey?: string) => void;
   cancelDraw: () => void;
   eraseDraft: () => void;
+  /** Load the SELECTED measurement's vertices into a draggable-handle edit
+   * session (Line tool lit as the edit indicator); double-click commits →
+   * PATCH geometry + recompute. Toggles off if already editing. */
+  editGeometry: () => void;
+  /** Draw a FRESH outline that REPLACES the selected measurement's shape
+   * (Polygon tool). Snapping onto existing corners is active; the original
+   * stays visible as a tracing reference. Double-click commits + recomputes. */
+  redrawGeometry: () => void;
+  /** Point / identify tool for a live draw/edit session: hover highlights the
+   * nearest vertex/edge, click selects it. No-op outside a session. */
+  pointSelect: () => void;
+  /** Resume placing vertices on the CURRENT draft (a draw tool clicked mid-
+   * session, e.g. after erasing an edge) WITHOUT discarding it. `toolKey` lights
+   * that tool. No-op outside an active draw/edit session. */
+  resumeVertexDraw: (toolKey: string) => void;
   undoLastVertex: () => void;
   redoLastVertex: () => void;
 

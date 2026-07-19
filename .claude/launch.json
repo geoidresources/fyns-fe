@@ -7,6 +7,16 @@
       "runtimeArgs": ["dev"],
       "port": 3000,
       "autoPort": true
+    },
+    {
+      "name": "fyns-fe-v2",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev"],
+      "port": 3000,
+      "autoPort": true,
+      "env": {
+        "NEXT_PUBLIC_INTERACTION_V2": "1"
+      }
     }
   ]
 }

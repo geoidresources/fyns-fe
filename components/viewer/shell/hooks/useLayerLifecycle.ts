@@ -14,7 +14,7 @@
 // stay in the refs passed via `deps` (§3.2). Bodies line-identical.
 /* eslint-disable react-hooks/exhaustive-deps */
 
-import { useEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
+import { useEffect, type Dispatch, type RefObject, type SetStateAction } from "react";
 import {
   BoundingSphere,
   Cartesian3,
@@ -134,12 +134,6 @@ export function useLayerLifecycle(deps: {
     setLayerControls,
     setDesignControls,
   } = deps;
-
-  // Keep the latest visibility map for the async GeoJSON load callback so a
-  // toggle that lands while load is in flight is not overwritten by a stale
-  // closure when the datasource resolves.
-  const measurementVisibilityRef = useRef(measurementVisibility);
-  measurementVisibilityRef.current = measurementVisibility;
 
   // -------------------------------------------------------- scene setup
   useEffect(() => {
@@ -662,7 +656,7 @@ export function useLayerLifecycle(deps: {
     if (!viewerReady || !viewer || viewer.isDestroyed()) return;
     let cancelled = false;
 
-    const visibility = measurementVisibilityRef.current;
+    const visibility = measurementVisibility;
     const features = measurements
       .filter((m) => m.geometry && visibility[m.id] === true)
       .map((m) => ({
@@ -683,7 +677,11 @@ export function useLayerLifecycle(deps: {
         // Per-measurement style (params.style, STYLE tab) over the defaults:
         // polygon fill/outline, polyline color/width/dash, optional label.
         const byId = new Map(measurements.map((m) => [m.id, m]));
-        for (const entity of ds.entities.values) {
+        // Snapshot the feature entities before the loop — we add vertex-marker
+        // entities to the SAME datasource inside it, and iterating a live
+        // EntityCollection while adding would also visit the new markers.
+        const featureEntities = Array.from(ds.entities.values);
+        for (const entity of featureEntities) {
           const raw = entity.properties?.id;
           const id: string | undefined =
             typeof raw?.getValue === "function"
@@ -757,6 +755,36 @@ export function useLayerLifecycle(deps: {
                 disableDepthTestDistance: Number.POSITIVE_INFINITY,
               });
             }
+          }
+
+          // Vertex markers — a dot per placed vertex, matching the drawing
+          // highlight, so a rendered shape keeps showing its vertices. Added as
+          // sibling entities in the same datasource (cleaned up on re-render).
+          const ring =
+            m.geometry?.type === "Polygon"
+              ? ((m.geometry.coordinates as number[][][])[0] ?? []).slice()
+              : m.geometry?.type === "LineString"
+                ? ((m.geometry.coordinates as number[][]) ?? [])
+                : [];
+          // A GeoJSON polygon ring closes on itself — drop the duplicate last
+          // coordinate so the origin isn't double-dotted.
+          if (m.geometry?.type === "Polygon" && ring.length > 1) {
+            const a = ring[0];
+            const b = ring[ring.length - 1];
+            if (a[0] === b[0] && a[1] === b[1]) ring.pop();
+          }
+          for (const [lng, lat] of ring) {
+            ds.entities.add({
+              position: Cartesian3.fromDegrees(lng, lat),
+              point: {
+                pixelSize: 7,
+                color: stroke,
+                outlineColor: Color.WHITE,
+                outlineWidth: 1.5,
+                heightReference: HeightReference.CLAMP_TO_GROUND,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+              },
+            });
           }
         }
         if (measurementDsRef.current) {

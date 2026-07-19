@@ -116,6 +116,14 @@ export interface ViewerShellData {
   probing: boolean;
   probePoint: LngLatHeight | null;
 
+  /**
+   * When set, the live draw session is EDITING this measurement's geometry (not
+   * drawing a fresh one) — mirrors ViewerCanvas's `editingMeasurementIdRef` so
+   * the FloatingToolbar can tell it's in an edit session and rebind tools (drag
+   * / redraw / erase / point) onto the edit instead of starting new draws.
+   */
+  editingMeasurementId: string | null;
+
   draft: { points: Cartesian3[]; hover: Cartesian3 | null };
 
   selection: Selection | null;
@@ -207,6 +215,8 @@ export interface ViewerShellActions {
   setSearchingMeasurements: (searching: boolean) => void;
   setDraft: (points: Cartesian3[], hover: Cartesian3 | null) => void;
   setProbePoint: (point: LngLatHeight | null) => void;
+  /** Mark (or clear) the measurement the live draw session is editing. */
+  setEditingMeasurementId: (id: string | null) => void;
 }
 
 export type ViewerShellState = ViewerShellData & ViewerShellActions;
@@ -231,6 +241,7 @@ function defaultData(surveyId: string): ViewerShellData {
     activeTemplateId: null,
     probing: false,
     probePoint: null,
+    editingMeasurementId: null,
 
     draft: { points: [], hover: null },
 
@@ -317,6 +328,7 @@ export function createViewerStore(
         probing: false,
         probePoint: null,
         activeToolKey: null,
+        editingMeasurementId: null,
         draft: { points: [], hover: null },
       }),
 
@@ -442,6 +454,7 @@ export function createViewerStore(
       set({ searchingMeasurements: searching }),
     setDraft: (points, hover) => set({ draft: { points, hover } }),
     setProbePoint: (point) => set({ probePoint: point }),
+    setEditingMeasurementId: (id) => set({ editingMeasurementId: id }),
   }));
 
   if (seed) store.setState(seed);

@@ -121,6 +121,7 @@ export function DetailContent({
       onPatch={actions.patchMeasurement}
       onDelete={actions.removeMeasurement}
       onCompute={actions.triggerCompute}
+      onEditGeometry={actions.editGeometry}
       estimate={estimate}
       onClearEstimate={
         inspectMeasurement ? () => clearEstimate(inspectMeasurement.id) : undefined

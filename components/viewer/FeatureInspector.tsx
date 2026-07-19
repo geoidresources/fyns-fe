@@ -15,6 +15,7 @@ import {
   Pencil,
   Play,
   Save,
+  Spline,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -70,6 +71,9 @@ interface FeatureInspectorProps {
   ) => Promise<void>;
   onDelete?: (id: string) => void;
   onCompute?: (id: string, override?: Record<string, unknown>) => void;
+  /** Enter the vertex-drag geometry editor for this measurement (Line tool lit
+   * as the edit indicator); double-click on the map commits + recomputes. */
+  onEditGeometry?: () => void;
   /** The instant PostGIS estimate for this measurement's current kind, shown
    * (with an "Instant" badge) until the authoritative worker doc lands. */
   estimate?: EstimateResult | null;
@@ -404,6 +408,7 @@ export function FeatureInspector({
   onPatch,
   onDelete,
   onCompute,
+  onEditGeometry,
   estimate,
   onClearEstimate,
   saving,
@@ -456,6 +461,10 @@ export function FeatureInspector({
   // other kinds get no Run row rather than a 422 toast. Completed volume rows
   // may re-run (edit method → recompute); the in-flight 409 gate covers computing.
   const canCompute = !demo && isVolume && measurement.status !== "computing";
+  // Vertex-drag editing needs a real (non-demo) polygon/line and the handler.
+  const geomType = measurement.geometry?.type;
+  const canEditGeometry =
+    !demo && !!onEditGeometry && (geomType === "Polygon" || geomType === "LineString");
 
   const unitSystem = unitSystemOf(measurement.params);
   const material = (measurement.params?.material ?? null) as {
@@ -817,6 +826,13 @@ export function FeatureInspector({
                       </>
                     )}
                   </div>
+                )}
+                {canEditGeometry && (
+                  <ActionRow
+                    icon={<Spline size={15} />}
+                    label="Edit shape"
+                    onClick={() => onEditGeometry!()}
+                  />
                 )}
                 {canCompute && onCompute && (
                   <ActionRow

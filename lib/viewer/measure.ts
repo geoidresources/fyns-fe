@@ -233,6 +233,69 @@ export function findNearestSegmentIndex(
   return bestIdx;
 }
 
+/**
+ * Index of the vertex nearest `windowPosition` within maxPixelDistance (screen)
+ * / maxDistanceMeters (3D fallback), or null. Used by the vertex-to-vertex
+ * eraser and the point/identify tool to resolve "which vertex is under here".
+ */
+export function nearestVertexIndex(
+  viewer: CesiumViewer,
+  points: Cartesian3[],
+  windowPosition: Cartesian2,
+  options?: { maxPixelDistance?: number; maxDistanceMeters?: number }
+): number | null {
+  const maxPx = options?.maxPixelDistance ?? 16;
+  const maxM = options?.maxDistanceMeters ?? 12;
+  if (points.length === 0) return null;
+
+  const scene = viewer.scene;
+  let bestIdx = -1;
+  let bestDist = Infinity;
+  for (let i = 0; i < points.length; i++) {
+    const p2 = scene.cartesianToCanvasCoordinates(points[i]);
+    if (!defined(p2)) continue;
+    const d = Math.hypot(windowPosition.x - p2.x, windowPosition.y - p2.y);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+  if (bestIdx >= 0 && bestDist <= maxPx) return bestIdx;
+
+  // Terrain-clamped drafts often fail canvas projection — fall back to 3D.
+  const click = pickScenePosition(viewer, windowPosition);
+  if (!click) return null;
+  bestIdx = -1;
+  bestDist = Infinity;
+  for (let i = 0; i < points.length; i++) {
+    const d = Cartesian3.distance(click, points[i]);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+  if (bestIdx < 0 || bestDist > maxM) return null;
+  return bestIdx;
+}
+
+/**
+ * The segment index of the edge joining two ADJACENT vertices a,b (into an
+ * n-vertex ring/chain), or null when they are not neighbors. Segment i is the
+ * edge points[i]→points[i+1]; the closing edge of a closed ring is segment
+ * n-1 (points[n-1]→points[0]). Pure — unit-tested in measure.segments.test.ts.
+ */
+export function adjacentSegmentIndex(
+  a: number,
+  b: number,
+  n: number,
+  closed: boolean
+): number | null {
+  if (a === b) return null;
+  if (Math.abs(a - b) === 1) return Math.min(a, b);
+  if (closed && n >= 3 && ((a === 0 && b === n - 1) || (a === n - 1 && b === 0))) return n - 1;
+  return null;
+}
+
 /** 3D distance from point P to segment AB in meters. */
 export function distancePointToSegment3D(p: Cartesian3, a: Cartesian3, b: Cartesian3): number {
   const ab = Cartesian3.subtract(b, a, new Cartesian3());

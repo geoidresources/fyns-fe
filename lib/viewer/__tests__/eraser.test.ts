@@ -42,6 +42,33 @@ test("polygon: triangle keeps all three vertices whichever edge is erased", () =
   assert.deepEqual(eraseSegment(["A", "B", "C"], 2, true), ["A", "B", "C"]);
 });
 
+// Edges DRAWN for an open chain = consecutive pairs only (no closing wrap).
+const openEdges = (pts: string[]) => pts.slice(0, -1).map((p, i) => `${p}-${pts[i + 1]}`);
+
+test("polygon: a SECOND erase on an ALREADY-OPEN ring must not resurrect the first-deleted edge", () => {
+  // Closed ring A-B-C-D; erase A→B (idx 0, closed) → opens to [B,C,D,A], gap A-B.
+  const afterFirst = eraseSegment(["A", "B", "C", "D"], 0, true) as string[];
+  assert.deepEqual(afterFirst, ["B", "C", "D", "A"]);
+  assert.ok(!openEdges(afterFirst).includes("A-B"), "A-B is the gap after the first erase");
+
+  // The draft is now OPEN — the second erase MUST pass closed=false (what the
+  // ViewerCanvas fix computes as `mode==='polygon' && !polygonOpenRef.current`).
+  // Erase C→D (segment 1 of [B,C,D,A]) → open split, keep longer (tie→left).
+  const afterSecond = eraseSegment(afterFirst, 1, false) as string[];
+  assert.deepEqual(afterSecond, ["B", "C"]);
+  const edges = openEdges(afterSecond);
+  assert.ok(!edges.includes("A-B"), "first-deleted edge A-B stays gone");
+  assert.ok(!edges.includes("C-D"), "second-deleted edge C-D is gone");
+});
+
+test("polygon: (regression) closed-rotating an already-open ring RESURRECTS the first edge — the bug", () => {
+  const afterFirst = eraseSegment(["A", "B", "C", "D"], 0, true) as string[]; // [B,C,D,A], gap A-B
+  // The old code passed closed=true again → rotate → [D,A,B,C], drawn open re-adds A-B.
+  const buggy = eraseSegment(afterFirst, 1, true) as string[];
+  assert.deepEqual(buggy, ["D", "A", "B", "C"]);
+  assert.ok(openEdges(buggy).includes("A-B"), "closed rotation wrongly redraws the first-deleted A-B");
+});
+
 test("out-of-range or degenerate input returns null (click ignored)", () => {
   assert.equal(eraseSegment(["A", "B", "C"], 3, true), null); // ring has 3 edges: 0..2
   assert.equal(eraseSegment(["A", "B", "C"], 2, false), null); // open chain has 2 edges: 0..1
