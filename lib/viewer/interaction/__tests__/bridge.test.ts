@@ -176,6 +176,39 @@ test("bridge: empty-draft cancel is silent (toast gated on prior draft)", () => 
   h.detach();
 });
 
+const editVerts = (): Vec3[] => [v(0, 0), v(1, 0), v(1, 1)];
+
+test("bridge editing entry: hides the measurement, mirrors the type, opens no discard", () => {
+  const info = mock.method(toast, "info", () => "" as never);
+  const h = harness();
+  h.store.getState().selectMeasurement("m-7"); // inspector open
+  h.actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  assert.equal(s(h).measurementVisibility["m-7"], false); // hidden during edit
+  assert.equal(s(h).drawMode, "polygon"); // type mirrored
+  assert.equal(s(h).activeToolKey, "palette:line"); // edit indicator
+  assert.equal(s(h).draft.points.length, 3); // readout seeded
+  assert.deepEqual(s(h).selection?.measurementIds, ["m-7"]); // stays selected
+  assert.equal(info.mock.callCount(), 0);
+  info.mock.restore();
+  h.detach();
+});
+
+test("bridge editing CANCEL: re-shows the untouched measurement, clears the draft, no discard toast", () => {
+  const info = mock.method(toast, "info", () => "" as never);
+  const h = harness();
+  h.store.getState().selectMeasurement("m-7");
+  h.actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  h.actor.send({ type: "HANDLE_GRAB", index: 0 });
+  h.actor.send({ type: "HANDLE_MOVE", position: v(9, 9) });
+  h.actor.send({ type: "CANCEL" });
+  assert.equal(s(h).measurementVisibility["m-7"], true); // re-shown
+  assert.equal(s(h).drawMode, null);
+  assert.equal(s(h).draft.points.length, 0);
+  assert.equal(info.mock.callCount(), 0); // "Drawing discarded" is a create-plane toast only
+  info.mock.restore();
+  h.detach();
+});
+
 test("bridge: the draft mirror tracks appends and undo while placing", () => {
   const h = harness();
   h.actor.send({ type: "TEMPLATE_PICKED", templateId: "polygon" });

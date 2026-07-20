@@ -67,6 +67,8 @@ import {
   useViewerStore,
 } from "@/lib/viewer/state/store";
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
+import { useInteractionActor } from "@/components/viewer/shell/interactionContext";
+import { useSelector } from "@xstate/react";
 import { metricsOf, resultForKind } from "@/lib/viewer/calc";
 import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 
@@ -564,6 +566,13 @@ export function WorkspaceTree() {
   const measurementSearch = useViewerStore((s) => s.measurementSearch);
   const searchingMeasurements = useViewerStore((s) => s.searchingMeasurements);
   const drawMode = useViewerStore((s) => s.drawMode);
+  // v2: reshaping an existing measurement mirrors drawMode too, so the drawing
+  // hint below would read wrong — swap to edit guidance when the machine says so.
+  const interactionActor = useInteractionActor();
+  const isEditingGeometry = useSelector(
+    interactionActor,
+    (s) => typeof s.value === "object" && s.value !== null && "editing" in s.value
+  );
   const busyIds = useViewerStore((s) => s.busyIds);
   const projectId = useViewerStore((s) => s.manifest?.survey.project_id ?? "");
   const surveyId = useViewerStore((s) => s.surveyId);
@@ -851,8 +860,9 @@ export function WorkspaceTree() {
 
         {drawMode && (
           <p className="px-2 py-1.5 text-[11px] text-gray-500">
-            Click the globe to add vertices. Right-click to choose a calculation. Double-click to
-            calculate. Esc discards.
+            {isEditingGeometry
+              ? "Drag a handle to move it · click a midpoint dot to add a point · right-click an edge to open the ring. Enter or Done saves; Esc cancels."
+              : "Click the globe to add vertices. Right-click to choose a calculation. Double-click to calculate. Esc discards."}
           </p>
         )}
 

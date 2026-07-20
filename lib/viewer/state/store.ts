@@ -108,6 +108,10 @@ export interface ViewerShellData {
   detailPanel: "measure" | "inspect" | null;
   /** UI-only: hide the floating detail without clearing draw/inspect state. */
   detailPanelCollapsed: boolean;
+  /** Right-click context menu on a measurement (screen page coords + target id),
+   * else null. Opened by useScenePicking's RIGHT_CLICK, closed on action /
+   * click-away / Esc. */
+  contextMenu: { x: number; y: number; measurementId: string } | null;
 
   activeToolKey: string | null;
   drawMode: DrawMode | null;
@@ -184,6 +188,9 @@ export interface ViewerShellActions {
   openDetail: (mode: "measure" | "inspect") => void;
   closeDetail: () => void;
 
+  openContextMenu: (x: number, y: number, measurementId: string) => void;
+  closeContextMenu: () => void;
+
   setLayerVisible: (key: string, visible: boolean) => void;
   setLayerOpacity: (key: string, opacity: number) => void;
   setMeasurementVisible: (id: string, visible: boolean) => void;
@@ -234,6 +241,7 @@ function defaultData(surveyId: string): ViewerShellData {
     treePanelOpen: true,
     detailPanel: null,
     detailPanelCollapsed: false,
+    contextMenu: null,
 
     activeToolKey: null,
     drawMode: null,
@@ -361,6 +369,9 @@ export function createViewerStore(
 
     openDetail: (mode) => set({ detailPanel: mode, detailPanelCollapsed: false }),
     closeDetail: () => set({ detailPanel: null, detailPanelCollapsed: false }),
+
+    openContextMenu: (x, y, measurementId) => set({ contextMenu: { x, y, measurementId } }),
+    closeContextMenu: () => set({ contextMenu: null }),
 
     setLayerVisible: (key, visible) =>
       set({

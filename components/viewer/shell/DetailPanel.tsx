@@ -15,8 +15,11 @@
 import React, { useMemo, useRef } from "react";
 import { AnimatePresence, motion, useDragControls, useIsPresent } from "framer-motion";
 
+import { useSelector } from "@xstate/react";
+
 import { estimateKey, useViewerStore } from "@/lib/viewer/state/store";
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
+import { useInteractionActor } from "@/components/viewer/shell/interactionContext";
 import { MeasurePalette, type LiveReadout } from "@/components/viewer/MeasurePalette";
 import { FeatureInspector } from "@/components/viewer/FeatureInspector";
 import {
@@ -85,6 +88,17 @@ export function DetailContent({
 
   const actions = useViewerActions();
 
+  // v2 edit-plane awareness: the id of the measurement whose geometry is being
+  // edited right now (else null). Drives the inspector's "Done editing" swap.
+  // Provider is always mounted (both flags); the machine just stays idle under
+  // legacy, so this is null there.
+  const interactionActor = useInteractionActor();
+  const editingGeometryId = useSelector(interactionActor, (s) =>
+    typeof s.value === "object" && s.value !== null && "editing" in s.value
+      ? s.context.measurementId
+      : null
+  );
+
   // Resolve the inspector target: the selected measurement by id (drafts are
   // rows too, draft-first), else null.
   const inspectMeasurement =
@@ -122,6 +136,8 @@ export function DetailContent({
       onDelete={actions.removeMeasurement}
       onCompute={actions.triggerCompute}
       onEditGeometry={actions.editGeometry}
+      onCommitGeometry={actions.commitGeometry}
+      editingGeometryId={editingGeometryId}
       estimate={estimate}
       onClearEstimate={
         inspectMeasurement ? () => clearEstimate(inspectMeasurement.id) : undefined

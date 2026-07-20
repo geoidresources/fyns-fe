@@ -305,6 +305,173 @@ test("calcReady: RIGHT_CLICK and nearOrigin MAP_CLICK are no-ops (adapter still 
   assert.equal(s.context.draft.length, 3);
 });
 
+// ------------------------------------------------------------- edit plane (P2)
+
+const editVerts = (): Vec3[] => [v(0, 0), v(1, 0), v(1, 1)];
+
+test("EDIT_SHAPE seeds the editor: origin=edit, measurementId set, primitive preserved", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  const s = actor.getSnapshot();
+  assert.deepEqual(s.value, { editing: "ready" });
+  assert.equal(s.context.origin, "edit");
+  assert.equal(s.context.measurementId, "m-7");
+  assert.equal(s.context.primitive, "polygon");
+  assert.equal(s.context.draft.length, 3);
+});
+
+test("editing: grab → move → drop relocates one vertex; undo reverts the whole drag", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  actor.send({ type: "HANDLE_GRAB", index: 1 });
+  assert.deepEqual(actor.getSnapshot().value, { editing: "dragging" });
+  actor.send({ type: "HANDLE_MOVE", position: v(5, 5) });
+  actor.send({ type: "HANDLE_MOVE", position: v(9, 9) }); // live follow, no new snapshot
+  actor.send({ type: "HANDLE_DROP" });
+  let s = actor.getSnapshot();
+  assert.deepEqual(s.value, { editing: "ready" });
+  assert.deepEqual(s.context.draft[1], v(9, 9));
+  assert.equal(s.context.grabbedIndex, null);
+  assert.equal(s.context.history.length, 1); // ONE snapshot for the whole drag
+  actor.send({ type: "UNDO" });
+  s = actor.getSnapshot();
+  assert.deepEqual(s.context.draft[1], v(1, 0)); // back to the pre-drag position
+});
+
+test("editing COMMIT hands a PATCH (measurementId set) to the commit actor", async () => {
+  const { actor, commits } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  actor.send({ type: "HANDLE_GRAB", index: 0 });
+  actor.send({ type: "HANDLE_MOVE", position: v(-1, -1) });
+  actor.send({ type: "HANDLE_DROP" });
+  actor.send({ type: "COMMIT" });
+  await waitFor(actor, (s) => s.value === "idle");
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].measurementId, "m-7"); // PATCH, not create
+  assert.equal(commits[0].primitive, "polygon");
+  assert.deepEqual(commits[0].draft[0], v(-1, -1));
+});
+
+test("editing: double-click also commits", async () => {
+  const { actor, commits } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  actor.send({ type: "DOUBLE_CLICK" });
+  await waitFor(actor, (s) => s.value === "idle");
+  assert.equal(commits.length, 1);
+});
+
+test("editing CANCEL/ESC discards to idle (mid-drag too) with a clean context", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  actor.send({ type: "HANDLE_GRAB", index: 2 });
+  actor.send({ type: "HANDLE_MOVE", position: v(3, 3) });
+  actor.send({ type: "ESC" }); // cancel mid-drag
+  const s = actor.getSnapshot();
+  assert.equal(s.value, "idle");
+  assert.equal(s.context.measurementId, null);
+  assert.equal(s.context.origin, "create");
+  assert.deepEqual(s.context.draft, []);
+});
+
+test("edit commit FAILURE returns to editing.ready with the draft intact (origin routing)", async () => {
+  const { actor } = startActor({ failCommit: true });
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  actor.send({ type: "HANDLE_GRAB", index: 1 });
+  actor.send({ type: "HANDLE_MOVE", position: v(4, 4) });
+  actor.send({ type: "HANDLE_DROP" });
+  actor.send({ type: "COMMIT" });
+  await waitFor(actor, (s) => JSON.stringify(s.value) === JSON.stringify({ editing: "ready" }));
+  const s = actor.getSnapshot();
+  assert.deepEqual(s.context.draft[1], v(4, 4)); // move preserved
+  assert.equal(s.context.measurementId, "m-7");
+});
+
+test("editing INSERT_VERTEX splices on the edge, selects the new vertex, snapshots for undo", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  // edge 0 is v0→v1; insert its midpoint → [v0, MID, v1, v2]
+  actor.send({ type: "INSERT_VERTEX", edgeIndex: 0, position: v(0.5, 0) });
+  const s = actor.getSnapshot();
+  assert.equal(s.context.draft.length, 4);
+  assert.deepEqual(s.context.draft[1], v(0.5, 0));
+  assert.equal(s.context.selectedVertex, 1);
+  actor.send({ type: "UNDO" });
+  assert.equal(actor.getSnapshot().context.draft.length, 3); // insert reverted
+});
+
+test("editing INSERT_VERTEX on the closing edge appends", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  actor.send({ type: "INSERT_VERTEX", edgeIndex: 2, position: v(0.5, 0.5) }); // closing edge v2→v0
+  const d = actor.getSnapshot().context.draft;
+  assert.equal(d.length, 4);
+  assert.deepEqual(d[3], v(0.5, 0.5)); // appended at the end
+});
+
+test("editing DELETE_VERTEX removes the selected vertex; ring stays closed and re-routes", () => {
+  const { actor } = startActor();
+  // 4-vertex square so a delete keeps it a valid (>=3) polygon
+  actor.send({
+    type: "EDIT_SHAPE",
+    measurementId: "m-7",
+    geometry: [v(0, 0), v(1, 0), v(1, 1), v(0, 1)],
+    primitive: "polygon",
+  });
+  actor.send({ type: "SELECT_VERTEX", index: 1 });
+  actor.send({ type: "DELETE_VERTEX" });
+  const s = actor.getSnapshot();
+  assert.equal(s.context.draft.length, 3);
+  assert.deepEqual(s.context.draft, [v(0, 0), v(1, 1), v(0, 1)]); // v1 gone, ring re-routes
+  assert.equal(s.context.selectedVertex, null);
+  assert.equal(s.context.ringOpen, false); // stays CLOSED (unlike edge-erase)
+});
+
+test("editing DELETE_VERTEX is BLOCKED below the polygon minimum (guarded, no-op)", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
+  actor.send({ type: "SELECT_VERTEX", index: 0 });
+  actor.send({ type: "DELETE_VERTEX" }); // 3 → would be 2 < min
+  assert.equal(actor.getSnapshot().context.draft.length, 3); // unchanged
+});
+
+test("editing DELETE_VERTEX with no selection is a no-op", () => {
+  const { actor } = startActor();
+  actor.send({
+    type: "EDIT_SHAPE",
+    measurementId: "m-7",
+    geometry: [v(0, 0), v(1, 0), v(1, 1), v(0, 1)],
+    primitive: "polygon",
+  });
+  actor.send({ type: "DELETE_VERTEX" }); // selectedVertex null
+  assert.equal(actor.getSnapshot().context.draft.length, 4);
+});
+
+test("editing: grabbing a handle also selects it (Delete target)", () => {
+  const { actor } = startActor();
+  actor.send({
+    type: "EDIT_SHAPE",
+    measurementId: "m-7",
+    geometry: [v(0, 0), v(1, 0), v(1, 1), v(0, 1)],
+    primitive: "polygon",
+  });
+  actor.send({ type: "HANDLE_GRAB", index: 2 });
+  actor.send({ type: "HANDLE_DROP" });
+  assert.equal(actor.getSnapshot().context.selectedVertex, 2);
+  actor.send({ type: "DELETE_VERTEX" }); // deletes the grabbed-then-selected vertex
+  assert.equal(actor.getSnapshot().context.draft.length, 3);
+});
+
+test("create commit failure still returns to calcReady (origin=create unaffected)", async () => {
+  const { actor } = startActor({ failCommit: true });
+  actor.send({ type: "TEMPLATE_PICKED", templateId: "line" });
+  actor.send({ type: "MAP_CLICK", position: v(0, 0) });
+  actor.send({ type: "MAP_CLICK", position: v(1, 0) });
+  actor.send({ type: "RIGHT_CLICK" });
+  actor.send({ type: "DOUBLE_CLICK" });
+  await waitFor(actor, (s) => s.value === "calcReady");
+  assert.equal(actor.getSnapshot().context.origin, "create");
+});
+
 test("commit input forwards template + ringOpen; history is one snapshot per append (uncapped)", async () => {
   const { actor, commits } = startActor();
   actor.send({ type: "TEMPLATE_PICKED", templateId: "polygon" });
@@ -315,4 +482,151 @@ test("commit input forwards template + ringOpen; history is one snapshot per app
   await waitFor(actor, (s) => s.value === "idle");
   assert.equal(commits[0].template?.id, "polygon");
   assert.equal(commits[0].ringOpen, false);
+});
+
+// ---------------------------------------------------------------- P2b-2 edge-open plane
+
+const square = (): Vec3[] => [v(0, 0), v(1, 0), v(1, 1), v(0, 1)];
+
+test("DELETE_EDGE opens the ring: rotates the gap to the end, clears selection, snapshots", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: square(), primitive: "polygon" });
+  actor.send({ type: "SELECT_VERTEX", index: 2 });
+  actor.send({ type: "DELETE_EDGE", edgeIndex: 0 }); // erase v0→v1
+  const s = actor.getSnapshot();
+  assert.equal(s.context.ringOpen, true);
+  // chain now runs v1 → v2 → v3 → v0, so the gap (old edge 0) sits between v0 and v1.
+  assert.deepEqual(s.context.draft, [v(1, 0), v(1, 1), v(0, 1), v(0, 0)]);
+  assert.equal(s.context.selectedVertex, null);
+  assert.equal(s.context.history.length, 1);
+  assert.deepEqual(s.value, { editing: "ready" });
+});
+
+test("DELETE_EDGE on the closing edge opens without reordering", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: square(), primitive: "polygon" });
+  actor.send({ type: "DELETE_EDGE", edgeIndex: 3 }); // closing edge v3→v0
+  const s = actor.getSnapshot();
+  assert.equal(s.context.ringOpen, true);
+  assert.deepEqual(s.context.draft, square()); // order intact — gap already at the end
+});
+
+test("DELETE_EDGE is BLOCKED on a polyline (no ring to open) and when already open", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: [v(0, 0), v(1, 0), v(2, 0)], primitive: "polyline" });
+  actor.send({ type: "DELETE_EDGE", edgeIndex: 0 });
+  assert.equal(actor.getSnapshot().context.ringOpen, false); // no-op on a line
+
+  const b = startActor();
+  b.actor.send({ type: "EDIT_SHAPE", measurementId: "m-8", geometry: square(), primitive: "polygon" });
+  b.actor.send({ type: "DELETE_EDGE", edgeIndex: 1 }); // opens
+  const opened = b.actor.getSnapshot().context.draft;
+  b.actor.send({ type: "DELETE_EDGE", edgeIndex: 1 }); // second open is a no-op
+  assert.deepEqual(b.actor.getSnapshot().context.draft, opened); // unchanged
+});
+
+test("append-into-gap: while the ring is open a MAP_CLICK appends a vertex at the end", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: square(), primitive: "polygon" });
+  actor.send({ type: "DELETE_EDGE", edgeIndex: 0 }); // open
+  actor.send({ type: "MAP_CLICK", position: v(2, 2) });
+  const s = actor.getSnapshot();
+  assert.equal(s.context.draft.length, 5);
+  assert.deepEqual(s.context.draft[4], v(2, 2)); // appended into the gap
+  assert.equal(s.context.ringOpen, true); // still open, keep routing
+});
+
+test("closeGap: clicking the start vertex (nearOrigin) while open re-closes without adding a vertex", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: square(), primitive: "polygon" });
+  actor.send({ type: "DELETE_EDGE", edgeIndex: 0 }); // open
+  actor.send({ type: "MAP_CLICK", position: v(9, 9), nearOrigin: true }); // click the start
+  const s = actor.getSnapshot();
+  assert.equal(s.context.ringOpen, false); // re-closed
+  assert.equal(s.context.draft.length, 4); // NO vertex added
+});
+
+test("MAP_CLICK in editing is inert while the ring is CLOSED (adapter hit-tests instead)", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: square(), primitive: "polygon" });
+  actor.send({ type: "MAP_CLICK", position: v(9, 9) }); // not open, not nearOrigin
+  const s = actor.getSnapshot();
+  assert.equal(s.context.draft.length, 4); // untouched
+  assert.equal(s.context.ringOpen, false);
+});
+
+test("UNDO after DELETE_EDGE restores the CLOSED ring in its original order", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: square(), primitive: "polygon" });
+  actor.send({ type: "DELETE_EDGE", edgeIndex: 1 });
+  actor.send({ type: "UNDO" });
+  const s = actor.getSnapshot();
+  assert.deepEqual(s.context.draft, square());
+  assert.equal(s.context.ringOpen, false);
+});
+
+test("noSelfIntersection BLOCKS commit of a bowtie polygon (edit plane) — stays editing, no save fires", async () => {
+  const { actor, commits } = startActor();
+  const bowtie = [v(0, 0), v(2, 2), v(2, 0), v(0, 2)]; // crossed diagonals when closed
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: bowtie, primitive: "polygon" });
+  actor.send({ type: "DOUBLE_CLICK" }); // blocked by guard
+  actor.send({ type: "COMMIT" }); // also blocked
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(actor.getSnapshot().value, { editing: "ready" }); // never left editing
+  assert.equal(commits.length, 0); // save never invoked
+});
+
+test("noSelfIntersection BLOCKS a self-intersecting create-plane polygon on double-click", async () => {
+  const { actor, commits } = startActor();
+  actor.send({ type: "TEMPLATE_PICKED", templateId: "polygon" });
+  // Z-shape that self-crosses once the ring closes.
+  for (const p of [v(0, 0), v(3, 0), v(0, 2), v(3, 2)]) actor.send({ type: "MAP_CLICK", position: p });
+  actor.send({ type: "RIGHT_CLICK" }); // → calcReady
+  assert.equal(actor.getSnapshot().value, "calcReady");
+  actor.send({ type: "DOUBLE_CLICK" }); // blocked — bowtie ring
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(actor.getSnapshot().value, "calcReady"); // stayed put
+  assert.equal(commits.length, 0);
+});
+
+test("a simple (non-crossing) polygon still commits — the guard is not over-eager", async () => {
+  const { actor, commits } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: square(), primitive: "polygon" });
+  actor.send({ type: "DOUBLE_CLICK" });
+  await waitFor(actor, (s) => s.value === "idle");
+  assert.equal(commits.length, 1);
+});
+
+// ---------------------------------------------------------------- P2c-2 redraw
+
+test("REDRAW_SHAPE enters the CREATE plane seeded to PATCH (measurementId set, empty draft, origin create)", async () => {
+  const { actor, commits } = startActor();
+  actor.send({ type: "REDRAW_SHAPE", measurementId: "m-9", primitive: "polygon" });
+  const s = actor.getSnapshot();
+  assert.equal(s.value, "placing");
+  assert.equal(s.context.measurementId, "m-9");
+  assert.equal(s.context.origin, "create"); // failure routes to calcReady, not the edit plane
+  assert.equal(s.context.draft.length, 0); // a fresh outline, not the old vertices
+  assert.equal(s.context.primitive, "polygon");
+  // draw a fresh triangle and finish → commit PATCHes the redrawn row
+  actor.send({ type: "MAP_CLICK", position: v(0, 0) });
+  actor.send({ type: "MAP_CLICK", position: v(2, 0) });
+  actor.send({ type: "MAP_CLICK", position: v(1, 2) });
+  actor.send({ type: "RIGHT_CLICK" });
+  actor.send({ type: "DOUBLE_CLICK" });
+  await waitFor(actor, (st) => st.value === "idle");
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].measurementId, "m-9"); // PATCH, not a new create
+});
+
+test("REDRAW_SHAPE commit FAILURE returns to calcReady (create plane), retry keeps the PATCH target", async () => {
+  const { actor } = startActor({ failCommit: true });
+  actor.send({ type: "REDRAW_SHAPE", measurementId: "m-9", primitive: "polygon" });
+  actor.send({ type: "MAP_CLICK", position: v(0, 0) });
+  actor.send({ type: "MAP_CLICK", position: v(2, 0) });
+  actor.send({ type: "MAP_CLICK", position: v(1, 2) });
+  actor.send({ type: "RIGHT_CLICK" });
+  actor.send({ type: "DOUBLE_CLICK" });
+  await waitFor(actor, (s) => s.value === "calcReady");
+  assert.equal(actor.getSnapshot().context.measurementId, "m-9");
 });

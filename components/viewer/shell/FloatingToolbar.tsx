@@ -35,11 +35,9 @@ import {
 import { toast } from "sonner";
 import { useSelector } from "@xstate/react";
 
-import type { DrawMode, DrawOptions } from "@/components/viewer/MeasurementPanel";
 import { useViewerStore } from "@/lib/viewer/state/store";
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
 import { useInteractionActor } from "@/components/viewer/shell/interactionContext";
-import { INTERACTION_V2 } from "@/lib/viewer/interaction/flag";
 import {
   templatesFor,
   toolKeyFor,
@@ -52,34 +50,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-
-// The six geometry primitives, mirroring the retired MeasurePalette TOOLS grid
-// the user asked to promote into the toolbar. `probe` tools sample a point;
-// `draw` tools open a polyline/polygon draw. `opts` carries label/slope only —
-// NO kind, so the calculation stays a right-panel choice.
-type PaletteToolId = "point" | "line" | "polygon" | "section" | "probe" | "slope";
-
-interface PaletteTool {
-  id: PaletteToolId;
-  icon: React.ComponentType<{ size?: number | string; className?: string }>;
-  label: string;
-  probe?: boolean;
-  draw?: DrawMode;
-  opts?: DrawOptions;
-}
-
-const TOOLS: PaletteTool[] = [
-  { id: "point", icon: MousePointer, label: "Point", probe: true },
-  { id: "line", icon: Minus, label: "Line", draw: "polyline", opts: { label: "Line" } },
-  { id: "polygon", icon: Pentagon, label: "Polygon", draw: "polygon", opts: { label: "Polygon" } },
-  { id: "section", icon: Scissors, label: "Section", draw: "polyline", opts: { label: "Section" } },
-  { id: "probe", icon: Circle, label: "Probe", probe: true },
-  { id: "slope", icon: AreaChart, label: "Slope", draw: "polyline", opts: { label: "Slope", slope: true } },
-];
-
-// Namespaced so the toolbar's keys never collide with the rail or other tool
-// hosts in the shared activeToolKey (the retired grid used the same scheme).
-const keyFor = (id: PaletteToolId) => `palette:${id}`;
 
 /** Icon-only pill that pops its label out on hover — the floating feel the user
  * asked to keep (ported from ViewerDrawToolbar.tsx). */
@@ -146,115 +116,10 @@ function ToolPill({
 }
 
 export function FloatingToolbar() {
-  // Interaction v2 seam (plan §P1): the flag is a build-time constant, so this
-  // branch is stable for the whole session — no conditional-hook hazard.
-  return INTERACTION_V2 ? <FloatingToolbarV2 /> : <FloatingToolbarLegacy />;
-}
-
-function FloatingToolbarLegacy() {
-  const activeToolKey = useViewerStore((s) => s.activeToolKey);
-  const drawMode = useViewerStore((s) => s.drawMode);
-  const selection = useViewerStore((s) => s.selection);
-  const actions = useViewerActions();
-
-  const selectedMeasurementId =
-    selection?.kind === "measurement" ? selection.measurementIds[0] : null;
-
-  const launchTool = (t: PaletteTool) => {
-    const key = keyFor(t.id);
-    // Point tool DURING a live draw/edit session = identify+select a vertex/edge
-    // (pointSelect handles its own on/off). Only outside a session does Point
-    // fall through to the elevation probe below. Handled before the generic
-    // toggle so re-clicking Point doesn't cancel the whole draw.
-    if (t.id === "point" && drawMode) {
-      actions.pointSelect();
-      return;
-    }
-    // Re-clicking the live tool cancels it (starting the same draw again would
-    // discard the in-progress vertices) — ported from the MeasurePalette grid.
-    if (activeToolKey === key) {
-      actions.cancelDraw();
-      return;
-    }
-    // A draw tool clicked DURING an active session (e.g. after erasing an edge,
-    // to add vertices into the gap) means "let me place vertices on THIS draft"
-    // — NOT "throw it away and start over". startDraw would cleanupDraw the
-    // in-progress geometry (the vanishing-drawing bug); resume placement on it.
-    if (t.draw && drawMode) {
-      actions.resumeVertexDraw(key);
-      return;
-    }
-    // Line-tool-on-selection = EDIT that shape's vertices (the user's "the tool
-    // triggered should be a line by default"). With a measurement selected and
-    // nothing being drawn, Line drops into the drag-a-vertex editor instead of
-    // starting a fresh line; the shape's type is preserved (a stockpile stays a
-    // polygon). Without a selection it draws a new line as before.
-    if (t.id === "line" && selectedMeasurementId && !drawMode) {
-      actions.editGeometry();
-      return;
-    }
-    // Polygon-tool-on-selection = REDRAW that shape: draw a fresh outline
-    // (snapping onto existing corners) that replaces it on save. Without a
-    // selection it draws a new polygon as before.
-    if (t.id === "polygon" && selectedMeasurementId && !drawMode) {
-      actions.redrawGeometry();
-      return;
-    }
-    if (t.probe) {
-      actions.startProbe(key);
-      return;
-    }
-    if (t.draw) {
-      actions.startDraw(t.draw, { ...t.opts, toolKey: key });
-    }
-  };
-
-  return (
-    <div className="pointer-events-auto absolute left-1/2 top-4 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full border border-white/[0.06] bg-[#111114]/85 p-[7px] shadow-[0_4px_24px_0_rgba(0,0,0,0.5)] backdrop-blur-md">
-      {TOOLS.map((t) => {
-        const Icon = t.icon;
-        return (
-          <ToolPill
-            key={t.id}
-            label={t.label}
-            icon={<Icon size={18} />}
-            active={activeToolKey === keyFor(t.id)}
-            onClick={() => launchTool(t)}
-          />
-        );
-      })}
-
-      <div className="mx-1 h-5 w-px bg-white/[0.08]" />
-
-      {/* Eraser: vertex-to-vertex edge delete (click a vertex, then an adjacent
-          one — a dotted line previews the edge). Works on an in-progress draw
-          or a selected measurement (actions.eraseDraft). */}
-      <ToolPill
-        label="Eraser"
-        icon={<Scissors size={18} />}
-        active={activeToolKey === "palette:eraser"}
-        onClick={actions.eraseDraft}
-      />
-      <ToolPill
-        label="Undo"
-        icon={<Undo2 size={18} />}
-        active={false}
-        onClick={actions.undoLastVertex}
-      />
-      <ToolPill
-        label="Redo"
-        icon={<Redo2 size={18} />}
-        active={false}
-        onClick={actions.redoLastVertex}
-      />
-      <ToolPill
-        label="Snap"
-        icon={<Grid3x3 size={18} />}
-        active={false}
-        onClick={() => toast.info("Snapping — coming in a later phase")}
-      />
-    </div>
-  );
+  // Interaction v2 is the only interactive path now (P3 scoped-delete): the
+  // legacy toolbar/draw/edit are gone. Probe/point still ride the legacy
+  // startProbe from inside FloatingToolbarV2 until they migrate to the machine.
+  return <FloatingToolbarV2 />;
 }
 
 // ---------------------------------------------------------------------------

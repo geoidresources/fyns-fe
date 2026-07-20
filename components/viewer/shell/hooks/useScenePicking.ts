@@ -39,6 +39,10 @@ export function useScenePicking(deps: {
   selectMeasurement: (id: string, opts?: { fly?: boolean }) => void;
   selectFeature: (props: Record<string, unknown>) => void;
   clearSelection: () => void;
+  /** Right-click on a measurement → select it + open the context menu at the
+   * cursor (page coords). Delete/Edit/Redraw live there. */
+  openContextMenu: (x: number, y: number, measurementId: string) => void;
+  closeContextMenu: () => void;
 }) {
   const {
     viewerReady,
@@ -50,6 +54,8 @@ export function useScenePicking(deps: {
     selectMeasurement,
     selectFeature,
     clearSelection,
+    openContextMenu,
+    closeContextMenu,
   } = deps;
 
   useEffect(() => {
@@ -106,6 +112,27 @@ export function useScenePicking(deps: {
         }
       }
     }, ScreenSpaceEventType.LEFT_CLICK);
+
+    // Right-click a measurement → select it + open the context menu (Edit /
+    // Redraw / Delete) at the cursor. Only outside a draw/probe session (those
+    // own right-click for finish/erase). Misses close any open menu.
+    handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
+      if (drawMode || probing) return;
+      const picked = viewer.scene.pick(event.position);
+      const entity = picked?.id instanceof Entity ? picked.id : null;
+      const props = entity?.properties?.getValue(JulianDate.now()) as
+        | Record<string, unknown>
+        | undefined;
+      const measurement =
+        typeof props?.id === "string" ? measurements.find((m) => m.id === props.id) : undefined;
+      if (!measurement) {
+        closeContextMenu();
+        return;
+      }
+      selectMeasurement(measurement.id, { fly: false });
+      const rect = viewer.scene.canvas.getBoundingClientRect();
+      openContextMenu(rect.left + event.position.x, rect.top + event.position.y, measurement.id);
+    }, ScreenSpaceEventType.RIGHT_CLICK);
 
     return () => handler.destroy();
   }, [viewerReady, drawMode, probing, measurements, selectionKind]);

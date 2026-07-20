@@ -75,11 +75,17 @@ import { eraseSegment } from "@/lib/viewer/eraser";
 import { useActorRef } from "@xstate/react";
 import { INTERACTION_V2 } from "@/lib/viewer/interaction/flag";
 import { templateById, type TemplateId } from "@/lib/viewer/interaction/templates";
+import { hasSelfIntersection } from "@/lib/viewer/interaction/validity";
 import { attachStoreBridge } from "@/lib/viewer/interaction/bridge";
 import { machineWithCommit } from "@/lib/viewer/commitMeasurement";
 import { useInteractionAdapter } from "@/components/viewer/shell/hooks/useInteractionAdapter";
 import { useDraftRenderer } from "@/components/viewer/shell/hooks/useDraftRenderer";
+import {
+  useSelectionHandles,
+  type SelectionSeed,
+} from "@/components/viewer/shell/hooks/useSelectionHandles";
 import { InteractionProvider } from "@/components/viewer/shell/interactionContext";
+import { MeasurementContextMenu } from "@/components/viewer/shell/MeasurementContextMenu";
 import {
   CalcParamsError,
   LEAN_RENDER,
@@ -166,8 +172,34 @@ export function ViewerCanvas() {
     if (!INTERACTION_V2) return;
     return attachStoreBridge(interactionActor, store);
   }, [interactionActor, store]);
-  const adapterRefs = useInteractionAdapter(viewerRef, viewerReady, interactionActor, store);
-  useDraftRenderer(viewerRef, viewerReady, interactionActor, adapterRefs);
+  // Edit handles + midpoint ghosts the renderer draws + the adapter GPU-picks
+  // (shared refs; vertex order / edge order).
+  const editHandleEntitiesRef = useRef<Entity[]>([]);
+  const editGhostEntitiesRef = useRef<Entity[]>([]);
+  // Selection-overlay handles on a selected (not-yet-editing) measurement, and
+  // the edit seed the adapter sends when one is grabbed (P2c-2b). Populated by
+  // useSelectionHandles (called after liftToTerrain is defined); the adapter
+  // reads them at event time, so creating the refs here is fine.
+  const selectionHandlesRef = useRef<Entity[]>([]);
+  const selectionSeedRef = useRef<SelectionSeed | null>(null);
+  const adapterRefs = useInteractionAdapter(
+    viewerRef,
+    viewerReady,
+    interactionActor,
+    store,
+    editHandleEntitiesRef,
+    editGhostEntitiesRef,
+    selectionHandlesRef,
+    selectionSeedRef
+  );
+  useDraftRenderer(
+    viewerRef,
+    viewerReady,
+    interactionActor,
+    adapterRefs,
+    editHandleEntitiesRef,
+    editGhostEntitiesRef
+  );
 
   // -------------------------------------------------------- reactive reads
   const surveyId = useViewerStore((s) => s.surveyId);
@@ -194,6 +226,8 @@ export function ViewerCanvas() {
   const selectMeasurement = useViewerStore((s) => s.selectMeasurement);
   const selectFeature = useViewerStore((s) => s.selectFeature);
   const clearSelection = useViewerStore((s) => s.clearSelection);
+  const openContextMenu = useViewerStore((s) => s.openContextMenu);
+  const closeContextMenu = useViewerStore((s) => s.closeContextMenu);
   const setLayerControls = useViewerStore((s) => s.setLayerControls);
   const setDesignControls = useViewerStore((s) => s.setDesignControls);
 
@@ -930,6 +964,19 @@ export function ViewerCanvas() {
       });
     },
     [viewerRef]
+  );
+
+  // P2c-2b: draw grab handles on the SELECTED measurement (machine idle); the
+  // adapter promotes a grab into a live edit. Wired here (not up top) because it
+  // needs liftToTerrain.
+  useSelectionHandles(
+    viewerRef,
+    viewerReady,
+    interactionActor,
+    store,
+    liftToTerrain,
+    selectionHandlesRef,
+    selectionSeedRef
   );
 
   // Per-vertex accent dot for EVERY draw mode (each placed vertex stays
@@ -2059,7 +2106,22 @@ export function ViewerCanvas() {
   // from the new ring). Fully dynamic: any/every vertex can move in one session.
   const editGeometry = useCallback(() => {
     if (INTERACTION_V2) {
-      toast.info("Shape editing joins interaction v2 in P2 — unset the flag to edit");
+      // v2 edit plane (P2a): seed the machine from the selected measurement.
+      const sv = store.getState();
+      const selId = sv.selection?.kind === "measurement" ? sv.selection.measurementIds[0] : null;
+      const sel = selId ? sv.measurements.find((m) => m.id === selId) : null;
+      if (!sel?.geometry) {
+        toast.info("Select a measurement to edit its shape");
+        return;
+      }
+      const primitive = sel.geometry.type === "Polygon" ? "polygon" : "polyline";
+      const geometry = liftToTerrain(geometryPositions(sel.geometry));
+      if (geometry.length < 2) {
+        toast.info("This measurement has no editable vertices");
+        return;
+      }
+      interactionActor.send({ type: "EDIT_SHAPE", measurementId: sel.id, geometry, primitive });
+      toast.info("Drag a vertex to reshape — double-click when done");
       return;
     }
     const s = store.getState();
@@ -2108,7 +2170,20 @@ export function ViewerCanvas() {
     store.setState({ activeToolKey: "palette:line" });
     store.getState().openDetail("measure");
     toast.info("Drag any vertex to reshape — double-click when done");
-  }, [store, cancelDraw, startDraw, liftToTerrain]);
+  }, [store, cancelDraw, startDraw, liftToTerrain, interactionActor]);
+
+  // v2 "Done editing" — the inspector-visible twin of Enter/double-click. Same
+  // self-intersection guard + toast as the adapter's finish path (the machine's
+  // COMMIT guard would otherwise drop the click with no feedback).
+  const commitGeometry = useCallback(() => {
+    if (!INTERACTION_V2) return;
+    const ctx = interactionActor.getSnapshot().context;
+    if (hasSelfIntersection(ctx.draft, ctx.primitive === "polygon")) {
+      toast.error("Shape can't cross itself — fix the crossing to save");
+      return;
+    }
+    interactionActor.send({ type: "COMMIT" });
+  }, [interactionActor]);
 
   // Redraw editor: draw a FRESH outline that REPLACES the selected measurement's
   // shape (Q1: Replace). Unlike editGeometry (drag existing verts), this starts
@@ -2117,7 +2192,18 @@ export function ViewerCanvas() {
   // corners are snap targets (computeSnap) — and is replaced on double-click.
   const redrawGeometry = useCallback(() => {
     if (INTERACTION_V2) {
-      toast.info("Shape redraw joins interaction v2 in P2 — unset the flag to use it");
+      // v2 redraw: place a fresh outline over the still-visible original (a
+      // tracing reference), committing a PATCH via the seeded measurementId.
+      const sv = store.getState();
+      const selId = sv.selection?.kind === "measurement" ? sv.selection.measurementIds[0] : null;
+      const sel = selId ? sv.measurements.find((m) => m.id === selId) : null;
+      if (!sel?.geometry) {
+        toast.info("Select a measurement to redraw its shape");
+        return;
+      }
+      const primitive = sel.geometry.type === "Polygon" ? "polygon" : "polyline";
+      interactionActor.send({ type: "REDRAW_SHAPE", measurementId: sel.id, primitive });
+      toast.info("Draw the new outline — right-click or Enter to finish. Esc discards.");
       return;
     }
     const s = store.getState();
@@ -2143,7 +2229,7 @@ export function ViewerCanvas() {
     s.setEditingMeasurementId(selected.id);
     startDraw("polygon", { label: selected.name, toolKey: "palette:polygon" });
     toast.info("Draw the new outline — vertices snap onto existing corners. Return to the first point (or right-click) to finish.");
-  }, [store, cancelDraw, startDraw]);
+  }, [store, cancelDraw, startDraw, interactionActor]);
 
   // Undo/redo restore whole GEOMETRY SNAPSHOTS, so they cover EVERY edit — a
   // placed vertex, a dragged vertex, or an erased edge — not just the last
@@ -2311,6 +2397,8 @@ export function ViewerCanvas() {
     selectMeasurement,
     selectFeature,
     clearSelection,
+    openContextMenu,
+    closeContextMenu,
   });
   useLayerLifecycle({
     viewerReady,
@@ -2353,6 +2441,7 @@ export function ViewerCanvas() {
       cancelDraw,
       eraseDraft,
       editGeometry,
+      commitGeometry,
       redrawGeometry,
       pointSelect,
       resumeVertexDraw,
@@ -2385,6 +2474,7 @@ export function ViewerCanvas() {
       cancelDraw,
       eraseDraft,
       editGeometry,
+      commitGeometry,
       redrawGeometry,
       pointSelect,
       resumeVertexDraw,
@@ -2486,6 +2576,9 @@ export function ViewerCanvas() {
 
           {/* Zone 5 — draggable floating detail (expanded or compact). */}
           <DetailPanel />
+
+          {/* Right-click context menu on a measurement (Edit / Redraw / Delete). */}
+          <MeasurementContextMenu />
         </div>
 
         {/* Zone 6 — status bar, docked, spanning cols 2–3 */}

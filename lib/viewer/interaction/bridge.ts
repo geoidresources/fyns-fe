@@ -31,16 +31,22 @@ export function attachStoreBridge(
   actor: InteractionActor,
   store: StoreApi<ViewerShellState>
 ): () => void {
-  let prev: StateValue = actor.getSnapshot().value;
+  // Compound-state safe: collapse {editing:"ready"|"dragging"} → "editing" so
+  // ready↔dragging isn't seen as re-entering the plane.
+  const topKey = (val: StateValue): string =>
+    typeof val === "string" ? val : Object.keys(val)[0];
+
+  let prevTop = topKey(actor.getSnapshot().value);
+  let prevMeasurementId: string | null = actor.getSnapshot().context.measurementId;
   let prevDraft: unknown = actor.getSnapshot().context.draft;
 
   const sub = actor.subscribe((snap) => {
-    const value = snap.value;
     const ctx = snap.context;
-    const entered = value !== prev;
+    const top = topKey(snap.value);
+    const entered = top !== prevTop;
 
     if (entered) {
-      if (value === "placing") {
+      if (top === "placing") {
         const template = ctx.template;
         store.setState({
           drawMode: ctx.primitive,
@@ -51,12 +57,25 @@ export function attachStoreBridge(
           probing: false,
           probePoint: null,
         });
-        if (prev === "idle") {
+        if (prevTop === "idle") {
           const s = store.getState();
           s.clearSelection();
           s.openDetail("measure");
         }
-      } else if (value === "calcReady") {
+      } else if (top === "editing") {
+        // Reshape an existing measurement: hide its rendered geometry (the draft
+        // handles replace it), mirror the type for the panel, keep the inspector
+        // open. The Line tool lights as the "you're editing" indicator (parity).
+        if (ctx.measurementId) store.getState().setMeasurementVisible(ctx.measurementId, false);
+        store.setState({
+          drawMode: ctx.primitive,
+          activeToolKey: "palette:line",
+          activeDrawOpts: null,
+          probing: false,
+          probePoint: null,
+        });
+        store.getState().setDraft(ctx.draft as Cartesian3[], null);
+      } else if (top === "calcReady") {
         // Unclip the toolbar tool; RE-mirror drawMode — the origin close-out
         // may have just re-typed a polyline draft to polygon, and the calc
         // panel keys its options off drawMode (legacy releaseForCalc kept it).
@@ -70,27 +89,36 @@ export function attachStoreBridge(
         // retryable shape (frontend M1). Idempotent for the normal right-click
         // path (draft already mirrored).
         store.getState().setDraft(ctx.draft as Cartesian3[], null);
-      } else if (value === "committing") {
+      } else if (top === "committing") {
         store.getState().cancelDraw();
-      } else if (value === "idle") {
-        if (prev === "placing" || prev === "calcReady") {
+      } else if (top === "idle") {
+        if (prevTop === "placing" || prevTop === "calcReady") {
           const s = store.getState();
           const hadDraft = ctxHadDraft(prevDraft);
           s.cancelDraw();
           s.closeDetail();
           s.clearSelection();
           if (hadDraft) toast.info("Drawing discarded");
+        } else if (prevTop === "editing") {
+          // Edit CANCELLED (Esc): the measurement was never mutated — just
+          // re-show it and drop the draft mirror. Stays selected + inspected.
+          if (prevMeasurementId) store.getState().setMeasurementVisible(prevMeasurementId, true);
+          store.setState({ drawMode: null, activeToolKey: null, activeDrawOpts: null });
+          store.getState().setDraft([], null);
         }
         // From committing: the commit impl owns selection/panels — hands off.
       }
     }
 
     // Draft mirror for the live readout (panel Area/Perimeter/Vertices).
-    if (ctx.draft !== prevDraft && (value === "placing" || value === "calcReady")) {
+    if (ctx.draft !== prevDraft && (top === "placing" || top === "calcReady" || top === "editing")) {
       store.getState().setDraft(ctx.draft as Cartesian3[], null);
     }
     prevDraft = ctx.draft;
-    prev = value;
+    // Retain the id across the exit tick so the idle branch can unhide it.
+    prevMeasurementId = ctx.measurementId ?? prevMeasurementId;
+    if (top === "idle") prevMeasurementId = null;
+    prevTop = top;
   });
 
   return () => sub.unsubscribe();

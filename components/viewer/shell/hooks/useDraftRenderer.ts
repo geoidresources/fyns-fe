@@ -20,6 +20,7 @@ import {
   Cartesian3,
   ClassificationType,
   Color,
+  ConstantPositionProperty,
   Entity,
   HeightReference,
   HorizontalOrigin,
@@ -43,7 +44,13 @@ export function useDraftRenderer(
   viewerRef: RefObject<CesiumViewer | null>,
   viewerReady: boolean,
   actor: InteractionActor,
-  refs: AdapterRefs
+  refs: AdapterRefs,
+  /** Populated with the vertex-dot entities (in order) while EDITING, so the
+   * adapter can GPU-pick a handle → its index. Empty otherwise. */
+  handleEntitiesRef: RefObject<Entity[]>,
+  /** Populated with the midpoint "ghost" entities (edge order) while editing —
+   * click one to insert a vertex on that edge (adapter GPU-picks it). */
+  ghostEntitiesRef: RefObject<Entity[]>
 ): void {
   useEffect(() => {
     if (!INTERACTION_V2 || !viewerReady) return;
@@ -59,7 +66,11 @@ export function useDraftRenderer(
     let base: Entity[] = [];
     let dots: Entity[] = [];
     let segmentLabels: Entity[] = [];
+    let ghosts: Entity[] = [];
     let lastDraft: Cartesian3[] | null = null;
+    let lastSelected: number | null = null;
+    let lastRingOpen = false; // closeGap flips ringOpen without touching the draft array
+    let lastEdgeSig = ""; // draft length + open/closed — rebuilds ghosts only on change
 
     const removeAll = (list: Entity[]) => {
       if (viewer.isDestroyed()) return;
@@ -171,20 +182,25 @@ export function useDraftRenderer(
 
     // Accent dot per placed vertex + a length label per consecutive pair —
     // rebuilt whole on draft change (undo/erase reshuffle pairs; C3).
-    const rebuildDecorations = () => {
+    // `editing` → fatter, grab-friendly handles + expose them for the adapter's
+    // GPU pick; placing → the standard accent dots.
+    const rebuildDecorations = (editing: boolean) => {
       removeAll(dots);
       removeAll(segmentLabels);
       dots = [];
       segmentLabels = [];
       const pts = draft();
+      const selected = actor.getSnapshot().context.selectedVertex;
       for (let i = 0; i < pts.length; i++) {
+        const isSelected = editing && i === selected;
         dots.push(
           viewer.entities.add({
             position: pts[i],
             point: {
-              pixelSize: 8,
-              color: ACCENT,
-              outlineColor: Color.WHITE,
+              // The selected handle reads brighter/bigger — it's the Delete target.
+              pixelSize: isSelected ? 14 : editing ? 11 : 8,
+              color: isSelected ? Color.WHITE : ACCENT,
+              outlineColor: isSelected ? ACCENT : Color.WHITE,
               outlineWidth: 2,
               heightReference: HeightReference.CLAMP_TO_GROUND,
               disableDepthTestDistance: Number.POSITIVE_INFINITY,
@@ -211,31 +227,108 @@ export function useDraftRenderer(
           );
         }
       }
+      handleEntitiesRef.current = editing ? dots : [];
+    };
+
+    // Midpoint "ghost" nodes — one per edge — that follow live (CallbackPosition)
+    // so a drag doesn't need to rebuild them. Click one to insert a vertex on
+    // that edge. Rebuilt only when the EDGE SET changes (draft length / open).
+    const rebuildGhosts = (editing: boolean) => {
+      removeAll(ghosts);
+      ghosts = [];
+      if (!editing) {
+        ghostEntitiesRef.current = [];
+        return;
+      }
+      const pts = draft();
+      const closed = isPolygon() && !ringOpen();
+      const edgeCount = closed ? pts.length : pts.length - 1;
+      for (let i = 0; i < edgeCount; i++) {
+        const a = i;
+        const b = (i + 1) % pts.length;
+        ghosts.push(
+          viewer.entities.add({
+            position: new CallbackPositionProperty(() => {
+              const p = draft();
+              return a < p.length && b < p.length
+                ? Cartesian3.midpoint(p[a], p[b], new Cartesian3())
+                : Cartesian3.ZERO;
+            }, false),
+            point: {
+              pixelSize: 7,
+              color: Color.WHITE.withAlpha(0.35),
+              outlineColor: Color.WHITE.withAlpha(0.7),
+              outlineWidth: 1,
+              heightReference: HeightReference.CLAMP_TO_GROUND,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          })
+        );
+      }
+      ghostEntitiesRef.current = ghosts;
     };
 
     const teardown = () => {
       removeAll(base);
       removeAll(dots);
       removeAll(segmentLabels);
+      removeAll(ghosts);
       base = [];
       dots = [];
       segmentLabels = [];
+      ghosts = [];
+      handleEntitiesRef.current = [];
+      ghostEntitiesRef.current = [];
       lastDraft = null;
+      lastSelected = null;
+      lastRingOpen = false;
+      lastEdgeSig = "";
       if (!viewer.isDestroyed()) viewer.scene.requestRender();
     };
 
     const sub = actor.subscribe((snap) => {
+      const val = snap.value;
+      const editing = typeof val === "object" && val !== null && "editing" in val;
+      const editSub = editing ? (val as { editing: string }).editing : null;
       const active =
-        snap.value === "placing" || snap.value === "calcReady" || snap.value === "committing";
+        val === "placing" || val === "calcReady" || val === "committing" || editing;
       if (!active) {
         if (base.length || dots.length) teardown();
         return;
       }
       if (base.length === 0) mountBase();
       const d = snap.context.draft as Cartesian3[];
-      if (d !== lastDraft) {
+      const draftChanged = d !== lastDraft;
+      // A pure selection change (click a vertex → highlight) doesn't touch the
+      // draft array, so rebuild the dots for the highlight too.
+      const selectionChanged = editing && snap.context.selectedVertex !== lastSelected;
+      // closeGap re-closes the ring WITHOUT a new draft array — the fill/outline
+      // callbacks follow live, but the discrete ghosts need a rebuild to add the
+      // re-closed edge's midpoint back.
+      const ringOpenChanged = editing && snap.context.ringOpen !== lastRingOpen;
+
+      if (draftChanged || selectionChanged || ringOpenChanged) {
+        const grabbed = snap.context.grabbedIndex;
+        // Cheap drag update: while dragging, move ONLY the grabbed handle (the
+        // outline is a CallbackProperty, so it follows for free). Full rebuild
+        // for everything else — placement, insert/delete, undo/redo, a drop, or
+        // a selection highlight.
+        if (draftChanged && editSub === "dragging" && grabbed !== null && dots.length === d.length) {
+          const dot = dots[grabbed];
+          if (dot) dot.position = new ConstantPositionProperty(d[grabbed]);
+        } else {
+          rebuildDecorations(editing);
+        }
+        // Ghosts follow live; rebuild the SET only when the edge count/openness
+        // changes (insert/delete/erase), not on every drag frame.
+        const edgeSig = editing ? `${d.length}:${ringOpen()}` : "";
+        if (edgeSig !== lastEdgeSig) {
+          rebuildGhosts(editing);
+          lastEdgeSig = edgeSig;
+        }
         lastDraft = d;
-        rebuildDecorations();
+        lastSelected = snap.context.selectedVertex;
+        lastRingOpen = snap.context.ringOpen;
         viewer.scene.requestRender();
       }
     });
@@ -244,5 +337,5 @@ export function useDraftRenderer(
       sub.unsubscribe();
       teardown();
     };
-  }, [actor, refs, viewerRef, viewerReady]);
+  }, [actor, refs, viewerRef, viewerReady, handleEntitiesRef, ghostEntitiesRef]);
 }

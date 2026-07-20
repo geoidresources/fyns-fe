@@ -16,6 +16,7 @@ import type { Primitive, Snapshot, Vec3 } from "./types.ts";
 import { snapshotOf } from "./types.ts";
 import type { MeasureTemplate, TemplateId } from "./templates.ts";
 import { templateById } from "./templates.ts";
+import { hasSelfIntersection } from "./validity.ts";
 
 // ------------------------------------------------------------------ context
 
@@ -33,6 +34,14 @@ export interface InteractionCtx {
   /** Snapshot undo/redo — one entry per MUTATION, restored whole (ledger #3). */
   history: Snapshot[];
   future: Snapshot[];
+  /** "create" (placing a new shape) vs "edit" (reshaping an existing one) —
+   * drives commit routing (PATCH vs POST rides on measurementId) AND where a
+   * failed commit returns (editing.ready vs calcReady). */
+  origin: "create" | "edit";
+  /** Index of the vertex being dragged in the edit plane, else null. */
+  grabbedIndex: number | null;
+  /** The highlighted vertex in the edit plane — the target of DELETE_VERTEX. */
+  selectedVertex: number | null;
 }
 
 const emptyCtx: InteractionCtx = {
@@ -43,6 +52,9 @@ const emptyCtx: InteractionCtx = {
   measurementId: null,
   history: [],
   future: [],
+  origin: "create",
+  grabbedIndex: null,
+  selectedVertex: null,
 };
 
 // ------------------------------------------------------------------- events
@@ -56,7 +68,30 @@ export type InteractionEvent =
   | { type: "REDO" }
   | { type: "ESC" }
   // Programmatic cancel — actions.cancelDraw parity (panel close buttons etc.).
-  | { type: "CANCEL" };
+  | { type: "CANCEL" }
+  // --- edit plane (P2) ---
+  // Enter the geometry editor on an existing measurement (from the inspector
+  // "Edit shape", a handle grab, or a context menu). Geometry is seeded as
+  // terrain-lifted Vec3s; primitive preserves the shape's type.
+  | { type: "EDIT_SHAPE"; measurementId: string; geometry: Vec3[]; primitive: Primitive }
+  // Redraw: place a FRESH outline that REPLACES an existing measurement — the
+  // create plane (placing → calcReady) but with measurementId set so commit
+  // PATCHes. origin stays "create" so a failed commit returns to calcReady.
+  | { type: "REDRAW_SHAPE"; measurementId: string; primitive: Primitive }
+  | { type: "HANDLE_GRAB"; index: number }
+  | { type: "HANDLE_MOVE"; position: Vec3 }
+  | { type: "HANDLE_DROP" }
+  // Highlight a vertex (click without drag) — the DELETE_VERTEX target.
+  | { type: "SELECT_VERTEX"; index: number }
+  // Insert a vertex on an edge (click its midpoint ghost).
+  | { type: "INSERT_VERTEX"; edgeIndex: number; position: Vec3 }
+  // Remove the selected vertex — the ring stays closed and re-routes.
+  | { type: "DELETE_VERTEX" }
+  // Erase an edge — OPENS the polygon ring at that edge (P2b-2). The chain is
+  // rotated so the gap sits at the end; subsequent MAP_CLICKs append into it.
+  | { type: "DELETE_EDGE"; edgeIndex: number }
+  // Commit the current edit (Enter / double-click) → PATCH + recompute.
+  | { type: "COMMIT" };
 
 // ------------------------------------------------------------------- commit
 
@@ -111,6 +146,31 @@ export const interactionMachine = setup({
       context.draft.length >= (context.primitive === "polygon" ? 3 : 2),
     canUndo: ({ context }) => context.history.length > 0,
     canRedo: ({ context }) => context.future.length > 0,
+    isEditOrigin: ({ context }) => context.origin === "edit",
+    /** A vertex is selected AND removing it keeps the shape above its minimum
+     * (3 for a polygon, 2 for a line) — else the delete is dropped (toasted). */
+    canDeleteVertex: ({ context }) =>
+      context.selectedVertex !== null &&
+      context.draft.length > (context.primitive === "polygon" ? 3 : 2),
+    /** The polygon ring is currently open (an edge was erased) — MAP_CLICK then
+     * appends into the gap instead of hit-testing handles/ghosts. */
+    ringIsOpen: ({ context }) => context.ringOpen === true,
+    /** Clicking the open chain's start vertex while the ring is open re-closes
+     * it (mirror of `closesRing` on the create plane). */
+    closesGap: ({ context, event }) =>
+      event.type === "MAP_CLICK" &&
+      event.nearOrigin === true &&
+      context.ringOpen === true &&
+      context.draft.length >= 3,
+    /** Only a still-closed polygon with room to spare can have an edge erased —
+     * a line has no ring, and re-opening an open ring is a no-op. */
+    canDeleteEdge: ({ context }) =>
+      context.primitive === "polygon" && !context.ringOpen && context.draft.length >= 3,
+    /** The draft, closed the way commit will serialize it (polygons re-close),
+     * has no crossing edges. Blocks the commit; the adapter toasts (parity with
+     * hasMinPoints — the machine stays silent, the bridge can't react to no-ops). */
+    noSelfIntersection: ({ context }) =>
+      !hasSelfIntersection(context.draft, context.primitive === "polygon"),
   },
   actions: {
     arm: assign(({ event }) => {
@@ -155,6 +215,100 @@ export const interactionMachine = setup({
       };
     }),
     clear: assign(() => ({ ...emptyCtx })),
+
+    // --- edit plane (P2) ---
+    /** Seed the editor from an existing measurement. origin="edit" so commit
+     * PATCHes and a failed commit returns to editing. */
+    enterEdit: assign(({ event }) => {
+      if (event.type !== "EDIT_SHAPE") return {};
+      return {
+        ...emptyCtx,
+        origin: "edit" as const,
+        measurementId: event.measurementId,
+        primitive: event.primitive,
+        draft: [...event.geometry],
+      };
+    }),
+    /** Seed a REDRAW: empty draft on the create plane, but measurementId set so
+     * commit PATCHes the existing row. origin stays "create" (emptyCtx default)
+     * so a failed commit returns to calcReady, not the edit plane. */
+    enterRedraw: assign(({ event }) => {
+      if (event.type !== "REDRAW_SHAPE") return {};
+      return {
+        ...emptyCtx,
+        measurementId: event.measurementId,
+        primitive: event.primitive,
+      };
+    }),
+    /** Snapshot before a drag begins (undo reverts the whole move, ledger #3);
+     * the grabbed vertex also becomes the selection (Delete target). */
+    grabHandle: assign(({ context, event }) => {
+      if (event.type !== "HANDLE_GRAB") return {};
+      return {
+        history: [...context.history, snapshotOf(context.draft, context.ringOpen)],
+        future: [],
+        grabbedIndex: event.index,
+        selectedVertex: event.index,
+      };
+    }),
+    /** Live-move the grabbed vertex (new array; the outline callback follows). */
+    moveGrabbed: assign(({ context, event }) => {
+      if (event.type !== "HANDLE_MOVE" || context.grabbedIndex === null) return {};
+      const next = [...context.draft];
+      next[context.grabbedIndex] = event.position;
+      return { draft: next };
+    }),
+    dropHandle: assign({ grabbedIndex: null }),
+    selectVertex: assign(({ event }) =>
+      event.type === "SELECT_VERTEX" ? { selectedVertex: event.index } : {}
+    ),
+    /** Insert on an edge: splice the new vertex AFTER edgeIndex; the closing
+     * edge of a ring (edgeIndex n-1) appends. The inserted vertex is selected. */
+    insertVertex: assign(({ context, event }) => {
+      if (event.type !== "INSERT_VERTEX") return {};
+      const at = event.edgeIndex + 1;
+      const next = [...context.draft.slice(0, at), event.position, ...context.draft.slice(at)];
+      return {
+        history: [...context.history, snapshotOf(context.draft, context.ringOpen)],
+        future: [],
+        draft: next,
+        selectedVertex: at,
+      };
+    }),
+    /** Remove the selected vertex — the ring re-routes across its neighbors and
+     * stays CLOSED (distinct from edge-erase, which opens the ring in P2b-2). */
+    deleteVertex: assign(({ context }) => {
+      const idx = context.selectedVertex;
+      if (idx === null) return {};
+      return {
+        history: [...context.history, snapshotOf(context.draft, context.ringOpen)],
+        future: [],
+        draft: context.draft.filter((_, i) => i !== idx),
+        selectedVertex: null,
+      };
+    }),
+    /** Erase edge k (between vk and v_{k+1}): OPEN the ring and rotate the chain
+     * so it runs v_{k+1} → … → vk, putting the gap at the end. Appends then land
+     * where the edge was. Erasing the closing edge (k = n-1) leaves order intact. */
+    deleteEdge: assign(({ context, event }) => {
+      if (event.type !== "DELETE_EDGE") return {};
+      const k = event.edgeIndex;
+      const d = context.draft;
+      const rotated = [...d.slice(k + 1), ...d.slice(0, k + 1)];
+      return {
+        history: [...context.history, snapshotOf(context.draft, context.ringOpen)],
+        future: [],
+        draft: rotated,
+        ringOpen: true,
+        selectedVertex: null,
+      };
+    }),
+    /** Re-close an opened ring (clicked the start vertex) — no vertex added. */
+    closeGap: assign(({ context }) => ({
+      history: [...context.history, snapshotOf(context.draft, context.ringOpen)],
+      future: [],
+      ringOpen: false,
+    })),
   },
 }).createMachine({
   id: "interaction",
@@ -164,6 +318,8 @@ export const interactionMachine = setup({
     idle: {
       on: {
         TEMPLATE_PICKED: { guard: "isDrawTemplate", target: "placing", actions: "arm" },
+        EDIT_SHAPE: { target: "editing", actions: "enterEdit" },
+        REDRAW_SHAPE: { target: "placing", actions: "enterRedraw" },
       },
     },
 
@@ -200,13 +356,53 @@ export const interactionMachine = setup({
     // Vertex placement locked; the calc panel drives; double-click commits.
     calcReady: {
       on: {
-        DOUBLE_CLICK: "committing",
+        DOUBLE_CLICK: { guard: "noSelfIntersection", target: "committing" },
         UNDO: { guard: "canUndo", actions: "undo" },
         REDO: { guard: "canRedo", actions: "redo" },
         TEMPLATE_PICKED: [
           { guard: "isSameTemplate", target: "idle", actions: "clear" },
           // Different tool with a live draft: blocked, same as placing.
         ],
+        ESC: { target: "idle", actions: "clear" },
+        CANCEL: { target: "idle", actions: "clear" },
+      },
+    },
+
+    // Editing an EXISTING measurement's geometry. `ready` shows draggable
+    // handles; `dragging` follows one. Commit PATCHes (measurementId set);
+    // cancel discards the draft — the bridge unhides the untouched measurement.
+    editing: {
+      initial: "ready",
+      states: {
+        ready: {
+          on: {
+            HANDLE_GRAB: { target: "dragging", actions: "grabHandle" },
+            SELECT_VERTEX: { actions: "selectVertex" },
+            INSERT_VERTEX: { actions: "insertVertex" },
+            DELETE_VERTEX: { guard: "canDeleteVertex", actions: "deleteVertex" },
+            DELETE_EDGE: { guard: "canDeleteEdge", actions: "deleteEdge" },
+            // Ring open (an edge was erased): a click re-closes it at the start
+            // vertex, else appends a vertex into the gap. When closed, clicks
+            // hit-test handles/ghosts in the adapter (no MAP_CLICK is sent).
+            MAP_CLICK: [
+              { guard: "closesGap", actions: "closeGap" },
+              { guard: "ringIsOpen", actions: "snapshotAppend" },
+            ],
+            COMMIT: { guard: "noSelfIntersection", target: "#interaction.committing" },
+            DOUBLE_CLICK: { guard: "noSelfIntersection", target: "#interaction.committing" },
+            UNDO: { guard: "canUndo", actions: "undo" },
+            REDO: { guard: "canRedo", actions: "redo" },
+          },
+        },
+        dragging: {
+          on: {
+            HANDLE_MOVE: { actions: "moveGrabbed" },
+            HANDLE_DROP: { target: "ready", actions: "dropHandle" },
+          },
+        },
+      },
+      on: {
+        // Cancel from anywhere in editing (even mid-drag) — discard the draft.
         ESC: { target: "idle", actions: "clear" },
         CANCEL: { target: "idle", actions: "clear" },
       },
@@ -224,8 +420,12 @@ export const interactionMachine = setup({
         }),
         // Commit impl owns store/side effects (select row, recompute, toasts).
         onDone: { target: "idle", actions: "clear" },
-        // Failure (network, CalcParamsError): keep the draft — user retries.
-        onError: { target: "calcReady" },
+        // Failure (network, CalcParamsError): keep the draft — user retries from
+        // whichever plane they were in (editing.ready vs calcReady).
+        onError: [
+          { guard: "isEditOrigin", target: "editing" },
+          { target: "calcReady" },
+        ],
       },
     },
   },

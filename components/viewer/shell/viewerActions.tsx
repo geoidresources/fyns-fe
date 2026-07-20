@@ -29,6 +29,9 @@ export interface ViewerActions {
    * session (Line tool lit as the edit indicator); double-click commits →
    * PATCH geometry + recompute. Toggles off if already editing. */
   editGeometry: () => void;
+  /** v2 only: commit the active geometry edit (Enter / "Done editing"). Blocks
+   * a self-intersecting shape with a toast; no-op under the legacy flag. */
+  commitGeometry: () => void;
   /** Draw a FRESH outline that REPLACES the selected measurement's shape
    * (Polygon tool). Snapping onto existing corners is active; the original
    * stays visible as a tracing reference. Double-click commits + recomputes. */

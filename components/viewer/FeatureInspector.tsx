@@ -7,6 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  Check,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -74,6 +75,14 @@ interface FeatureInspectorProps {
   /** Enter the vertex-drag geometry editor for this measurement (Line tool lit
    * as the edit indicator); double-click on the map commits + recomputes. */
   onEditGeometry?: () => void;
+  /** v2 only: commit the active geometry edit (the "Done editing" twin of Enter
+   * / double-click). Present regardless of flag; the button only shows while the
+   * v2 machine is editing THIS measurement. */
+  onCommitGeometry?: () => void;
+  /** v2 only: the id of the measurement whose geometry is being edited right now
+   * (from the interaction machine), else null. When it matches this measurement,
+   * the inspector shows "Done editing" instead of "Edit shape". */
+  editingGeometryId?: string | null;
   /** The instant PostGIS estimate for this measurement's current kind, shown
    * (with an "Instant" badge) until the authoritative worker doc lands. */
   estimate?: EstimateResult | null;
@@ -409,6 +418,8 @@ export function FeatureInspector({
   onDelete,
   onCompute,
   onEditGeometry,
+  onCommitGeometry,
+  editingGeometryId = null,
   estimate,
   onClearEstimate,
   saving,
@@ -465,6 +476,9 @@ export function FeatureInspector({
   const geomType = measurement.geometry?.type;
   const canEditGeometry =
     !demo && !!onEditGeometry && (geomType === "Polygon" || geomType === "LineString");
+  // v2: this measurement's geometry is being edited right now → the action row
+  // becomes "Done editing" (commit) instead of "Edit shape" (start).
+  const isEditingThis = !!editingGeometryId && editingGeometryId === measurement.id;
 
   const unitSystem = unitSystemOf(measurement.params);
   const material = (measurement.params?.material ?? null) as {
@@ -827,11 +841,19 @@ export function FeatureInspector({
                     )}
                   </div>
                 )}
-                {canEditGeometry && (
+                {canEditGeometry && !isEditingThis && (
                   <ActionRow
                     icon={<Spline size={15} />}
                     label="Edit shape"
                     onClick={() => onEditGeometry!()}
+                  />
+                )}
+                {isEditingThis && onCommitGeometry && (
+                  <ActionRow
+                    accent
+                    icon={<Check size={15} />}
+                    label="Done editing"
+                    onClick={() => onCommitGeometry()}
                   />
                 )}
                 {canCompute && onCompute && (
