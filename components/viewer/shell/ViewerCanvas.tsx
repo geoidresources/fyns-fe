@@ -21,31 +21,20 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Viewer } from "resium";
 import {
   BoundingSphere,
-  CallbackPositionProperty,
-  CallbackProperty,
-  Cartesian2,
   Cartesian3,
   Cartographic,
   Cesium3DTileStyle,
   Cesium3DTileset,
   CesiumTerrainProvider,
-  ClassificationType,
   ClippingPolygonCollection,
   Color,
-  ConstantPositionProperty,
   EllipsoidTerrainProvider,
   Entity,
   GeoJsonDataSource,
   HeadingPitchRange,
-  HeightReference,
-  HorizontalOrigin,
   Math as CesiumMath,
-  PolygonHierarchy,
-  PolylineDashMaterialProperty,
   Rectangle,
   ScreenSpaceEventHandler,
-  ScreenSpaceEventType,
-  VerticalOrigin,
   type TerrainProvider,
   createWorldTerrainAsync,
 } from "cesium";
@@ -53,7 +42,6 @@ import { toast } from "sonner";
 
 import {
   computeMeasurement,
-  createMeasurement,
   deleteMeasurement,
   estimateMeasurement,
   getManifest,
@@ -62,19 +50,11 @@ import {
 } from "@/lib/api/assetSvc";
 import { ApiError } from "@/lib/api/client";
 import {
-  adjacentSegmentIndex,
-  computeGrade,
-  computeDistanceMeters,
-  findNearestSegmentIndex,
   geometryPositions,
   geometryToRectangle,
-  nearestVertexIndex,
-  pickScenePosition,
 } from "@/lib/viewer/measure";
-import { eraseSegment } from "@/lib/viewer/eraser";
 import { useActorRef } from "@xstate/react";
 import { INTERACTION_V2 } from "@/lib/viewer/interaction/flag";
-import { templateById, type TemplateId } from "@/lib/viewer/interaction/templates";
 import { hasSelfIntersection } from "@/lib/viewer/interaction/validity";
 import { attachStoreBridge } from "@/lib/viewer/interaction/bridge";
 import { machineWithCommit } from "@/lib/viewer/commitMeasurement";
@@ -87,20 +67,13 @@ import {
 import { InteractionProvider } from "@/components/viewer/shell/interactionContext";
 import { MeasurementContextMenu } from "@/components/viewer/shell/MeasurementContextMenu";
 import {
-  CalcParamsError,
-  LEAN_RENDER,
-  coerceMethodForKind,
-  defaultKindFor,
   isVolumeKind,
-  kindForCalcType,
   metricsOf,
   resultForKind,
-  surfaceRefsForMethod,
 } from "@/lib/viewer/calc";
 import { buildPointCloudStyle } from "@/lib/viewer/pointcloud";
 import { USE_WORLD_TERRAIN } from "@/lib/viewer/cesiumIon";
 import {
-  ACCENT,
   DEFAULT_CENTER,
   bboxToRectangle,
   isThinSurfaceMesh,
@@ -119,7 +92,6 @@ import {
   type ViewerActions,
 } from "@/components/viewer/shell/viewerActions";
 import type { LayerControl, DesignControl } from "@/components/viewer/LayerPanel";
-import type { DrawMode, DrawOptions } from "@/components/viewer/MeasurementPanel";
 import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 
 import { ModuleRail } from "@/components/viewer/shell/ModuleRail";
@@ -144,15 +116,6 @@ import { useLayerLifecycle } from "@/components/viewer/shell/hooks/useLayerLifec
 // already close to the ground — mirrors scroll-wheel zoom.
 const ZOOM_STEP_FACTOR = 0.4;
 
-// Screen-space radius (px) around the FIRST draft vertex that counts as
-// "clicked the origin": closing the ring. With the Line tool this converts the
-// open chain into a polygon; with the Polygon tool it jumps to calc selection.
-const ORIGIN_SNAP_PX = 15;
-
-// Screen-space radius (px) within which a placed/hovered vertex snaps onto an
-// EXISTING vertex (this draft's own earlier verts, or any other measurement's).
-// Slightly tighter than the origin radius so closing-the-ring always wins.
-const VERTEX_SNAP_PX = 13;
 
 export function ViewerCanvas() {
   const { viewerRef, viewerReady, handleViewerRef, baseImageryRef } = useCesiumViewer();
@@ -252,7 +215,6 @@ export function ViewerCanvas() {
   const undoHistoryRef = useRef<{ positions: Cartesian3[]; open: boolean }[]>([]);
   const redoHistoryRef = useRef<{ positions: Cartesian3[]; open: boolean }[]>([]);
   const hoverPositionRef = useRef<Cartesian3 | null>(null);
-  const hoverThrottleRef = useRef(0);
   /** True after right-click locked the draft for calc selection (no vertex placement). */
   const awaitingCalcRef = useRef(false);
   /** Restores vertex-placement clicks when leaving eraser mode mid-draw. */
@@ -276,7 +238,6 @@ export function ViewerCanvas() {
   /** Halo entity over the eraser's anchor vertex while one is picked. */
   const eraseAnchorHaloRef = useRef<Entity | null>(null);
   /** Arms the point/identify tool (highlight a vertex/edge, click to select). */
-  const bindPointSelectClickRef = useRef<(() => void) | null>(null);
   /** Transient hover highlight under the point tool's cursor (vertex or edge). */
   const pointHoverRef = useRef<Entity | null>(null);
   /** Persistent highlight over the point tool's SELECTED vertex/edge. */
@@ -297,10 +258,8 @@ export function ViewerCanvas() {
   /** Self-handle so in-session handlers can RESTART the draw session (the
    * Line→polygon close-out) without a recursive self-reference inside the
    * startDraw useCallback; assigned in an effect below. */
-  const startDrawSelfRef = useRef<((mode: DrawMode, opts?: DrawOptions) => void) | null>(null);
   const previousToolKeyRef = useRef<string | null>(null);
   /** Seed vertices into the next startDraw (edit existing / revive session). */
-  const seedPointsRef = useRef<Cartesian3[] | null>(null);
   /** When set, finish() PATCHes this measurement instead of creating a new one. */
   const editingMeasurementIdRef = useRef<string | null>(null);
   const probeEntityRef = useRef<Entity | null>(null);
@@ -906,43 +865,6 @@ export function ViewerCanvas() {
     store.getState().setDraft([], null);
   }, [store, viewerRef]);
 
-  const clearEraseHighlight = useCallback(() => {
-    const viewer = viewerRef.current;
-    if (viewer && !viewer.isDestroyed() && eraseHighlightRef.current) {
-      viewer.entities.remove(eraseHighlightRef.current);
-    }
-    eraseHighlightRef.current = null;
-  }, [viewerRef]);
-
-  /** Drop the vertex-to-vertex eraser's anchor (first-picked vertex) + its halo. */
-  const clearEraseAnchor = useCallback(() => {
-    const viewer = viewerRef.current;
-    if (viewer && !viewer.isDestroyed() && eraseAnchorHaloRef.current) {
-      viewer.entities.remove(eraseAnchorHaloRef.current);
-    }
-    eraseAnchorHaloRef.current = null;
-    eraseVertexARef.current = null;
-  }, [viewerRef]);
-
-  /** Remove the point tool's transient hover highlight. */
-  const clearPointHover = useCallback(() => {
-    const viewer = viewerRef.current;
-    if (viewer && !viewer.isDestroyed() && pointHoverRef.current) {
-      viewer.entities.remove(pointHoverRef.current);
-    }
-    pointHoverRef.current = null;
-  }, [viewerRef]);
-
-  /** Drop the point tool's persistent selection highlight + selection data. */
-  const clearPointSelection = useCallback(() => {
-    const viewer = viewerRef.current;
-    if (viewer && !viewer.isDestroyed() && pointSelectHighlightRef.current) {
-      viewer.entities.remove(pointSelectHighlightRef.current);
-    }
-    pointSelectHighlightRef.current = null;
-    pointSelectionRef.current = null;
-  }, [viewerRef]);
-
   // Lift height-0 geometry positions (2D measurements → alt 0) onto the terrain
   // surface, so seeded edit verts + snap targets sit where the CLAMPED outline
   // and dots render. Without this the raw positions project (screen-space
@@ -979,93 +901,6 @@ export function ViewerCanvas() {
     selectionSeedRef
   );
 
-  // Per-vertex accent dot for EVERY draw mode (each placed vertex stays
-  // highlighted), plus a segment length label when `previous` is passed
-  // (polyline modes only — polygon edges skip labels).
-  const addDraftDecorations = useCallback(
-    (position: Cartesian3, previous?: Cartesian3) => {
-      const viewer = viewerRef.current;
-      if (!viewer || viewer.isDestroyed()) return;
-
-      draftVertexEntitiesRef.current.push(
-        viewer.entities.add({
-          position,
-          point: {
-            pixelSize: 8,
-            color: ACCENT,
-            outlineColor: Color.WHITE,
-            outlineWidth: 2,
-            // Clamp to terrain like the saved-measurement dots — seeded edit
-            // verts arrive at height 0 (2D geometry), which over elevated
-            // terrain would project OFF the clamped outline (dots drift inward).
-            heightReference: HeightReference.CLAMP_TO_GROUND,
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          },
-        })
-      );
-      if (previous) {
-        draftSegmentLabelEntitiesRef.current.push(
-          viewer.entities.add({
-            position: Cartesian3.midpoint(previous, position, new Cartesian3()),
-            label: {
-              text: `${computeDistanceMeters([previous, position]).toFixed(2)} m`,
-              font: "14px sans-serif",
-              fillColor: Color.WHITE,
-              showBackground: true,
-              backgroundColor: Color.fromCssColorString("#18181B").withAlpha(0.9),
-              backgroundPadding: new Cartesian2(8, 6),
-              pixelOffset: new Cartesian2(0, -16),
-              verticalOrigin: VerticalOrigin.BOTTOM,
-              heightReference: HeightReference.CLAMP_TO_GROUND,
-              disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            },
-          })
-        );
-      }
-    },
-    [viewerRef]
-  );
-
-  const rebuildDraftDecorations = useCallback(() => {
-    const viewer = viewerRef.current;
-    if (!viewer || viewer.isDestroyed()) return;
-    for (const entity of draftVertexEntitiesRef.current) viewer.entities.remove(entity);
-    for (const entity of draftSegmentLabelEntitiesRef.current) viewer.entities.remove(entity);
-    draftVertexEntitiesRef.current = [];
-    draftSegmentLabelEntitiesRef.current = [];
-    const pts = draftPositionsRef.current;
-    for (let i = 0; i < pts.length; i++) {
-      addDraftDecorations(pts[i], i > 0 ? pts[i - 1] : undefined);
-    }
-  }, [viewerRef, addDraftDecorations]);
-
-  // Snapshot the CURRENT draft geometry onto the undo stack, clearing redo. Call
-  // this BEFORE any mutation (place / drag-start / erase) so undo can restore
-  // the pre-mutation state. Cartesian3s are replaced (never mutated in place),
-  // so a shallow array copy is a safe snapshot.
-  const snapshotForUndo = useCallback(() => {
-    undoHistoryRef.current.push({
-      positions: [...draftPositionsRef.current],
-      open: polygonOpenRef.current,
-    });
-    redoHistoryRef.current = [];
-  }, []);
-
-  // Restore a snapshot: swap in its geometry + ring state, rebuild the dots/
-  // labels from it, and mirror to the store. Uniform across every op type.
-  const applyHistorySnapshot = useCallback(
-    (entry: { positions: Cartesian3[]; open: boolean }) => {
-      draftPositionsRef.current = entry.positions;
-      polygonOpenRef.current = entry.open;
-      rebuildDraftDecorations();
-      store.getState().setDraft(entry.positions, hoverPositionRef.current);
-      viewerRef.current?.scene.requestRender();
-    },
-    [store, viewerRef, rebuildDraftDecorations]
-  );
-
-  // Clears the probe marker + probe readout. The `probing` flag itself is reset
-  // by the store `startDraw`/`cancelDraw` actions that every caller invokes.
   const stopProbe = useCallback(() => {
     store.getState().setProbePoint(null);
     const viewer = viewerRef.current;
@@ -1175,1002 +1010,26 @@ export function ViewerCanvas() {
     setCommitDeps({ surveyId, store, refreshMeasurements, triggerCompute });
   });
 
-  const startDraw = useCallback(
-    (mode: DrawMode, opts?: DrawOptions) => {
-      // v2: toolbar/template draws route into the machine. Entry points that
-      // carry seeds or extra opts (edit/redraw/folder draws) stay legacy and
-      // are gated at their own call sites until P2.
-      if (INTERACTION_V2) {
-        const templateId = opts?.toolKey?.startsWith("palette:")
-          ? (opts.toolKey.slice("palette:".length) as TemplateId)
-          : null;
-        const template = templateId ? templateById(templateId) : undefined;
-        if (template?.primitive && !opts?.kind && !opts?.folder && !seedPointsRef.current) {
-          interactionActor.send({ type: "TEMPLATE_PICKED", templateId: template.id });
-          return;
-        }
-        toast.info("This draw entry point joins interaction v2 in P2 — unset the flag to use it");
-        return;
-      }
-      const viewer = viewerRef.current;
-      if (!viewer || viewer.isDestroyed()) return;
-      cleanupDraw();
-      stopProbe();
-      const s = store.getState();
-      s.startDraw(mode, opts);
-      s.clearSelection();
-      const seeded = seedPointsRef.current;
-      seedPointsRef.current = null;
-      draftPositionsRef.current = seeded?.length ? [...seeded] : [];
-      if (draftPositionsRef.current.length > 0) {
-        s.setDraft(draftPositionsRef.current, null);
-      }
 
-      // Snap pool: every persisted measurement's vertices — a placed/hovered
-      // vertex magnetizes onto the nearest ("Any nearby vertex"). The live
-      // draft's own verts are added in computeSnap; the shape being edited is
-      // included too, so a redraw can retrace its old corners. Lifted to the
-      // terrain surface so they project where the CLAMPED rendered dots appear.
-      snapTargetsRef.current = [];
-      for (const m of s.measurements) {
-        if (!m.geometry) continue;
-        try {
-          for (const p of geometryPositions(m.geometry)) snapTargetsRef.current.push(p);
-        } catch {
-          // Skip a malformed geometry rather than abort the whole draw.
-        }
-      }
-      snapTargetsRef.current = liftToTerrain(snapTargetsRef.current);
-
-      draftEntityRef.current = viewer.entities.add({
-        // Anchors the live segment label (below) at the cursor for EVERY mode —
-        // polyline/polygon graphics ignore entity.position, so this is safe.
-        position: new CallbackPositionProperty(() => {
-          const pts = draftPositionsRef.current;
-          return hoverPositionRef.current ?? pts[pts.length - 1];
-        }, false),
-        polyline: {
-          positions: new CallbackProperty(() => {
-            const pts = draftPositionsRef.current;
-            const hover = hoverPositionRef.current;
-            const all = hover ? [...pts, hover] : pts;
-            if (all.length < 2) return [];
-            // An eraser-opened ring previews UN-closed — the erased edge is
-            // genuinely gone until finish re-closes the ring.
-            return mode === "polygon" && !polygonOpenRef.current ? [...all, all[0]] : all;
-          }, false),
-          width: 3,
-          material: ACCENT,
-          clampToGround: true,
-        },
-        polygon:
-          mode === "polygon"
-            ? {
-                hierarchy: new CallbackProperty(() => {
-                  const pts = draftPositionsRef.current;
-                  const hover = hoverPositionRef.current;
-                  return new PolygonHierarchy(hover ? [...pts, hover] : pts);
-                }, false),
-                // Fill implies closure — hide it while the ring is open.
-                show: new CallbackProperty(() => !polygonOpenRef.current, false),
-                material: ACCENT.withAlpha(0.2),
-                classificationType: ClassificationType.BOTH,
-              }
-            : undefined,
-        // Live segment readout for EVERY draw mode: distance from the last
-        // placed vertex to the cursor (plus rise for slope tools).
-        label: {
-                show: new CallbackProperty(() => {
-                  const pts = draftPositionsRef.current;
-                  const hover = hoverPositionRef.current;
-                  return !!hover && pts.length > 0 && computeDistanceMeters([pts[pts.length - 1], hover]) > 0.01;
-                }, false),
-                text: new CallbackProperty(() => {
-                  const pts = draftPositionsRef.current;
-                  const hover = hoverPositionRef.current;
-                  if (!hover || pts.length === 0) return "";
-                  const segment = [pts[pts.length - 1], hover];
-                  const distance = computeDistanceMeters(segment);
-                  const grade = opts?.slope ? computeGrade(segment) : null;
-                  if (!grade) return `${distance.toFixed(2)} m`;
-                  const arrow = grade.riseMeters >= 0 ? "↑" : "↓";
-                  return `${distance.toFixed(2)} m\n${arrow} ${Math.abs(grade.riseMeters).toFixed(2)} m`;
-                }, false),
-                font: "16px sans-serif",
-                fillColor: Color.WHITE,
-                showBackground: true,
-                backgroundColor: Color.fromCssColorString("#18181B").withAlpha(0.9),
-                backgroundPadding: new Cartesian2(10, 7),
-                pixelOffset: new Cartesian2(18, 16),
-                horizontalOrigin: HorizontalOrigin.LEFT,
-                verticalOrigin: VerticalOrigin.TOP,
-                disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        },
-      });
-      if (draftPositionsRef.current.length > 0) {
-        rebuildDraftDecorations();
-      }
-
-      // Origin snap halo — lights up when the cursor is close enough to the
-      // first vertex to close the ring (Line→polygon close-out / polygon done).
-      originHaloRef.current = viewer.entities.add({
-        position: new CallbackPositionProperty(
-          () => draftPositionsRef.current[0] ?? Cartesian3.ZERO,
-          false
-        ),
-        point: {
-          pixelSize: 18,
-          color: ACCENT.withAlpha(0.25),
-          outlineColor: Color.WHITE,
-          outlineWidth: 2,
-          heightReference: HeightReference.CLAMP_TO_GROUND,
-          disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          show: new CallbackProperty(() => nearOriginRef.current, false),
-        },
-      });
-
-      // Vertex snap halo — a cyan ring over the existing vertex the cursor is
-      // snapping onto (any measurement's vertex, or this draft's own earlier
-      // ones). Distinct from the origin halo so "snap to a vertex" reads apart
-      // from "close the ring".
-      snapHaloRef.current = viewer.entities.add({
-        position: new CallbackPositionProperty(
-          () => snapPreviewRef.current ?? Cartesian3.ZERO,
-          false
-        ),
-        point: {
-          pixelSize: 16,
-          color: Color.CYAN.withAlpha(0.22),
-          outlineColor: Color.CYAN,
-          outlineWidth: 2,
-          heightReference: HeightReference.CLAMP_TO_GROUND,
-          disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          show: new CallbackProperty(() => snapPreviewRef.current != null, false),
-        },
-      });
-
-      // Where does `screenPos` snap? Origin (close the ring, needs ≥3 pts) wins
-      // over a plain vertex snap; a vertex snap is the nearest EXISTING vertex —
-      // any other measurement's (snapshot in snapTargetsRef) or this draft's own
-      // earlier verts (the last-placed one is excluded to avoid snapping in
-      // place). Returns null when nothing is close enough.
-      const computeSnap = (
-        screenPos: Cartesian2
-      ): { pos: Cartesian3; kind: "origin" | "vertex" } | null => {
-        const pts = draftPositionsRef.current;
-        if (pts.length >= 3) {
-          const p0 = viewer.scene.cartesianToCanvasCoordinates(pts[0]);
-          if (p0 && Math.hypot(screenPos.x - p0.x, screenPos.y - p0.y) <= ORIGIN_SNAP_PX) {
-            return { pos: pts[0], kind: "origin" };
-          }
-        }
-        let best: Cartesian3 | null = null;
-        let bestD = VERTEX_SNAP_PX;
-        const consider = (c: Cartesian3) => {
-          const sc = viewer.scene.cartesianToCanvasCoordinates(c);
-          if (!sc) return;
-          const d = Math.hypot(screenPos.x - sc.x, screenPos.y - sc.y);
-          if (d <= bestD) {
-            bestD = d;
-            best = c;
-          }
-        };
-        for (const c of snapTargetsRef.current) consider(c);
-        for (let i = 0; i < pts.length - 1; i++) consider(pts[i]);
-        return best ? { pos: best, kind: "vertex" } : null;
-      };
-
-      // Which draft vertex is under `screenPos`? Prefer the GPU pick: it hits the
-      // dot where it VISUALLY renders (clamped to terrain), so it's immune to
-      // any drift between a vertex's stored height and the height its dot clamps
-      // to — the reason a projection-only test (nearestVertexIndex) misses the
-      // visible dots on an oblique view over an elevated pile. drillPick sees
-      // through overlapping halos/highlights; fall back to projection when the
-      // pick buffer is unavailable (e.g. headless) or the heights already agree.
-      const pickVertexIndex = (screenPos: Cartesian2): number | null => {
-        const picks = viewer.scene.drillPick(screenPos, 6);
-        for (const p of picks) {
-          const idx = p?.id ? draftVertexEntitiesRef.current.indexOf(p.id) : -1;
-          if (idx >= 0) return idx;
-        }
-        return nearestVertexIndex(viewer, draftPositionsRef.current, screenPos, {
-          maxPixelDistance: 16,
-        });
-      };
-
-      const finish = () => {
-        // Kind resolves at FINISH time (not startDraw) so the calc type picked
-        // in the right panel while drawing wins: explicit template kind →
-        // panel calcType (validated against this geometry) → the mode's default
-        // calc — the SAME fallback the panel displays as selected, so the saved
-        // kind always matches what the user saw.
-        const kind =
-          opts?.kind ??
-          kindForCalcType(store.getState().view.calcType, mode) ??
-          defaultKindFor(mode);
-        const pts = draftPositionsRef.current;
-        const minPoints = mode === "polygon" ? 3 : 2;
-        if (pts.length < minPoints) {
-          toast.error(`Need at least ${minPoints} points for a ${mode}`);
-          return;
-        }
-
-        // Calc params from the panel's config (the same source it edits). An
-        // invalid config (e.g. custom RL without a value) keeps the DRAW alive
-        // — the user fixes the panel and finishes again; nothing is lost.
-        const editIdEarly = editingMeasurementIdRef.current;
-        const existing = editIdEarly
-          ? store.getState().measurements.find((m) => m.id === editIdEarly)
-          : null;
-        const resolvedKind = existing?.kind ?? kind;
-        const params: Record<string, unknown> = { ...(opts?.params ?? {}) };
-        if (opts?.slope) params.slope = true;
-        if (isVolumeKind(resolvedKind)) {
-          const view = store.getState().view;
-          // Coerced onto the kind's method list — what persists always equals
-          // what the panel displayed (a stale cut/fill pick never rides along).
-          const cfg = coerceMethodForKind(
-            {
-              method: view.volumeMethod,
-              refMode: view.refMode,
-              refElevation: view.refElevation,
-              baseDesignId: view.baseDesignId,
-            },
-            resolvedKind
-          );
-          params.volume_method = cfg.method;
-          params.render = LEAN_RENDER; // number-only compute; tiles are a later, explicit ask
-          try {
-            const refs = surfaceRefsForMethod(cfg);
-            params.from = refs.from;
-            params.to = refs.to;
-          } catch (err) {
-            if (err instanceof CalcParamsError) {
-              toast.warning(err.message);
-              return;
-            }
-            throw err;
-          }
-        }
-
-        const coords: [number, number][] = pts.map((p) => {
-          const c = Cartographic.fromCartesian(p);
-          return [
-            Number(CesiumMath.toDegrees(c.longitude).toFixed(8)),
-            Number(CesiumMath.toDegrees(c.latitude).toFixed(8)),
-          ];
-        });
-        if (coords.length > minPoints) {
-          const [lastLng, lastLat] = coords[coords.length - 1];
-          const [prevLng, prevLat] = coords[coords.length - 2];
-          if (Math.abs(lastLng - prevLng) < 1e-7 && Math.abs(lastLat - prevLat) < 1e-7) {
-            coords.pop();
-          }
-        }
-        if (drawHandlerRef.current) {
-          drawHandlerRef.current.destroy();
-          drawHandlerRef.current = null;
-        }
-        hoverPositionRef.current = null;
-
-        const geometry =
-          mode === "polygon"
-            ? { type: "Polygon", coordinates: [[...coords, coords[0]]] }
-            : { type: "LineString", coordinates: coords };
-
-        // DRAFT-FIRST (2026-07-16): persist immediately as a draft row — no
-        // naming gate — so compute can run on it right away through the normal
-        // /compute call; the user promotes it (Save) or discards it from the
-        // inspector. The local draft entity stays visible until the
-        // measurements datasource re-renders the created row.
-        // Editing an existing measurement (eraser on a selected stockpile, etc.)
-        // PATCHes geometry in place instead of creating a new row.
-        const editId = editingMeasurementIdRef.current;
-        editingMeasurementIdRef.current = null;
-        store.getState().cancelDraw(); // null out drawMode/activeDrawOpts/activeToolKey + reset draft mirror
-        void (async () => {
-          try {
-            if (editId) {
-              await updateMeasurement(surveyId, editId, { geometry });
-              const s3 = store.getState();
-              s3.setMeasurementVisible(editId, true);
-              s3.selectMeasurement(editId, { fly: false });
-              cleanupDraw();
-              await refreshMeasurements();
-              toast.success("Geometry updated");
-              if (isVolumeKind(resolvedKind)) await triggerCompute(editId);
-              return;
-            }
-            const created = await createMeasurement(surveyId, {
-              kind: resolvedKind,
-              name: `Untitled ${resolvedKind.replace(/_/g, " ")}`,
-              folder: opts?.folder,
-              geometry,
-              params,
-              draft: true,
-            });
-            const s3 = store.getState();
-            s3.setMeasurements([created, ...s3.measurements]); // optimistic — list is newest-first
-            s3.setMeasurementVisible(created.id, true); // show the just-drawn shape
-            s3.selectMeasurement(created.id, { fly: false }); // opens the inspector on the draft
-            cleanupDraw(); // drop the local draft entity — the datasource takes over
-            await refreshMeasurements();
-            if (isVolumeKind(resolvedKind)) await triggerCompute(created.id);
-          } catch (err) {
-            if (err instanceof Error) toast.error(`Couldn't create the draft: ${err.message}`);
-            // The drawn shape stays visible (inert); ESC clears it.
-          }
-        })();
-      };
-
-      const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
-      awaitingCalcRef.current = false;
-      previousToolKeyRef.current = opts?.toolKey ?? null;
-      polygonOpenRef.current = false; // fresh session: rings preview closed
-      clearEraseHighlight();
-
-      const bindDrawClick = () => {
-        handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
-          const snap = computeSnap(event.position);
-          // Clicking the ORIGIN vertex closes the ring: a polygon draw jumps
-          // straight to calc selection (same as right-click); a LINE draw
-          // becomes a polygon — the Line tool can outline polygons too, and
-          // returning to the origin is what closes + re-types the draft.
-          if (snap?.kind === "origin") {
-            nearOriginRef.current = false;
-            snapPreviewRef.current = null;
-            if (mode === "polygon") {
-              releaseForCalc();
-              return;
-            }
-            seedPointsRef.current = [...draftPositionsRef.current];
-            startDrawSelfRef.current?.("polygon", { label: "Polygon", toolKey: "palette:polygon" });
-            // Mirror releaseForCalc on the NEW session: the outline is done —
-            // lock vertex placement, arm double-click finish, open the calc.
-            awaitingCalcRef.current = true;
-            const h = drawHandlerRef.current;
-            h?.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
-            h?.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
-            bindFinishDblClickRef.current?.();
-            store.setState({ activeToolKey: null });
-            store.getState().openDetail("measure");
-            toast.success("Shape closed — now a polygon. Choose a calculation, then double-click to run.");
-            return;
-          }
-          // Snap onto an existing vertex when close, else drop on the globe.
-          const pos = snap?.pos ?? pickScenePosition(viewer, event.position);
-          if (pos) {
-            const previous = draftPositionsRef.current[draftPositionsRef.current.length - 1];
-            if (previous && Cartesian3.distance(previous, pos) < 0.01) return;
-
-            snapshotForUndo(); // record the pre-placement geometry
-
-            // Highlight EVERY placed vertex + label the segment it closes.
-            addDraftDecorations(pos, previous);
-
-            draftPositionsRef.current = [...draftPositionsRef.current, pos];
-            hoverPositionRef.current = null;
-            snapPreviewRef.current = null;
-            store.getState().setDraft(draftPositionsRef.current, null);
-            viewer.scene.requestRender();
-          }
-        }, ScreenSpaceEventType.LEFT_CLICK);
-        handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
-          // Magnetize the hover onto the snap target (origin or any nearby
-          // vertex) so the preview visibly locks on and the halo invites the
-          // click; fall back to the globe pick when nothing is close.
-          const snap = computeSnap(movement.endPosition);
-          nearOriginRef.current = snap?.kind === "origin";
-          snapPreviewRef.current = snap?.kind === "vertex" ? snap.pos : null;
-          const hover = snap?.pos ?? pickScenePosition(viewer, movement.endPosition);
-          hoverPositionRef.current = hover;
-          const now = performance.now();
-          if (now - hoverThrottleRef.current > 100) {
-            hoverThrottleRef.current = now;
-            store.getState().setDraft(draftPositionsRef.current, hover);
-          }
-          viewer.scene.requestRender();
-        }, ScreenSpaceEventType.MOUSE_MOVE);
-      };
-
-      // Vertex-to-vertex eraser (user's ask): click a vertex, then an ADJACENT
-      // vertex, to delete the single edge between them — a DOTTED preview line
-      // shows which edge will go. Picking-by-vertex instead of by-segment makes
-      // "which edge" unambiguous on a dense ring.
-      const bindEraseClick = () => {
-        handler.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
-        handler.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
-        clearEraseAnchor();
-        hoverPositionRef.current = null;
-        store.getState().setDraft(draftPositionsRef.current, null);
-
-        // Commit deletion of the edge with segment index `seg`, then rebuild.
-        // (Lone line's only edge deletes the line/measurement; a polygon edge
-        // reopens the ring keeping every vertex — same as the old eraser.)
-        const deleteEdge = (seg: number) => {
-          const pts = draftPositionsRef.current;
-          // Once a prior erase OPENED the ring, the draft is a topologically OPEN
-          // chain — erasing again as a closed ring would just rotate the single
-          // gap (resurrecting the first-deleted edge). So treat an opened ring as
-          // open: a second erase SPLITS the chain (keeps the longer part).
-          const closed = mode === "polygon" && !polygonOpenRef.current;
-          const next = eraseSegment(pts, seg, closed);
-          if (next === null) return;
-          snapshotForUndo(); // record the pre-erase ring
-          clearEraseHighlight();
-          clearEraseAnchor();
-
-          if (next.length === 0) {
-            const editId = editingMeasurementIdRef.current;
-            editingMeasurementIdRef.current = null;
-            store.getState().setEditingMeasurementId(null);
-            cleanupDraw();
-            const s = store.getState();
-            s.cancelDraw();
-            s.closeDetail();
-            s.clearSelection();
-            if (editId) {
-              void (async () => {
-                try {
-                  await deleteMeasurement(surveyId, editId);
-                  toast.success("Line erased");
-                } catch (err) {
-                  if (err instanceof Error) toast.error(err.message);
-                } finally {
-                  void refreshMeasurements();
-                }
-              })();
-            } else {
-              toast.success("Line erased");
-            }
-            return;
-          }
-
-          if (mode === "polygon") {
-            // Ring reopened at the erased edge (all vertices kept): preview
-            // stops auto-closing, new vertices append INTO the gap, finish
-            // re-closes across whatever remains.
-            polygonOpenRef.current = true;
-          }
-          draftPositionsRef.current = next;
-          // Rebuild dots + labels for BOTH modes — a polygon erase rotates the
-          // ring, so the consecutive-pair set (and thus the labels) changes.
-          rebuildDraftDecorations();
-          store.getState().setDraft(next, null);
-          viewer.scene.requestRender();
-          const minPoints = mode === "polygon" ? 3 : 2;
-          if (next.length < minPoints) {
-            toast.info("Edge erased — add more vertices before calculating");
-          } else if (mode === "polygon") {
-            toast.info("Edge erased — add vertices in the gap, or double-click to close and save");
-          }
-        };
-
-        handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
-          clearEraseHighlight();
-          const a = eraseVertexARef.current;
-          // No anchor yet → nothing to preview; skip the pick (keeps idle moves
-          // cheap — the pick only matters once you've picked the first vertex).
-          if (a === null) {
-            viewer.scene.requestRender();
-            return;
-          }
-          const pts = draftPositionsRef.current;
-          const hi = pickVertexIndex(movement.endPosition);
-          // With an anchor set, DOTTED-preview the edge to an adjacent hovered
-          // vertex ("this edge will be deleted").
-          if (hi !== null && hi !== a) {
-            const seg = adjacentSegmentIndex(a, hi, pts.length, mode === "polygon" && !polygonOpenRef.current);
-            if (seg !== null) {
-              eraseHighlightRef.current = viewer.entities.add({
-                polyline: {
-                  positions: [pts[a], pts[hi]],
-                  width: 4,
-                  material: new PolylineDashMaterialProperty({ color: Color.WHITE, dashLength: 12 }),
-                  clampToGround: true,
-                },
-              });
-            }
-          }
-          viewer.scene.requestRender();
-        }, ScreenSpaceEventType.MOUSE_MOVE);
-
-        handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
-          const pts = draftPositionsRef.current;
-          const hi = pickVertexIndex(event.position);
-          if (hi === null) {
-            clearEraseAnchor(); // clicked empty space — drop the anchor
-            clearEraseHighlight();
-            toast.info("Click a vertex, then an adjacent one, to erase the edge between them");
-            viewer.scene.requestRender();
-            return;
-          }
-          const a = eraseVertexARef.current;
-          if (a === null) {
-            // First pick: set the anchor + halo, invite the second click.
-            eraseVertexARef.current = hi;
-            eraseAnchorHaloRef.current = viewer.entities.add({
-              position: new ConstantPositionProperty(pts[hi]),
-              point: {
-                pixelSize: 14,
-                color: Color.WHITE.withAlpha(0.2),
-                outlineColor: Color.WHITE,
-                outlineWidth: 2,
-                heightReference: HeightReference.CLAMP_TO_GROUND,
-                disableDepthTestDistance: Number.POSITIVE_INFINITY,
-              },
-            });
-            viewer.scene.requestRender();
-            toast.info("Now click an adjacent vertex to delete the edge between them");
-            return;
-          }
-          if (hi === a) {
-            clearEraseAnchor(); // re-clicked the anchor: deselect
-            clearEraseHighlight();
-            viewer.scene.requestRender();
-            return;
-          }
-          const seg = adjacentSegmentIndex(a, hi, pts.length, mode === "polygon" && !polygonOpenRef.current);
-          if (seg === null) {
-            toast.info("Pick a vertex ADJACENT to the first — only a single edge is erased");
-            return;
-          }
-          deleteEdge(seg);
-        }, ScreenSpaceEventType.LEFT_CLICK);
-      };
-
-      // Vertex-drag editing (geometry editor): grab a vertex handle and drag it
-      // to reshape. LEFT_DOWN on a handle starts the drag (camera locked so the
-      // scene doesn't spin under the cursor); MOUSE_MOVE follows; LEFT_UP drops
-      // it; a full rebuild on drop re-anchors the segment labels. The shape's
-      // TYPE is preserved (mode drives serialization) — a stockpile stays a
-      // polygon. Double-click commits the edit (finish → PATCH + recompute).
-      const bindVertexEditClick = () => {
-        handler.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
-        handler.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
-        hoverPositionRef.current = null;
-        store.getState().setDraft(draftPositionsRef.current, null);
-
-        handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
-          const picked = viewer.scene.pick(event.position);
-          const idx = picked?.id ? draftVertexEntitiesRef.current.indexOf(picked.id) : -1;
-          if (idx < 0) return;
-          snapshotForUndo(); // record the pre-drag geometry (undo reverts the move)
-          draggingVertexRef.current = idx;
-          viewer.scene.screenSpaceCameraController.enableInputs = false;
-        }, ScreenSpaceEventType.LEFT_DOWN);
-
-        handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
-          const idx = draggingVertexRef.current;
-          if (idx === null) return;
-          const pos = pickScenePosition(viewer, movement.endPosition);
-          if (!pos) return;
-          const next = [...draftPositionsRef.current];
-          next[idx] = pos;
-          draftPositionsRef.current = next;
-          // Cheap during-drag update: move just this handle; the outline is a
-          // CallbackProperty so it follows for free. Labels re-anchor on drop.
-          const dot = draftVertexEntitiesRef.current[idx];
-          if (dot) dot.position = new ConstantPositionProperty(pos);
-          store.getState().setDraft(next, null); // live area/length readout
-          viewer.scene.requestRender();
-        }, ScreenSpaceEventType.MOUSE_MOVE);
-
-        const endDrag = () => {
-          if (draggingVertexRef.current === null) return;
-          draggingVertexRef.current = null;
-          viewer.scene.screenSpaceCameraController.enableInputs = true;
-          rebuildDraftDecorations(); // fix segment labels around the moved vertex
-          viewer.scene.requestRender();
-        };
-        handler.setInputAction(endDrag, ScreenSpaceEventType.LEFT_UP);
-      };
-
-      // Point / identify tool: hover highlights the nearest vertex (cyan halo)
-      // or edge (cyan line) under the cursor; a click SELECTS it (persistent
-      // highlight + a readout of what it is). "Point to a vertex, a line,
-      // whatever needs to be pointed at" — a pure identify+select, so drag/erase
-      // can then act on what you found.
-      const bindPointSelectClick = () => {
-        handler.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
-        handler.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
-        // Clear any other pick-tool's transient marks when taking over.
-        clearEraseHighlight();
-        clearEraseAnchor();
-        hoverPositionRef.current = null;
-        store.getState().setDraft(draftPositionsRef.current, null);
-
-        // Nearest vertex wins over nearest edge (a vertex sits ON two edges).
-        // Vertex ID uses the same GPU pick as the eraser/drag, so it hits the
-        // dots where they render (terrain-height-safe).
-        const identify = (
-          screenPos: Cartesian2
-        ): { kind: "vertex" | "edge"; index: number } | null => {
-          const pts = draftPositionsRef.current;
-          const vi = pickVertexIndex(screenPos);
-          if (vi !== null) return { kind: "vertex", index: vi };
-          const si = findNearestSegmentIndex(viewer, pts, screenPos, {
-            closed: mode === "polygon",
-            maxPixelDistance: 20,
-          });
-          return si !== null ? { kind: "edge", index: si } : null;
-        };
-
-        handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
-          clearPointHover();
-          const pts = draftPositionsRef.current;
-          const hit = identify(movement.endPosition);
-          if (hit?.kind === "vertex") {
-            pointHoverRef.current = viewer.entities.add({
-              position: new ConstantPositionProperty(pts[hit.index]),
-              point: {
-                pixelSize: 15,
-                color: Color.CYAN.withAlpha(0.25),
-                outlineColor: Color.CYAN,
-                outlineWidth: 2,
-                heightReference: HeightReference.CLAMP_TO_GROUND,
-                disableDepthTestDistance: Number.POSITIVE_INFINITY,
-              },
-            });
-          } else if (hit?.kind === "edge") {
-            const b = (hit.index + 1) % pts.length;
-            pointHoverRef.current = viewer.entities.add({
-              polyline: {
-                positions: [pts[hit.index], pts[b]],
-                width: 6,
-                material: Color.CYAN.withAlpha(0.6),
-                clampToGround: true,
-              },
-            });
-          }
-          viewer.scene.requestRender();
-        }, ScreenSpaceEventType.MOUSE_MOVE);
-
-        handler.setInputAction((event: ScreenSpaceEventHandler.PositionedEvent) => {
-          const pts = draftPositionsRef.current;
-          const hit = identify(event.position);
-          clearPointSelection();
-          if (!hit) {
-            toast.info("Nothing here — point at a vertex or an edge");
-            viewer.scene.requestRender();
-            return;
-          }
-          pointSelectionRef.current = hit;
-          if (hit.kind === "vertex") {
-            pointSelectHighlightRef.current = viewer.entities.add({
-              position: new ConstantPositionProperty(pts[hit.index]),
-              point: {
-                pixelSize: 13,
-                color: Color.CYAN,
-                outlineColor: Color.WHITE,
-                outlineWidth: 2,
-                heightReference: HeightReference.CLAMP_TO_GROUND,
-                disableDepthTestDistance: Number.POSITIVE_INFINITY,
-              },
-            });
-            toast.info(`Vertex ${hit.index + 1} of ${pts.length} selected`);
-          } else {
-            const b = (hit.index + 1) % pts.length;
-            pointSelectHighlightRef.current = viewer.entities.add({
-              polyline: {
-                positions: [pts[hit.index], pts[b]],
-                width: 6,
-                material: Color.CYAN,
-                clampToGround: true,
-              },
-            });
-            toast.info(`Edge ${hit.index + 1}–${b + 1} selected`);
-          }
-          viewer.scene.requestRender();
-        }, ScreenSpaceEventType.LEFT_CLICK);
-      };
-
-      bindDrawClickRef.current = bindDrawClick;
-      bindEraseClickRef.current = bindEraseClick;
-      bindVertexEditClickRef.current = bindVertexEditClick;
-      bindPointSelectClickRef.current = bindPointSelectClick;
-      bindFinishDblClickRef.current = () => {
-        handler.setInputAction(() => finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
-      };
-
-      // Right-click: stop placing vertices, unclip the toolbar tool, and open
-      // calculation options for this drawing. Double-click afterward runs the
-      // selected calculation (finish).
-      const releaseForCalc = () => {
-        const pts = draftPositionsRef.current;
-        const minPoints = mode === "polygon" ? 3 : 2;
-        if (pts.length === 0) {
-          cancelDraw();
-          return;
-        }
-        if (pts.length < minPoints) {
-          toast.error(`Need at least ${minPoints} points for a ${mode}`);
-          return;
-        }
-
-        clearEraseHighlight();
-        handler.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
-        handler.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
-        hoverPositionRef.current = null;
-        awaitingCalcRef.current = true;
-        store.getState().setDraft(pts, null);
-        // Unclip the toolkit button; keep drawMode so the Calculation panel
-        // still offers geometry-specific options.
-        store.setState({ activeToolKey: null });
-        store.getState().openDetail("measure");
-        handler.setInputAction(() => finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
-        viewer.scene.requestRender();
-      };
-
-      bindDrawClick();
-      handler.setInputAction(() => releaseForCalc(), ScreenSpaceEventType.RIGHT_CLICK);
-      drawHandlerRef.current = handler;
-      store.getState().openDetail("measure");
-    },
-    [
-      store,
-      viewerRef,
-      cleanupDraw,
-      stopProbe,
-      cancelDraw,
-      surveyId,
-      refreshMeasurements,
-      triggerCompute,
-      addDraftDecorations,
-      rebuildDraftDecorations,
-      clearEraseHighlight,
-      clearEraseAnchor,
-      clearPointHover,
-      clearPointSelection,
-      liftToTerrain,
-      snapshotForUndo,
-      interactionActor,
-    ]
-  );
-
-  // Eraser is a pick mode: click a draft segment to delete that edge. Works on
-  // an in-progress drawing OR a selected measurement (e.g. a finished stockpile).
-  // Keep the self-handle current (assigned in an effect, not during render,
-  // per react-hooks/refs) — used by the Line→polygon close-out inside the
-  // draw session's own click handler.
-  useEffect(() => {
-    startDrawSelfRef.current = startDraw;
-  }, [startDraw]);
-
-  const eraseDraft = useCallback(() => {
-    if (INTERACTION_V2) {
-      toast.info("Shape editing joins interaction v2 in P2 — unset the flag to edit");
-      return;
-    }
-    const s = store.getState();
-    const viewer = viewerRef.current;
-
-    if (s.probing) {
-      if (!s.probePoint && !probeEntityRef.current) {
-        toast.info("Nothing to erase — sample a point first");
-        return;
-      }
-      s.setProbePoint(null);
-      if (viewer && !viewer.isDestroyed() && probeEntityRef.current) {
-        viewer.entities.remove(probeEntityRef.current);
-      }
-      probeEntityRef.current = null;
-      viewer?.scene.requestRender();
-      return;
-    }
-
-    // Revive draft verts from the store mirror if refs were cleared (HMR / etc.).
-    if (draftPositionsRef.current.length < 2 && s.draft.points.length >= 2) {
-      draftPositionsRef.current = [...s.draft.points];
-    }
-
-    // Toggle eraser off.
-    if (s.activeToolKey === "palette:eraser" && s.drawMode && drawHandlerRef.current) {
-      clearEraseHighlight();
-      clearEraseAnchor();
-      if (awaitingCalcRef.current) {
-        drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
-        drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
-        store.setState({ activeToolKey: null });
-      } else {
-        bindDrawClickRef.current?.();
-        store.setState({ activeToolKey: previousToolKeyRef.current });
-      }
-      return;
-    }
-
-    // In-progress draw: arm segment picking.
-    if (s.drawMode) {
-      if (draftPositionsRef.current.length < 2) {
-        toast.info("Nothing to erase — need a line between two vertices");
-        return;
-      }
-      if (!drawHandlerRef.current || !bindEraseClickRef.current) {
-        // Handler was lost — re-seed and restart the draw session, then erase.
-        seedPointsRef.current = [...draftPositionsRef.current];
-        const opts = s.activeDrawOpts ?? undefined;
-        startDraw(s.drawMode, { ...opts, toolKey: opts?.toolKey ?? previousToolKeyRef.current ?? undefined });
-      }
-      previousToolKeyRef.current = s.activeToolKey ?? previousToolKeyRef.current;
-      bindEraseClickRef.current?.();
-      store.setState({ activeToolKey: "palette:eraser" });
-      toast.info("Click a segment to erase it");
-      return;
-    }
-
-    // Selected measurement (stockpile / line / etc.): load geometry into an edit session.
-    const selectedId =
-      s.selection?.kind === "measurement" ? s.selection.measurementIds[0] : null;
-    const selected = selectedId ? s.measurements.find((m) => m.id === selectedId) : null;
-    if (!selected?.geometry) {
-      toast.info("Nothing to erase — draw a shape or select a measurement first");
-      return;
-    }
-    const pts = liftToTerrain(geometryPositions(selected.geometry));
-    const mode: DrawMode | null =
-      selected.geometry.type === "Polygon"
-        ? "polygon"
-        : selected.geometry.type === "LineString"
-          ? "polyline"
-          : null;
-    if (!mode || pts.length < 2) {
-      toast.info("Nothing to erase — this measurement has no erasable segments");
-      return;
-    }
-
-    editingMeasurementIdRef.current = selected.id;
-    s.setEditingMeasurementId(selected.id); // mirror to the store (toolbar rebinding)
-    seedPointsRef.current = pts;
-    s.setMeasurementVisible(selected.id, false);
-    startDraw(mode, { label: selected.name, toolKey: "palette:eraser" });
-    awaitingCalcRef.current = true;
-    // Lock for calc/edit: no new vertices until eraser exits; double-click
-    // saves — bindFinishDblClickRef arms it (this path never goes through
-    // releaseForCalc, which is where drawing normally gains that binding).
-    if (drawHandlerRef.current) {
-      drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
-      drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
-    }
-    bindEraseClickRef.current?.();
-    bindFinishDblClickRef.current?.();
-    store.setState({ activeToolKey: "palette:eraser" });
-    store.getState().openDetail("measure");
-    toast.info("Click a segment to erase it — double-click when done");
-  }, [store, viewerRef, clearEraseHighlight, clearEraseAnchor, startDraw, liftToTerrain]);
-
-  // Point / identify tool. Only meaningful during a live draw/edit session (it
-  // reads the DRAFT's verts/edges); outside one the toolbar routes Point to the
-  // elevation probe instead. Toggling off returns to vertex placement.
-  const pointSelect = useCallback(() => {
-    if (INTERACTION_V2) {
-      toast.info("Vertex/edge identify joins interaction v2 in P2 — unset the flag to use it");
-      return;
-    }
-    const s = store.getState();
-    if (!s.drawMode || !drawHandlerRef.current || !bindPointSelectClickRef.current) {
-      toast.info("Point identifies vertices & edges while you're editing a shape");
-      return;
-    }
-    if (s.activeToolKey === "palette:point") {
-      clearPointHover();
-      clearPointSelection();
-      if (awaitingCalcRef.current) {
-        drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
-        drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
-        store.setState({ activeToolKey: null });
-      } else {
-        bindDrawClickRef.current?.();
-        store.setState({ activeToolKey: previousToolKeyRef.current });
-      }
-      return;
-    }
-    previousToolKeyRef.current = s.activeToolKey ?? previousToolKeyRef.current;
-    bindPointSelectClickRef.current?.();
-    store.setState({ activeToolKey: "palette:point" });
-    toast.info("Point at a vertex or edge to identify + select it");
-  }, [store, clearPointHover, clearPointSelection]);
-
-  // Resume placing vertices on the CURRENT draft — used when a draw tool is
-  // clicked mid-session (e.g. after erasing an edge, to add vertices into the
-  // gap). Unlike startDraw it does NOT cleanupDraw, so the in-progress geometry
-  // is preserved (the "clicking Line vanishes the drawing" bug). It swaps the
-  // drag/erase/point handlers for vertex placement over whatever's on screen;
-  // the shape's TYPE (drawMode) is untouched, so a stockpile stays a polygon.
-  const resumeVertexDraw = useCallback(
-    (toolKey: string) => {
-      if (INTERACTION_V2) return; // v2 never leaves placement mid-session (machine owns it)
-      const s = store.getState();
-      const handler = drawHandlerRef.current;
-      if (!s.drawMode || !handler || !bindDrawClickRef.current) return;
-      clearEraseHighlight();
-      clearEraseAnchor();
-      clearPointHover();
-      clearPointSelection();
-      // Drop any drag handlers, then re-arm click=place / move=preview. (bindDraw
-      // Click re-sets LEFT_CLICK + MOUSE_MOVE, replacing erase/point handlers.)
-      handler.removeInputAction(ScreenSpaceEventType.LEFT_DOWN);
-      handler.removeInputAction(ScreenSpaceEventType.LEFT_UP);
-      awaitingCalcRef.current = false; // vertex placement is allowed again
-      bindDrawClickRef.current();
-      store.setState({ activeToolKey: toolKey });
-      toast.info("Adding vertices — click to place; return to the first point or right-click when done");
-    },
-    [store, clearEraseHighlight, clearEraseAnchor, clearPointHover, clearPointSelection]
-  );
-
-  // Geometry editor (vertex drag): load a SELECTED measurement's vertices into a
-  // draw session with DRAGGABLE handles, the shape's TYPE preserved (a stockpile
-  // stays a polygon — mode drives serialization in finish()), and the Line tool
-  // lit as the "you're editing" indicator the user asked for. Grab any vertex and
-  // drag it to reshape; double-click commits (finish → PATCH geometry + recompute
-  // from the new ring). Fully dynamic: any/every vertex can move in one session.
+  // Edit the SELECTED measurement's geometry: seed the machine (v2 edit plane,
+  // P2a) → EDIT_SHAPE. Commit (Enter / "Done" / double-click) PATCHes + recomputes.
   const editGeometry = useCallback(() => {
-    if (INTERACTION_V2) {
-      // v2 edit plane (P2a): seed the machine from the selected measurement.
-      const sv = store.getState();
-      const selId = sv.selection?.kind === "measurement" ? sv.selection.measurementIds[0] : null;
-      const sel = selId ? sv.measurements.find((m) => m.id === selId) : null;
-      if (!sel?.geometry) {
-        toast.info("Select a measurement to edit its shape");
-        return;
-      }
-      const primitive = sel.geometry.type === "Polygon" ? "polygon" : "polyline";
-      const geometry = liftToTerrain(geometryPositions(sel.geometry));
-      if (geometry.length < 2) {
-        toast.info("This measurement has no editable vertices");
-        return;
-      }
-      interactionActor.send({ type: "EDIT_SHAPE", measurementId: sel.id, geometry, primitive });
-      toast.info("Drag a vertex to reshape — double-click when done");
-      return;
-    }
-    const s = store.getState();
-
-    // Toggle off: Line tool clicked again (or Edit shape while already editing)
-    // exits the edit and restores the hidden measurement (cancelDraw does both).
-    if (s.activeToolKey === "palette:line" && s.drawMode && editingMeasurementIdRef.current) {
-      cancelDraw();
-      return;
-    }
-
-    const selectedId =
-      s.selection?.kind === "measurement" ? s.selection.measurementIds[0] : null;
-    const selected = selectedId ? s.measurements.find((m) => m.id === selectedId) : null;
-    if (!selected?.geometry) {
+    const sv = store.getState();
+    const selId = sv.selection?.kind === "measurement" ? sv.selection.measurementIds[0] : null;
+    const sel = selId ? sv.measurements.find((m) => m.id === selId) : null;
+    if (!sel?.geometry) {
       toast.info("Select a measurement to edit its shape");
       return;
     }
-    const pts = liftToTerrain(geometryPositions(selected.geometry));
-    const mode: DrawMode | null =
-      selected.geometry.type === "Polygon"
-        ? "polygon"
-        : selected.geometry.type === "LineString"
-          ? "polyline"
-          : null;
-    if (!mode || pts.length < 2) {
+    const primitive = sel.geometry.type === "Polygon" ? "polygon" : "polyline";
+    const geometry = liftToTerrain(geometryPositions(sel.geometry));
+    if (geometry.length < 2) {
       toast.info("This measurement has no editable vertices");
       return;
     }
-
-    editingMeasurementIdRef.current = selected.id;
-    s.setEditingMeasurementId(selected.id); // mirror to the store (toolbar rebinding)
-    seedPointsRef.current = pts;
-    s.setMeasurementVisible(selected.id, false);
-    startDraw(mode, { label: selected.name, toolKey: "palette:line" });
-    awaitingCalcRef.current = true;
-    // Lock the session: no NEW vertices — the vertex-edit binder swaps the
-    // click/move handlers for drag, and double-click commits. This path skips
-    // releaseForCalc, so arm the double-click finish explicitly.
-    if (drawHandlerRef.current) {
-      drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
-      drawHandlerRef.current.removeInputAction(ScreenSpaceEventType.MOUSE_MOVE);
-    }
-    bindVertexEditClickRef.current?.();
-    bindFinishDblClickRef.current?.();
-    store.setState({ activeToolKey: "palette:line" });
-    store.getState().openDetail("measure");
-    toast.info("Drag any vertex to reshape — double-click when done");
-  }, [store, cancelDraw, startDraw, liftToTerrain, interactionActor]);
+    interactionActor.send({ type: "EDIT_SHAPE", measurementId: sel.id, geometry, primitive });
+    toast.info("Drag a vertex to reshape — Enter or double-click when done");
+  }, [store, liftToTerrain, interactionActor]);
 
   // v2 "Done editing" — the inspector-visible twin of Enter/double-click. Same
   // self-intersection guard + toast as the adapter's finish path (the machine's
@@ -2190,73 +1049,20 @@ export function ViewerCanvas() {
   // an empty polygon draw with the edit context set, so finish() PATCHes the
   // geometry in place. The original stays VISIBLE as a tracing reference — its
   // corners are snap targets (computeSnap) — and is replaced on double-click.
+  // Redraw the SELECTED measurement: place a FRESH outline over the still-visible
+  // original (a tracing reference) → REDRAW_SHAPE. Commit PATCHes the row in place.
   const redrawGeometry = useCallback(() => {
-    if (INTERACTION_V2) {
-      // v2 redraw: place a fresh outline over the still-visible original (a
-      // tracing reference), committing a PATCH via the seeded measurementId.
-      const sv = store.getState();
-      const selId = sv.selection?.kind === "measurement" ? sv.selection.measurementIds[0] : null;
-      const sel = selId ? sv.measurements.find((m) => m.id === selId) : null;
-      if (!sel?.geometry) {
-        toast.info("Select a measurement to redraw its shape");
-        return;
-      }
-      const primitive = sel.geometry.type === "Polygon" ? "polygon" : "polyline";
-      interactionActor.send({ type: "REDRAW_SHAPE", measurementId: sel.id, primitive });
-      toast.info("Draw the new outline — right-click or Enter to finish. Esc discards.");
-      return;
-    }
-    const s = store.getState();
-
-    // Toggle off: Polygon clicked again mid-redraw discards and restores.
-    if (s.activeToolKey === "palette:polygon" && s.drawMode && editingMeasurementIdRef.current) {
-      cancelDraw();
-      return;
-    }
-
-    const selectedId =
-      s.selection?.kind === "measurement" ? s.selection.measurementIds[0] : null;
-    const selected = selectedId ? s.measurements.find((m) => m.id === selectedId) : null;
-    if (!selected?.geometry) {
+    const sv = store.getState();
+    const selId = sv.selection?.kind === "measurement" ? sv.selection.measurementIds[0] : null;
+    const sel = selId ? sv.measurements.find((m) => m.id === selId) : null;
+    if (!sel?.geometry) {
       toast.info("Select a measurement to redraw its shape");
       return;
     }
-
-    // No seed — draw from scratch. Set the edit context BEFORE startDraw so
-    // finish() PATCHes this row; startDraw snapshots snap targets (incl. this
-    // shape's originals, so you can retrace them).
-    editingMeasurementIdRef.current = selected.id;
-    s.setEditingMeasurementId(selected.id);
-    startDraw("polygon", { label: selected.name, toolKey: "palette:polygon" });
-    toast.info("Draw the new outline — vertices snap onto existing corners. Return to the first point (or right-click) to finish.");
-  }, [store, cancelDraw, startDraw, interactionActor]);
-
-  // Undo/redo restore whole GEOMETRY SNAPSHOTS, so they cover EVERY edit — a
-  // placed vertex, a dragged vertex, or an erased edge — not just the last
-  // placement. The inverse op pushes the current state onto the opposite stack.
-  const undoLastVertex = useCallback(() => {
-    if (!store.getState().drawMode || undoHistoryRef.current.length === 0) {
-      toast.info("Nothing to undo");
-      return;
-    }
-    redoHistoryRef.current.push({
-      positions: [...draftPositionsRef.current],
-      open: polygonOpenRef.current,
-    });
-    applyHistorySnapshot(undoHistoryRef.current.pop()!);
-  }, [store, applyHistorySnapshot]);
-
-  const redoLastVertex = useCallback(() => {
-    if (!store.getState().drawMode || redoHistoryRef.current.length === 0) {
-      toast.info("Nothing to redo");
-      return;
-    }
-    undoHistoryRef.current.push({
-      positions: [...draftPositionsRef.current],
-      open: polygonOpenRef.current,
-    });
-    applyHistorySnapshot(redoHistoryRef.current.pop()!);
-  }, [store, applyHistorySnapshot]);
+    const primitive = sel.geometry.type === "Polygon" ? "polygon" : "polyline";
+    interactionActor.send({ type: "REDRAW_SHAPE", measurementId: sel.id, primitive });
+    toast.info("Draw the new outline — right-click or Enter to finish. Esc discards.");
+  }, [store, interactionActor]);
 
   // ------------------------------------------------------------ ops (CRUD)
   // saveMeasurement PROMOTES a draw-first draft (draft-first, 2026-07-16):
@@ -2436,17 +1242,11 @@ export function ViewerCanvas() {
   // ------------------------------------------------------------- actions
   const actions = useMemo<ViewerActions>(
     () => ({
-      startDraw,
       startProbe,
       cancelDraw,
-      eraseDraft,
       editGeometry,
       commitGeometry,
       redrawGeometry,
-      pointSelect,
-      resumeVertexDraw,
-      undoLastVertex,
-      redoLastVertex,
       selectMeasurementRow,
       triggerCompute,
       removeMeasurement,
@@ -2469,17 +1269,11 @@ export function ViewerCanvas() {
     }),
     [
       store,
-      startDraw,
       startProbe,
       cancelDraw,
-      eraseDraft,
       editGeometry,
       commitGeometry,
       redrawGeometry,
-      pointSelect,
-      resumeVertexDraw,
-      undoLastVertex,
-      redoLastVertex,
       selectMeasurementRow,
       triggerCompute,
       removeMeasurement,

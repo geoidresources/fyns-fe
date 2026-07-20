@@ -17,34 +17,21 @@
 
 import { createContext, useContext } from "react";
 import type { PanelMeasurement } from "@/lib/viewer/sampleData";
-import type { DrawMode, DrawOptions } from "@/components/viewer/MeasurementPanel";
 
 export interface ViewerActions {
-  // Draw / probe lifecycle (imperative — build the draft entity + input handler).
-  startDraw: (mode: DrawMode, opts?: DrawOptions) => void;
+  // Draw / probe lifecycle. Probe/point still ride startProbe (legacy) until the
+  // machine gains a probing mode; line/polygon draw + all edit are v2 (below).
   startProbe: (toolKey?: string) => void;
   cancelDraw: () => void;
-  eraseDraft: () => void;
-  /** Load the SELECTED measurement's vertices into a draggable-handle edit
-   * session (Line tool lit as the edit indicator); double-click commits →
-   * PATCH geometry + recompute. Toggles off if already editing. */
+  /** Edit the SELECTED measurement's geometry (v2 edit plane): EDIT_SHAPE seeds
+   * the machine → drag/insert/delete handles; Enter / "Done" / double-click PATCHes. */
   editGeometry: () => void;
-  /** v2 only: commit the active geometry edit (Enter / "Done editing"). Blocks
-   * a self-intersecting shape with a toast; no-op under the legacy flag. */
+  /** Commit the active geometry edit (Enter / "Done editing"); blocks a
+   * self-intersecting shape with a toast. */
   commitGeometry: () => void;
-  /** Draw a FRESH outline that REPLACES the selected measurement's shape
-   * (Polygon tool). Snapping onto existing corners is active; the original
-   * stays visible as a tracing reference. Double-click commits + recomputes. */
+  /** Redraw the SELECTED measurement: place a fresh outline (REDRAW_SHAPE) over
+   * the still-visible original as a tracing reference; commit PATCHes it in place. */
   redrawGeometry: () => void;
-  /** Point / identify tool for a live draw/edit session: hover highlights the
-   * nearest vertex/edge, click selects it. No-op outside a session. */
-  pointSelect: () => void;
-  /** Resume placing vertices on the CURRENT draft (a draw tool clicked mid-
-   * session, e.g. after erasing an edge) WITHOUT discarding it. `toolKey` lights
-   * that tool. No-op outside an active draw/edit session. */
-  resumeVertexDraw: (toolKey: string) => void;
-  undoLastVertex: () => void;
-  redoLastVertex: () => void;
 
   // Measurement CRUD + framing.
   selectMeasurementRow: (m: PanelMeasurement) => void;
