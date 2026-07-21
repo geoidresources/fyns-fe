@@ -221,3 +221,16 @@ test("bridge: the draft mirror tracks appends and undo while placing", () => {
   assert.equal(s(h).draft.points.length, 2);
   h.detach();
 });
+
+test("bridge: a WITHIN-placing template switch re-mirrors the lit tool (hotkey free-switch)", () => {
+  const h = harness();
+  h.actor.send({ type: "TEMPLATE_PICKED", templateId: "polygon" });
+  assert.equal(s(h).activeToolKey, "palette:polygon");
+  // Empty draft → free switch to line stays IN placing (no re-entry) — the
+  // entry mirror can't see it; the within-placing mirror must.
+  h.actor.send({ type: "TEMPLATE_PICKED", templateId: "line" });
+  assert.equal(h.actor.getSnapshot().value, "placing");
+  assert.equal(s(h).activeToolKey, "palette:line");
+  assert.equal(s(h).drawMode, "polyline");
+  h.detach();
+});

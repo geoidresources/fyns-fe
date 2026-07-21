@@ -110,6 +110,20 @@ export function attachStoreBridge(
       }
     }
 
+    // Template switched WITHIN placing (free empty-draft switch, incl. via
+    // hotkeys): the entry mirror above only runs on state ENTRY, so re-mirror
+    // the lit tool + primitive here or the toolbar/panels read the old tool.
+    if (top === "placing" && ctx.template) {
+      const key = toolKeyFor(ctx.template.id);
+      if (store.getState().activeToolKey !== key) {
+        store.setState({
+          activeToolKey: key,
+          drawMode: ctx.primitive,
+          activeDrawOpts: { ...(ctx.template.drawOpts ?? {}), toolKey: key },
+        });
+      }
+    }
+
     // Draft mirror for the live readout (panel Area/Perimeter/Vertices).
     if (ctx.draft !== prevDraft && (top === "placing" || top === "calcReady" || top === "editing")) {
       store.getState().setDraft(ctx.draft as Cartesian3[], null);

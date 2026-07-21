@@ -54,6 +54,10 @@ function pointToSegmentPx(p: Cartesian2, a: Cartesian2, b: Cartesian2): number {
 
 type InteractionActor = ActorRefFrom<typeof interactionMachine>;
 
+/** Window-level `Enter` is shared with useViewerHotkeys — the first handler to
+ * act stamps the event so the other ignores it (registration order varies). */
+export type ClaimedKeyEvent = KeyboardEvent & { __geoidEnterClaimed?: boolean };
+
 export interface AdapterRefs {
   /** Cursor position (snapped when applicable) — renderer preview + live label. */
   hoverRef: RefObject<Cartesian3 | null>;
@@ -100,6 +104,8 @@ export function useInteractionAdapter(
   const snapPreviewRef = useRef<Cartesian3 | null>(null);
   const snapTargetsRef = useRef<Cartesian3[]>([]);
   const hoverThrottleRef = useRef(0);
+  // Hold-Alt transiently suspends vertex snapping (layer-1 override, §04).
+  const altSuspendRef = useRef(false);
 
   // Session lifecycle: build the snap pool when a draw starts (idle → placing,
   // mirroring legacy startDraw's snapshot semantics) and clear the hover refs
@@ -165,6 +171,10 @@ export function useInteractionAdapter(
           return { pos: pts[0], kind: "origin" };
         }
       }
+      // Vertex snapping honors the layer-2 toggle (S / toolbar chip) and the
+      // layer-1 hold-Alt suspend. Origin-close above is a GESTURE (how a ring
+      // closes), not snapping — it stays live regardless.
+      if (!store.getState().snapEnabled || altSuspendRef.current) return null;
       let best: Cartesian3 | null = null;
       let bestD = VERTEX_SNAP_PX;
       const consider = (c: Cartesian3) => {
@@ -492,6 +502,12 @@ export function useInteractionAdapter(
     //    This is the primary commit path; double-click stays but its stray-click
     //    risk (insert on a ghost / append while open) is why Enter exists.
     const onKeyDown = (e: KeyboardEvent) => {
+      // Alt suspend tracks regardless of focus — it only mutes snapping.
+      if (e.key === "Alt") {
+        altSuspendRef.current = true;
+        snapPreviewRef.current = null; // drop the cyan halo immediately
+        viewer.scene.requestRender();
+      }
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       if (e.key === "Delete" || e.key === "Backspace") {
@@ -501,20 +517,53 @@ export function useInteractionAdapter(
         viewer.scene.requestRender();
         return;
       }
+      // Walk the vertex selection while editing: Tab / arrows step ±1 around
+      // the ring (VS parity). Shift+Tab walks backward like ArrowLeft.
+      if (e.key === "Tab" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        if (editSubstate() !== "ready") return;
+        const ctx = actor.getSnapshot().context;
+        const n = ctx.draft.length;
+        if (n === 0) return;
+        e.preventDefault();
+        const dir = e.key === "ArrowLeft" || (e.key === "Tab" && e.shiftKey) ? -1 : 1;
+        const from = ctx.selectedVertex ?? (dir === 1 ? -1 : 0);
+        actor.send({ type: "SELECT_VERTEX", index: (from + dir + n) % n });
+        viewer.scene.requestRender();
+        return;
+      }
       if (e.key === "Enter") {
+        // One keypress, one meaning: the hotkeys hook and this handler share
+        // window `Enter` and their registration ORDER is load-dependent (this
+        // effect re-registers when viewerReady flips). Whichever acts first
+        // claims the event so "Enter enters edit" can never cascade into an
+        // instant COMMIT in the same dispatch.
+        if ((e as ClaimedKeyEvent).__geoidEnterClaimed) return;
         if (editSubstate() === "ready") {
           e.preventDefault();
+          (e as ClaimedKeyEvent).__geoidEnterClaimed = true;
           finishWithGuard("COMMIT");
         } else if (actor.getSnapshot().value === "calcReady") {
           e.preventDefault();
+          (e as ClaimedKeyEvent).__geoidEnterClaimed = true;
           finishWithGuard("DOUBLE_CLICK");
         }
       }
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Alt") altSuspendRef.current = false;
+    };
+    // Alt-Tab / window switches can eat the keyup — never leave snap stuck off.
+    const onBlur = () => {
+      altSuspendRef.current = false;
+    };
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
 
     return () => {
       window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
       handler.destroy();
       // A teardown mid-drag must hand the camera back.
       if (!viewer.isDestroyed()) {
