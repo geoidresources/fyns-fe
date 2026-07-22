@@ -138,8 +138,15 @@ export function useInteractionAdapter(
       const viewer = viewerRef.current;
       if (!viewer || viewer.isDestroyed()) return;
       const pool: Cartesian3[] = [];
-      for (const m of store.getState().measurements) {
+      const { measurements, measurementVisibility } = store.getState();
+      for (const m of measurements) {
         if (!m.geometry) continue;
+        // Only snap to measurements actually shown on the canvas. Visibility is
+        // hidden-by-default (=== true, matching isMeasurementVisibleOnCanvas /
+        // the renderer) until a tree row or eye toggle turns it on — a hidden
+        // measurement has no rendered vertex, so snapping to it would magnetize
+        // the cursor onto invisible points (erratic "snap not working").
+        if (measurementVisibility[m.id] !== true) continue;
         try {
           for (const p of geometryPositions(m.geometry)) pool.push(p);
         } catch {
