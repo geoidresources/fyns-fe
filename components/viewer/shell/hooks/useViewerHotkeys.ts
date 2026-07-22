@@ -13,28 +13,25 @@
 // lens gets a toast, not a silent no-op.
 
 import { useEffect } from "react";
-import type { ActorRefFrom } from "xstate";
 import type { StoreApi } from "zustand/vanilla";
-import { toast } from "sonner";
 
-import type { interactionMachine } from "@/lib/viewer/interaction/machine";
 import type { TemplateId } from "@/lib/viewer/interaction/templates";
 import type { ViewerShellState } from "@/lib/viewer/state/store";
-import type { LayerControl } from "@/components/viewer/LayerPanel";
 import type { ClaimedKeyEvent } from "./useInteractionAdapter";
+import {
+  allLensesOff,
+  cycleContours,
+  launchDrawTemplate,
+  launchProbe,
+  toggleElevationRamp,
+  toggleHillshade,
+  toggleSnap,
+  toggleSunLighting,
+  type HotkeyActions,
+  type InteractionActor,
+} from "./toolLaunch";
 
-type InteractionActor = ActorRefFrom<typeof interactionMachine>;
-
-/** The subset of ViewerActions the hotkeys drive (kept narrow for testability). */
-export interface HotkeyActions {
-  startProbe: (toolKey?: string) => void;
-  cancelDraw: () => void;
-  editGeometry: () => void;
-  handleColorMapChange: (value: string) => void;
-  handleShadingChange: (value: string) => void;
-  handleContourIntervalChange: (intervalM: number) => void;
-  handleSunLightingChange: (enabled: boolean, hour: number) => void;
-}
+export type { HotkeyActions } from "./toolLaunch";
 
 const DRAW_KEYS: Record<string, TemplateId> = {
   l: "line",
@@ -48,38 +45,27 @@ const PROBE_KEYS: Record<string, string> = {
   i: "palette:probe",
 };
 
-const RAMP_NAMES = ["viridis", "terrain", "plasma", "grayscale"];
-const isContourRole = (role?: string | null) =>
-  !!role && (role === "contours" || role.startsWith("contours_"));
-
-/** First available elevation ramp, capitalized the way the Select stores it. */
-function firstRamp(layers: LayerControl[]): string | null {
-  for (const l of layers) {
-    if (l.lensRamp && RAMP_NAMES.includes(l.lensRamp)) {
-      return l.lensRamp.charAt(0).toUpperCase() + l.lensRamp.slice(1);
-    }
-  }
-  return null;
-}
-
-function contourIntervals(layers: LayerControl[]): number[] {
-  const seen = new Set<number>();
-  for (const l of layers) {
-    if (isContourRole(l.vectorRole) && l.intervalM && l.intervalM > 0) seen.add(l.intervalM);
-  }
-  return Array.from(seen).sort((a, b) => a - b);
-}
-
 export function useViewerHotkeys(
   actor: InteractionActor,
   store: StoreApi<ViewerShellState>,
   actions: HotkeyActions,
   /** Toggle the `?` shortcut cheat-sheet overlay (owned by ViewerCanvas). */
-  onToggleSheet: () => void
+  onToggleSheet: () => void,
+  /** Toggle the ⌘K command palette (owned by ViewerCanvas). */
+  onTogglePalette: () => void
 ): void {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.repeat) return;
+
+      // ⌘K / Ctrl+K: the command palette — a chord, so it works even while an
+      // input has focus (standard palette behavior).
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        onTogglePalette();
+        return;
+      }
+
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
 
@@ -97,50 +83,23 @@ export function useViewerHotkeys(
       const machineState = actor.getSnapshot().value;
       const key = e.key.toLowerCase();
 
-      // ---- tools ------------------------------------------------------
-      // Toolbar-parity guards: a draft in progress blocks tool switches (the
-      // machine would silently drop them — toast instead); an ARMED-but-empty
-      // draw yields to a probe via ESC.
-      const machineSnap = actor.getSnapshot();
-      const busyDrafting =
-        (machineSnap.value === "placing" && machineSnap.context.draft.length > 0) ||
-        machineSnap.value === "calcReady";
-      const armedTemplateId = machineSnap.context.template?.id ?? null;
-
+      // ---- tools (shared toolbar-parity guards live in toolLaunch) ------
       const drawTemplate = DRAW_KEYS[key];
       if (drawTemplate && !e.shiftKey) {
         e.preventDefault();
-        if (busyDrafting && armedTemplateId !== drawTemplate) {
-          toast.info("Finish the drawing (or press Esc) before switching tools");
-          return;
-        }
-        if (s.probing) actions.cancelDraw(); // leave probe before arming a draw
-        actor.send({ type: "TEMPLATE_PICKED", templateId: drawTemplate });
+        launchDrawTemplate(actor, store, actions, drawTemplate);
         return;
       }
       const probeKey = PROBE_KEYS[key];
       if (probeKey && !e.shiftKey) {
         e.preventDefault();
-        // Re-press toggles the probe off (toolbar parity).
-        if (s.probing && s.activeToolKey === probeKey) {
-          actions.cancelDraw();
-          return;
-        }
-        if (busyDrafting) {
-          toast.info("Finish the drawing (or press Esc) first");
-          return;
-        }
-        if (machineState === "placing") actor.send({ type: "ESC" }); // armed, no verts
-        if (s.probing) actions.cancelDraw(); // switching probe kinds
-        actions.startProbe(probeKey);
+        launchProbe(actor, store, actions, probeKey);
         return;
       }
 
       if (key === "s" && !e.shiftKey) {
         e.preventDefault();
-        const next = !s.snapEnabled;
-        s.setSnapEnabled(next);
-        toast.info(next ? "Snapping on" : "Snapping off — hold Alt for one-off");
+        toggleSnap(store);
         return;
       }
 
@@ -174,63 +133,33 @@ export function useViewerHotkeys(
 
       // ---- lenses (only what the survey actually has) -------------------
       if (key === "1") {
-        const ramp = firstRamp(s.layerControls);
-        if (!ramp) {
-          toast.info("No elevation ramp in this survey");
-          return;
-        }
         e.preventDefault();
-        const on = s.view.colorMap !== "None";
-        actions.handleColorMapChange(on ? "None" : ramp);
-        toast.info(on ? "Elevation ramp off" : `Lens: ${ramp} ramp`);
+        toggleElevationRamp(store, actions);
         return;
       }
       if (key === "2") {
-        const has = s.layerControls.some((l) => l.lensRamp === "hillshade");
-        if (!has) {
-          toast.info("No hillshade layer in this survey");
-          return;
-        }
         e.preventDefault();
-        const on = s.view.shading === "Hillshade";
-        actions.handleShadingChange(on ? "None" : "Hillshade");
-        toast.info(on ? "Hillshade off" : "Lens: hillshade");
+        toggleHillshade(store, actions);
         return;
       }
       if (key === "3") {
-        const intervals = contourIntervals(s.layerControls);
-        if (intervals.length === 0) {
-          toast.info("No contour layers in this survey");
-          return;
-        }
         e.preventDefault();
-        // Cycle: off → 0.5m → 1m → … → off (0 shows no interval = off).
-        const current = s.view.contourIntervalM ?? 0;
-        const idx = intervals.indexOf(current);
-        const next = idx === -1 ? intervals[0] : idx + 1 < intervals.length ? intervals[idx + 1] : 0;
-        actions.handleContourIntervalChange(next);
-        toast.info(next === 0 ? "Contours off" : `Contours: ${next} m`);
+        cycleContours(store, actions);
         return;
       }
       if (key === "4") {
         e.preventDefault();
-        const on = !s.view.sunLightingEnabled;
-        actions.handleSunLightingChange(on, s.view.sunHour ?? 12);
-        toast.info(on ? "Sun lighting on" : "Sun lighting off");
+        toggleSunLighting(store, actions);
         return;
       }
       if (key === "0") {
         e.preventDefault();
-        if (s.view.colorMap !== "None") actions.handleColorMapChange("None");
-        if (s.view.shading !== "None") actions.handleShadingChange("None");
-        if ((s.view.contourIntervalM ?? 0) !== 0) actions.handleContourIntervalChange(0);
-        if (s.view.sunLightingEnabled) actions.handleSunLightingChange(false, s.view.sunHour ?? 12);
-        toast.info("Lenses off");
+        allLensesOff(store, actions);
         return;
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [actor, store, actions, onToggleSheet]);
+  }, [actor, store, actions, onToggleSheet, onTogglePalette]);
 }

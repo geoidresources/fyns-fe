@@ -68,7 +68,7 @@ export function useDraftRenderer(
     let segmentLabels: Entity[] = [];
     let ghosts: Entity[] = [];
     let lastDraft: Cartesian3[] | null = null;
-    let lastSelected: number | null = null;
+    let lastSelected = ""; // joined selectedVertices signature
     let lastRingOpen = false; // closeGap flips ringOpen without touching the draft array
     let lastEdgeSig = ""; // draft length + open/closed — rebuilds ghosts only on change
 
@@ -190,9 +190,9 @@ export function useDraftRenderer(
       dots = [];
       segmentLabels = [];
       const pts = draft();
-      const selected = actor.getSnapshot().context.selectedVertex;
+      const selected = new Set(actor.getSnapshot().context.selectedVertices);
       for (let i = 0; i < pts.length; i++) {
-        const isSelected = editing && i === selected;
+        const isSelected = editing && selected.has(i);
         dots.push(
           viewer.entities.add({
             position: pts[i],
@@ -280,7 +280,7 @@ export function useDraftRenderer(
       handleEntitiesRef.current = [];
       ghostEntitiesRef.current = [];
       lastDraft = null;
-      lastSelected = null;
+      lastSelected = "";
       lastRingOpen = false;
       lastEdgeSig = "";
       if (!viewer.isDestroyed()) viewer.scene.requestRender();
@@ -299,9 +299,11 @@ export function useDraftRenderer(
       if (base.length === 0) mountBase();
       const d = snap.context.draft as Cartesian3[];
       const draftChanged = d !== lastDraft;
-      // A pure selection change (click a vertex → highlight) doesn't touch the
-      // draft array, so rebuild the dots for the highlight too.
-      const selectionChanged = editing && snap.context.selectedVertex !== lastSelected;
+      // A pure selection change (click / shift-click / walk / select-all)
+      // doesn't touch the draft array — compare a cheap signature and rebuild
+      // the dots for the highlight set.
+      const selSig = editing ? snap.context.selectedVertices.join(",") : "";
+      const selectionChanged = editing && selSig !== lastSelected;
       // closeGap re-closes the ring WITHOUT a new draft array — the fill/outline
       // callbacks follow live, but the discrete ghosts need a rebuild to add the
       // re-closed edge's midpoint back.
@@ -309,13 +311,17 @@ export function useDraftRenderer(
 
       if (draftChanged || selectionChanged || ringOpenChanged) {
         const grabbed = snap.context.grabbedIndex;
-        // Cheap drag update: while dragging, move ONLY the grabbed handle (the
-        // outline is a CallbackProperty, so it follows for free). Full rebuild
-        // for everything else — placement, insert/delete, undo/redo, a drop, or
-        // a selection highlight.
+        // Cheap drag update: while dragging, move only the MOVED handles (the
+        // outline is a CallbackProperty, so it follows for free) — the grabbed
+        // one plus, on a batch drag, every selected dot. Full rebuild for
+        // everything else — placement, insert/delete, undo/redo, a drop, or a
+        // selection highlight.
         if (draftChanged && editSub === "dragging" && grabbed !== null && dots.length === d.length) {
-          const dot = dots[grabbed];
-          if (dot) dot.position = new ConstantPositionProperty(d[grabbed]);
+          const moved = new Set<number>([grabbed, ...snap.context.selectedVertices]);
+          for (const i of moved) {
+            const dot = dots[i];
+            if (dot && d[i]) dot.position = new ConstantPositionProperty(d[i]);
+          }
         } else {
           rebuildDecorations(editing);
         }
@@ -327,7 +333,7 @@ export function useDraftRenderer(
           lastEdgeSig = edgeSig;
         }
         lastDraft = d;
-        lastSelected = snap.context.selectedVertex;
+        lastSelected = selSig;
         lastRingOpen = snap.context.ringOpen;
         viewer.scene.requestRender();
       }

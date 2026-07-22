@@ -40,8 +40,10 @@ export interface InteractionCtx {
   origin: "create" | "edit";
   /** Index of the vertex being dragged in the edit plane, else null. */
   grabbedIndex: number | null;
-  /** The highlighted vertex in the edit plane — the target of DELETE_VERTEX. */
-  selectedVertex: number | null;
+  /** The highlighted vertices in the edit plane (multi-select, P2 Phase-2) —
+   * the targets of DELETE_VERTEX and of a batch drag. Single-click selection
+   * is simply a one-element array. */
+  selectedVertices: number[];
 }
 
 const emptyCtx: InteractionCtx = {
@@ -54,7 +56,7 @@ const emptyCtx: InteractionCtx = {
   future: [],
   origin: "create",
   grabbedIndex: null,
-  selectedVertex: null,
+  selectedVertices: [],
 };
 
 // ------------------------------------------------------------------- events
@@ -79,10 +81,16 @@ export type InteractionEvent =
   // PATCHes. origin stays "create" so a failed commit returns to calcReady.
   | { type: "REDRAW_SHAPE"; measurementId: string; primitive: Primitive }
   | { type: "HANDLE_GRAB"; index: number }
-  | { type: "HANDLE_MOVE"; position: Vec3 }
+  // Batch-aware drag frame: the ADAPTER computes every moved vertex (it owns
+  // the Cartesian3 delta math) and the machine applies verbatim — keeps this
+  // module Cesium-free while real Cartesian3 instances flow to the renderer.
+  | { type: "HANDLE_MOVE"; updates: Array<{ index: number; position: Vec3 }> }
   | { type: "HANDLE_DROP" }
   // Highlight a vertex (click without drag) — the DELETE_VERTEX target.
-  | { type: "SELECT_VERTEX"; index: number }
+  // `additive` (Shift+click) toggles the vertex in the multi-selection.
+  | { type: "SELECT_VERTEX"; index: number; additive?: boolean }
+  // Select every vertex of the draft (Ctrl/Cmd+A while editing).
+  | { type: "SELECT_ALL_VERTICES" }
   // Insert a vertex on an edge (click its midpoint ghost).
   | { type: "INSERT_VERTEX"; edgeIndex: number; position: Vec3 }
   // Remove the selected vertex — the ring stays closed and re-routes.
@@ -147,11 +155,13 @@ export const interactionMachine = setup({
     canUndo: ({ context }) => context.history.length > 0,
     canRedo: ({ context }) => context.future.length > 0,
     isEditOrigin: ({ context }) => context.origin === "edit",
-    /** A vertex is selected AND removing it keeps the shape above its minimum
-     * (3 for a polygon, 2 for a line) — else the delete is dropped (toasted). */
+    /** At least one vertex is selected AND removing them ALL keeps the shape at
+     * or above its minimum (3 for a polygon, 2 for a line) — else the delete is
+     * dropped (the adapter toasts). */
     canDeleteVertex: ({ context }) =>
-      context.selectedVertex !== null &&
-      context.draft.length > (context.primitive === "polygon" ? 3 : 2),
+      context.selectedVertices.length > 0 &&
+      context.draft.length - context.selectedVertices.length >=
+        (context.primitive === "polygon" ? 3 : 2),
     /** The polygon ring is currently open (an edge was erased) — MAP_CLICK then
      * appends into the gap instead of hit-testing handles/ghosts. */
     ringIsOpen: ({ context }) => context.ringOpen === true,
@@ -202,6 +212,9 @@ export const interactionMachine = setup({
         future: [...context.future, snapshotOf(context.draft, context.ringOpen)],
         draft: prev.draft,
         ringOpen: prev.ringOpen,
+        // The restored draft can be SHORTER — drop selection indices that no
+        // longer exist so a stale index can't ghost-highlight or ghost-delete.
+        selectedVertices: context.selectedVertices.filter((i) => i < prev.draft.length),
       };
     }),
     redo: assign(({ context }) => {
@@ -212,6 +225,7 @@ export const interactionMachine = setup({
         history: [...context.history, snapshotOf(context.draft, context.ringOpen)],
         draft: next.draft,
         ringOpen: next.ringOpen,
+        selectedVertices: context.selectedVertices.filter((i) => i < next.draft.length),
       };
     }),
     clear: assign(() => ({ ...emptyCtx })),
@@ -240,28 +254,45 @@ export const interactionMachine = setup({
         primitive: event.primitive,
       };
     }),
-    /** Snapshot before a drag begins (undo reverts the whole move, ledger #3);
-     * the grabbed vertex also becomes the selection (Delete target). */
+    /** Snapshot before a drag begins (undo reverts the whole move, ledger #3).
+     * Grabbing a vertex INSIDE the multi-selection keeps it (the whole group
+     * drags together); grabbing outside collapses the selection to that vertex. */
     grabHandle: assign(({ context, event }) => {
       if (event.type !== "HANDLE_GRAB") return {};
       return {
         history: [...context.history, snapshotOf(context.draft, context.ringOpen)],
         future: [],
         grabbedIndex: event.index,
-        selectedVertex: event.index,
+        selectedVertices: context.selectedVertices.includes(event.index)
+          ? context.selectedVertices
+          : [event.index],
       };
     }),
-    /** Live-move the grabbed vertex (new array; the outline callback follows). */
+    /** Apply a drag frame verbatim (new array; the outline callback follows).
+     * The adapter sends every moved vertex — one entry for a solo drag, the
+     * whole selection (same delta) for a batch drag. */
     moveGrabbed: assign(({ context, event }) => {
       if (event.type !== "HANDLE_MOVE" || context.grabbedIndex === null) return {};
       const next = [...context.draft];
-      next[context.grabbedIndex] = event.position;
+      for (const u of event.updates) {
+        if (u.index >= 0 && u.index < next.length) next[u.index] = u.position;
+      }
       return { draft: next };
     }),
     dropHandle: assign({ grabbedIndex: null }),
-    selectVertex: assign(({ event }) =>
-      event.type === "SELECT_VERTEX" ? { selectedVertex: event.index } : {}
-    ),
+    /** Click selects; Shift+click (additive) TOGGLES membership in the group. */
+    selectVertex: assign(({ context, event }) => {
+      if (event.type !== "SELECT_VERTEX") return {};
+      if (!event.additive) return { selectedVertices: [event.index] };
+      return {
+        selectedVertices: context.selectedVertices.includes(event.index)
+          ? context.selectedVertices.filter((i) => i !== event.index)
+          : [...context.selectedVertices, event.index],
+      };
+    }),
+    selectAllVertices: assign(({ context }) => ({
+      selectedVertices: context.draft.map((_, i) => i),
+    })),
     /** Insert on an edge: splice the new vertex AFTER edgeIndex; the closing
      * edge of a ring (edgeIndex n-1) appends. The inserted vertex is selected. */
     insertVertex: assign(({ context, event }) => {
@@ -272,19 +303,19 @@ export const interactionMachine = setup({
         history: [...context.history, snapshotOf(context.draft, context.ringOpen)],
         future: [],
         draft: next,
-        selectedVertex: at,
+        selectedVertices: [at],
       };
     }),
-    /** Remove the selected vertex — the ring re-routes across its neighbors and
-     * stays CLOSED (distinct from edge-erase, which opens the ring in P2b-2). */
+    /** Remove EVERY selected vertex — the ring re-routes across the survivors
+     * and stays CLOSED (distinct from edge-erase, which opens the ring). */
     deleteVertex: assign(({ context }) => {
-      const idx = context.selectedVertex;
-      if (idx === null) return {};
+      if (context.selectedVertices.length === 0) return {};
+      const doomed = new Set(context.selectedVertices);
       return {
         history: [...context.history, snapshotOf(context.draft, context.ringOpen)],
         future: [],
-        draft: context.draft.filter((_, i) => i !== idx),
-        selectedVertex: null,
+        draft: context.draft.filter((_, i) => !doomed.has(i)),
+        selectedVertices: [],
       };
     }),
     /** Erase edge k (between vk and v_{k+1}): OPEN the ring and rotate the chain
@@ -300,7 +331,7 @@ export const interactionMachine = setup({
         future: [],
         draft: rotated,
         ringOpen: true,
-        selectedVertex: null,
+        selectedVertices: [],
       };
     }),
     /** Re-close an opened ring (clicked the start vertex) — no vertex added. */
@@ -378,6 +409,7 @@ export const interactionMachine = setup({
           on: {
             HANDLE_GRAB: { target: "dragging", actions: "grabHandle" },
             SELECT_VERTEX: { actions: "selectVertex" },
+            SELECT_ALL_VERTICES: { actions: "selectAllVertices" },
             INSERT_VERTEX: { actions: "insertVertex" },
             DELETE_VERTEX: { guard: "canDeleteVertex", actions: "deleteVertex" },
             DELETE_EDGE: { guard: "canDeleteEdge", actions: "deleteEdge" },

@@ -46,10 +46,16 @@ export function ShortcutSheet({ open, onClose }: { open: boolean; onClose: () =>
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Front-most surface owns Esc: never let it fall through to the
+        // viewer's cancel-draw listener (capture + immediate stop).
+        e.stopImmediatePropagation();
+        onClose();
+      }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [open, onClose]);
 
   if (!open || typeof document === "undefined") return null;

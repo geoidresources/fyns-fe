@@ -20,6 +20,7 @@ import {
   Cartesian3,
   Cartographic,
   Entity,
+  KeyboardEventModifier,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   type Viewer as CesiumViewer,
@@ -431,12 +432,47 @@ export function useInteractionAdapter(
       viewer.scene.requestRender();
     }, ScreenSpaceEventType.LEFT_CLICK);
 
+    // Shift+click while editing: TOGGLE the clicked handle in the multi-
+    // selection (Cesium routes modifier-held clicks to their own registration,
+    // so this never collides with the plain-click insert/select/append path).
+    handler.setInputAction(
+      (event: ScreenSpaceEventHandler.PositionedEvent) => {
+        if (editSubstate() !== "ready") return;
+        const vi = pickHandleIndex(event.position);
+        if (vi === null) return;
+        actor.send({ type: "SELECT_VERTEX", index: vi, additive: true });
+        viewer.scene.requestRender();
+      },
+      ScreenSpaceEventType.LEFT_CLICK,
+      KeyboardEventModifier.SHIFT
+    );
+
     handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
-      // Edit plane: follow the grabbed handle across the terrain.
+      // Edit plane: follow the grabbed handle across the terrain. When the
+      // grabbed vertex is part of a MULTI-selection, the whole group rides the
+      // same delta (rigid translation) — computed here, where Cartesian3 math
+      // lives, and applied verbatim by the machine.
       if (editSubstate() === "dragging") {
         const pos = pickScenePosition(viewer, movement.endPosition);
         if (pos) {
-          actor.send({ type: "HANDLE_MOVE", position: pos });
+          const ctx = actor.getSnapshot().context;
+          const g = ctx.grabbedIndex;
+          if (g === null) return;
+          const draft = ctx.draft as Cartesian3[];
+          const updates: Array<{ index: number; position: Cartesian3 }> = [
+            { index: g, position: pos },
+          ];
+          if (ctx.selectedVertices.length > 1 && draft[g]) {
+            const delta = Cartesian3.subtract(pos, draft[g], new Cartesian3());
+            for (const i of ctx.selectedVertices) {
+              if (i === g || !draft[i]) continue;
+              updates.push({
+                index: i,
+                position: Cartesian3.add(draft[i], delta, new Cartesian3()),
+              });
+            }
+          }
+          actor.send({ type: "HANDLE_MOVE", updates });
           viewer.scene.requestRender();
         }
         return;
@@ -518,7 +554,8 @@ export function useInteractionAdapter(
         return;
       }
       // Walk the vertex selection while editing: Tab / arrows step ±1 around
-      // the ring (VS parity). Shift+Tab walks backward like ArrowLeft.
+      // the ring (VS parity). Shift+Tab walks backward like ArrowLeft. Walking
+      // always collapses to a SINGLE selection — it's a focus traversal.
       if (e.key === "Tab" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
         if (editSubstate() !== "ready") return;
         const ctx = actor.getSnapshot().context;
@@ -526,8 +563,18 @@ export function useInteractionAdapter(
         if (n === 0) return;
         e.preventDefault();
         const dir = e.key === "ArrowLeft" || (e.key === "Tab" && e.shiftKey) ? -1 : 1;
-        const from = ctx.selectedVertex ?? (dir === 1 ? -1 : 0);
+        const sel = ctx.selectedVertices;
+        const from = sel.length > 0 ? sel[sel.length - 1] : dir === 1 ? -1 : 0;
         actor.send({ type: "SELECT_VERTEX", index: (from + dir + n) % n });
+        viewer.scene.requestRender();
+        return;
+      }
+      // Ctrl/Cmd+A while editing: select every vertex (batch move/delete).
+      // preventDefault stops the browser's select-all.
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+        if (editSubstate() !== "ready") return;
+        e.preventDefault();
+        actor.send({ type: "SELECT_ALL_VERTICES" });
         viewer.scene.requestRender();
         return;
       }

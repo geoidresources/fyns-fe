@@ -67,6 +67,7 @@ import {
 import { InteractionProvider } from "@/components/viewer/shell/interactionContext";
 import { MeasurementContextMenu } from "@/components/viewer/shell/MeasurementContextMenu";
 import { ShortcutSheet } from "@/components/viewer/shell/ShortcutSheet";
+import { CommandPalette } from "@/components/viewer/shell/CommandPalette";
 import { useViewerHotkeys } from "@/components/viewer/shell/hooks/useViewerHotkeys";
 import {
   isVolumeKind,
@@ -1301,7 +1302,14 @@ export function ViewerCanvas() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const toggleSheet = useCallback(() => setSheetOpen((v) => !v), []);
   const closeSheet = useCallback(() => setSheetOpen(false), []);
-  useViewerHotkeys(interactionActor, store, actions, toggleSheet);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const togglePalette = useCallback(() => setPaletteOpen((v) => !v), []);
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
+  const showSheetFromPalette = useCallback(() => {
+    setPaletteOpen(false);
+    setSheetOpen(true);
+  }, []);
+  useViewerHotkeys(interactionActor, store, actions, toggleSheet, togglePalette);
 
   // ------------------------------------------------------------------ UI
   // PIVOT grid (2026-07-16): col 1 ModuleRail 48px (spans both rows); col 2 the
@@ -1386,6 +1394,16 @@ export function ViewerCanvas() {
 
           {/* `?` keyboard cheat sheet + the drawing-assistance preference. */}
           <ShortcutSheet open={sheetOpen} onClose={closeSheet} />
+
+          {/* ⌘K command palette — fuzzy jump to tools/lenses/measurements. */}
+          <CommandPalette
+            open={paletteOpen}
+            onClose={closePalette}
+            actor={interactionActor}
+            store={store}
+            actions={actions}
+            onShowSheet={showSheetFromPalette}
+          />
         </div>
 
         {/* Zone 6 — status bar, docked, spanning cols 2–3 */}

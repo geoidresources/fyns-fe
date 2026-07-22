@@ -199,7 +199,7 @@ test("bridge editing CANCEL: re-shows the untouched measurement, clears the draf
   h.store.getState().selectMeasurement("m-7");
   h.actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
   h.actor.send({ type: "HANDLE_GRAB", index: 0 });
-  h.actor.send({ type: "HANDLE_MOVE", position: v(9, 9) });
+  h.actor.send({ type: "HANDLE_MOVE", updates: [{ index: 0, position: v(9, 9) }] });
   h.actor.send({ type: "CANCEL" });
   assert.equal(s(h).measurementVisibility["m-7"], true); // re-shown
   assert.equal(s(h).drawMode, null);
