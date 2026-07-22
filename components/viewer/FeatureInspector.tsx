@@ -41,6 +41,8 @@ import {
 } from "@/lib/viewer/calc";
 import { UNIT_SYSTEMS, convertForDisplay, unitSystemOf, type UnitSystem } from "@/lib/viewer/units";
 import { STYLE_SWATCHES, styleOf, type MeasurementStyle } from "@/lib/viewer/style";
+import { temporalComparePair } from "@/lib/viewer/compare";
+import { ComparisonCard } from "@/components/viewer/shell/ComparisonCard";
 
 // Right contextual inspector — the DESIGN panel (SP-12 mock): header title with
 // pencil-rename; a type dropdown (re-template, teardown §2 "type is mutable
@@ -465,6 +467,9 @@ export function FeatureInspector({
   const demo = (measurement as PanelMeasurement).demo === true;
   const isDraft = !demo && measurement.draft === true;
   const isVolume = isVolumeKind(measurement.kind);
+  // Compare Mode: a temporal compare (params.from/to name two different
+  // surveys) gets the A→B comparison card headline in the Properties tab.
+  const comparePair = demo ? null : temporalComparePair(measurement.params);
   const canPatch = !demo && !!onPatch;
   // Volume kinds may re-run on completed too (edit method → recompute); the
   // backend's in-flight gate (409) covers the computing state.
@@ -706,6 +711,12 @@ export function FeatureInspector({
                 {(demo || material?.name) && <GreyChip>{demo ? "Limestone" : material!.name}</GreyChip>}
                 {measurement.folder && <GreyChip>{measurement.folder}</GreyChip>}
               </div>
+
+              {/* Compare Mode headline — A→B epochs + cut/fill/net Δ. Only for a
+                  temporal compare; ordinary measurements skip it (and its fetch). */}
+              {comparePair && (
+                <ComparisonCard measurement={measurement} projectId={projectId} pair={comparePair} />
+              )}
 
               {/* Failure reason — the LATEST run's error, only while the
                   selected kind has no successful doc of its own. */}

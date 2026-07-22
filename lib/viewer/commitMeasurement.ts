@@ -20,6 +20,7 @@ import {
   CalcParamsError,
   LEAN_RENDER,
   coerceMethodForKind,
+  crossSurveyRefs,
   defaultKindFor,
   isVolumeKind,
   kindForCalcType,
@@ -83,8 +84,26 @@ export async function commitDraftMeasurement(
     throw new CommitRejected("too few points");
   }
 
-  // Kind: template preset → panel calcType (validated for this geometry) →
-  // primitive default. When EDITING, the row's stored kind always wins.
+  // Compare Mode (draw-to-compare): a polygon committed while compare is active
+  // computes a cross-survey VolumeDiff (cut/fill/net between epoch A and epoch B
+  // DSMs inside the boundary) instead of a single-survey volume. CREATE-only —
+  // editing/redrawing an existing row keeps that row's kind/params, so guard on
+  // `!input.measurementId`. When A/B are unpicked or identical there is nothing
+  // to diff: toast and fall through to a normal single-survey commit so the
+  // drawn shape is never lost.
+  const { compareActive, compareA, compareB } = store.getState();
+  const compareDraw = compareActive && mode === "polygon" && !input.measurementId;
+  const compareRefs =
+    compareDraw && compareA && compareB && compareA !== compareB
+      ? crossSurveyRefs(compareA, compareB)
+      : null;
+  if (compareDraw && !compareRefs) {
+    toast.warning("Pick two different surveys to compare");
+  }
+
+  // Kind: a compare draw forces cut_fill; else template preset → panel calcType
+  // (validated for this geometry) → primitive default. When EDITING, the row's
+  // stored kind always wins.
   const kind =
     input.template?.defaultKind ??
     kindForCalcType(store.getState().view.calcType, mode) ??
@@ -92,11 +111,18 @@ export async function commitDraftMeasurement(
   const existing = input.measurementId
     ? store.getState().measurements.find((m) => m.id === input.measurementId)
     : null;
-  const resolvedKind = existing?.kind ?? kind;
+  const resolvedKind = existing?.kind ?? (compareRefs ? "cut_fill" : kind);
 
   const params: Record<string, unknown> = {};
   if (input.template?.drawOpts?.slope) params.slope = true;
-  if (isVolumeKind(resolvedKind)) {
+  if (compareRefs) {
+    // Explicit cross-survey SurfaceRefs (A DSM → B DSM). No volume_method — the
+    // base is the other epoch's DSM, not a derived base surface. Lean render:
+    // metrics now; heatmap tiles are the result-views phase.
+    params.from = compareRefs.from;
+    params.to = compareRefs.to;
+    params.render = LEAN_RENDER;
+  } else if (isVolumeKind(resolvedKind)) {
     const view = store.getState().view;
     // Coerced onto the kind's method list — what persists always equals what
     // the panel displayed (a stale cut/fill pick never rides along).

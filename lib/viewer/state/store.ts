@@ -171,6 +171,19 @@ export interface ViewerShellData {
    */
   estimates: Record<string, EstimateResult>;
 
+  /**
+   * Survey compare (swipe): overlays two epochs' orthomosaics split by a
+   * draggable divider. `compareActive` gates the whole feature; `compareA`
+   * (before / LEFT of the split) and `compareB` (after / RIGHT) are sibling-
+   * survey ids, seeded on activation (null until then); `splitPosition` is the
+   * divider's 0..1 x-position (drives `Scene#splitPosition`). Per-mount like the
+   * rest of the store, so a survey switch resets compare to off.
+   */
+  compareActive: boolean;
+  compareA: string | null;
+  compareB: string | null;
+  splitPosition: number;
+
   busyIds: Set<string>;
   saving: boolean;
   measurementSearch: string;
@@ -215,6 +228,14 @@ export interface ViewerShellActions {
   /** Drop a measurement's estimate for a kind (stale on param change), or all
    * of its kinds when `kind` is omitted. */
   clearEstimate: (id: string, kind?: string) => void;
+
+  /** Survey-compare (swipe) slice setters. */
+  setCompareActive: (active: boolean) => void;
+  setCompareA: (id: string | null) => void;
+  setCompareB: (id: string | null) => void;
+  /** Divider x-position, 0..1 (the caller clamps to a visible band). */
+  setSplitPosition: (pos: number) => void;
+
   setView: (patch: Partial<ViewSettings>) => void;
   setCameraPose: (pose: CameraPose | null) => void;
 
@@ -298,6 +319,11 @@ function defaultData(surveyId: string): ViewerShellData {
 
     measurementVisibility: {},
     estimates: {},
+
+    compareActive: false,
+    compareA: null,
+    compareB: null,
+    splitPosition: 0.5,
 
     busyIds: new Set<string>(),
     saving: false,
@@ -456,6 +482,11 @@ export function createViewerStore(
       }
       set({ estimates: next });
     },
+
+    setCompareActive: (active) => set({ compareActive: active }),
+    setCompareA: (id) => set({ compareA: id }),
+    setCompareB: (id) => set({ compareB: id }),
+    setSplitPosition: (pos) => set({ splitPosition: pos }),
 
     setView: (patch) => set({ view: { ...get().view, ...patch } }),
     setCameraPose: (pose) => set({ cameraPose: pose }),

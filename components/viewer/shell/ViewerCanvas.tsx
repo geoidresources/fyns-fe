@@ -100,6 +100,7 @@ import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 import { ModuleRail } from "@/components/viewer/shell/ModuleRail";
 import { TreePanel } from "@/components/viewer/shell/TreePanel";
 import { FloatingToolbar } from "@/components/viewer/shell/FloatingToolbar";
+import { SurveyCompare } from "@/components/viewer/shell/SurveyCompare";
 import { DetailPanel } from "@/components/viewer/shell/DetailPanel";
 import { StatusBar } from "@/components/viewer/shell/StatusBar";
 import { CameraJoystick } from "@/components/viewer/CameraJoystick";
@@ -113,6 +114,7 @@ import {
 import { useDrawInteraction } from "@/components/viewer/shell/hooks/useDrawInteraction";
 import { useScenePicking } from "@/components/viewer/shell/hooks/useScenePicking";
 import { useLayerLifecycle } from "@/components/viewer/shell/hooks/useLayerLifecycle";
+import { useCompareLayers } from "@/components/viewer/shell/hooks/useCompareLayers";
 
 // Zoom-button step: a fraction of the camera's CURRENT altitude, not a fixed
 // meter amount, so one click feels the same whether orbiting the whole site or
@@ -182,6 +184,10 @@ export function ViewerCanvas() {
   const activeModule = useViewerStore((s) => s.activeModule);
   const selectionKind = useViewerStore((s) => s.selection?.kind ?? null);
   const baseMap = useViewerStore((s) => s.view.baseMap);
+  const compareActive = useViewerStore((s) => s.compareActive);
+  const compareA = useViewerStore((s) => s.compareA);
+  const compareB = useViewerStore((s) => s.compareB);
+  const splitPosition = useViewerStore((s) => s.splitPosition);
   const terrainExaggeration = useViewerStore((s) => s.view.terrainExaggeration);
   const sunLightingEnabled = useViewerStore((s) => s.view.sunLightingEnabled);
   const sunHour = useViewerStore((s) => s.view.sunHour);
@@ -1241,6 +1247,17 @@ export function ViewerCanvas() {
     setLayerControls,
     setDesignControls,
   });
+  // Survey compare (swipe): split imagery for two epochs + the divider position.
+  // Owns its own compare layers; reads handlesRef only to hide the normal ortho.
+  useCompareLayers({
+    viewerReady,
+    compareActive,
+    compareA,
+    compareB,
+    splitPosition,
+    viewerRef,
+    handlesRef,
+  });
 
   // ------------------------------------------------------------- actions
   const actions = useMemo<ViewerActions>(
@@ -1371,6 +1388,10 @@ export function ViewerCanvas() {
           {/* Zone 3 — FLOATING toolbar (the look the user asked for), over the
               canvas top-center on the measure module. */}
           {isMeasure && <FloatingToolbar />}
+
+          {/* Compare swipe — floating control that overlays two epochs' orthos
+              split by a draggable divider (before | after) over this project. */}
+          {manifest && <SurveyCompare projectId={manifest.survey.project_id} />}
 
           {/* Zero-size top-left anchor for the camera joystick. The wrapper has
               no area, so it never intercepts canvas pointer events. */}

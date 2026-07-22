@@ -192,6 +192,22 @@ export function surfaceRefsForMethod(s: CalcMethodState): {
   }
 }
 
+/** Cross-survey SurfaceRef pair for Compare Mode (draw-to-compare). Mirrors
+ * surfaceRefsForMethod's from/to contract but names two EXPLICIT surveys via
+ * `survey_terrain` refs (surface-ref.md §3.1): from = epoch A ("before"),
+ * to = epoch B ("after"). Setting both runs a VolumeDiff (cut/fill/net between
+ * the co-registered DSMs within the polygon) on the deployed volumecompute
+ * worker — no volume_method, the base IS the other epoch's DSM. */
+export function crossSurveyRefs(aId: string, bId: string): {
+  from: Record<string, unknown>;
+  to: Record<string, unknown>;
+} {
+  return {
+    from: { type: "survey_terrain", survey_id: aId, surface: "dsm" },
+    to: { type: "survey_terrain", survey_id: bId, surface: "dsm" },
+  };
+}
+
 /** Inverse of surfaceRefsForMethod for the inspector: recover the editable
  * method state from a measurement's stored params. Falls back to the legacy
  * display-only `volume_method` string, then to null (no volume config). */

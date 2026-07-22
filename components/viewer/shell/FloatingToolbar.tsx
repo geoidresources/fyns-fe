@@ -24,6 +24,7 @@ import {
   Check,
   ChevronDown,
   Circle,
+  Columns2,
   Grid3x3,
   Minus,
   MousePointer,
@@ -48,8 +49,15 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { formatSurveyDate } from "@/lib/utils";
+import { nextCompareSeed } from "@/lib/viewer/compare";
+import { useCompareSurveys } from "@/components/viewer/shell/hooks/useCompareSurveys";
 
 /** Icon-only pill that pops its label out on hover — the floating feel the user
  * asked to keep (ported from ViewerDrawToolbar.tsx). */
@@ -273,6 +281,94 @@ function FloatingToolbarV2() {
           toast.info(next ? "Snapping on" : "Snapping off — hold Alt for one-off");
         }}
       />
+
+      {/* Compare — its OWN section on the RIGHT (renders its leading divider so
+          a single-epoch project leaves no dangling separator). Independent of
+          the draw/probe tools; shares the compare store slice with the bottom
+          SurveyCompare control, so the two stay in sync automatically. */}
+      <CompareSplitButton />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Compare split-button (Compare Mode, Task 1): a main toggle (seed-on-activate,
+// mirroring SurveyCompare.activate via the shared nextCompareSeed) + a chevron
+// dropdown of A ▸ B epoch pickers. Purely additive — its own toolbar section.
+
+function CompareSplitButton() {
+  const surveyId = useViewerStore((s) => s.surveyId);
+  const projectId = useViewerStore((s) => s.manifest?.survey.project_id ?? null);
+  const compareActive = useViewerStore((s) => s.compareActive);
+  const compareA = useViewerStore((s) => s.compareA);
+  const compareB = useViewerStore((s) => s.compareB);
+  const setCompareActive = useViewerStore((s) => s.setCompareActive);
+  const setCompareA = useViewerStore((s) => s.setCompareA);
+  const setCompareB = useViewerStore((s) => s.setCompareB);
+
+  const { surveys } = useCompareSurveys(projectId);
+
+  // Compare needs >=2 epochs; a single-survey project has nothing to compare
+  // (return null AFTER all hooks — no dangling divider either, it's ours).
+  if (!surveys || surveys.length < 2) return null;
+
+  const toggle = () => {
+    if (compareActive) {
+      setCompareActive(false);
+      return;
+    }
+    // Same seeding as SurveyCompare.activate (B ??= current, A ??= prev epoch).
+    const { a, b } = nextCompareSeed({ surveyId, surveys, compareA, compareB });
+    setCompareB(b);
+    setCompareA(a);
+    setCompareActive(true);
+  };
+
+  return (
+    <>
+      <div className="mx-1 h-5 w-px bg-white/[0.08]" />
+      <div className="flex items-center">
+        <ToolPill
+          label="Compare"
+          icon={<Columns2 size={18} />}
+          active={compareActive}
+          onClick={toggle}
+        />
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label="Choose compare surveys"
+              className="flex h-8 w-6 items-center justify-center rounded-full text-gray-500 outline-none transition-colors hover:text-white focus-visible:ring-2 focus-visible:ring-[#C97A4E]"
+            >
+              <ChevronDown size={12} />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            sideOffset={10}
+            className="min-w-[12rem] border-white/[0.08] bg-[#141417] text-[13px] text-gray-200"
+          >
+            <DropdownMenuLabel>Before (A)</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={compareA ?? undefined} onValueChange={setCompareA}>
+              {surveys.map((s) => (
+                <DropdownMenuRadioItem key={`a-${s.id}`} value={s.id}>
+                  {formatSurveyDate(s.survey_date)}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>After (B)</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={compareB ?? undefined} onValueChange={setCompareB}>
+              {surveys.map((s) => (
+                <DropdownMenuRadioItem key={`b-${s.id}`} value={s.id}>
+                  {formatSurveyDate(s.survey_date)}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </>
   );
 }

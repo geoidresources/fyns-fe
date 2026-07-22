@@ -5,6 +5,7 @@ import {
   CalcParamsError,
   DEFAULT_METHOD_STATE,
   calcTypesFor,
+  crossSurveyRefs,
   defaultKindFor,
   isVolumeKind,
   kindForCalcType,
@@ -105,6 +106,14 @@ test("custom-base is a guided error until its editor exists", () => {
     () => surfaceRefsForMethod({ ...DEFAULT_METHOD_STATE, method: "custom-base" }),
     CalcParamsError
   );
+});
+
+test("crossSurveyRefs names two explicit surveys as survey_terrain from/to (Compare Mode)", () => {
+  // from = epoch A ("before"), to = epoch B ("after") — the VolumeDiff pair.
+  assert.deepEqual(crossSurveyRefs("a-1", "b-2"), {
+    from: { type: "survey_terrain", survey_id: "a-1", surface: "dsm" },
+    to: { type: "survey_terrain", survey_id: "b-2", surface: "dsm" },
+  });
 });
 
 // --------------------------------------------------- params → method state
