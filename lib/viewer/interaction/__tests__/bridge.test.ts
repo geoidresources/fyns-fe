@@ -199,7 +199,7 @@ test("bridge editing CANCEL: re-shows the untouched measurement, clears the draf
   h.store.getState().selectMeasurement("m-7");
   h.actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
   h.actor.send({ type: "HANDLE_GRAB", index: 0 });
-  h.actor.send({ type: "HANDLE_MOVE", position: v(9, 9) });
+  h.actor.send({ type: "HANDLE_MOVE", updates: [{ index: 0, position: v(9, 9) }] });
   h.actor.send({ type: "CANCEL" });
   assert.equal(s(h).measurementVisibility["m-7"], true); // re-shown
   assert.equal(s(h).drawMode, null);
@@ -219,5 +219,18 @@ test("bridge: the draft mirror tracks appends and undo while placing", () => {
   assert.strictEqual(s(h).draft.points, h.actor.getSnapshot().context.draft); // same array
   h.actor.send({ type: "UNDO" });
   assert.equal(s(h).draft.points.length, 2);
+  h.detach();
+});
+
+test("bridge: a WITHIN-placing template switch re-mirrors the lit tool (hotkey free-switch)", () => {
+  const h = harness();
+  h.actor.send({ type: "TEMPLATE_PICKED", templateId: "polygon" });
+  assert.equal(s(h).activeToolKey, "palette:polygon");
+  // Empty draft → free switch to line stays IN placing (no re-entry) — the
+  // entry mirror can't see it; the within-placing mirror must.
+  h.actor.send({ type: "TEMPLATE_PICKED", templateId: "line" });
+  assert.equal(h.actor.getSnapshot().value, "placing");
+  assert.equal(s(h).activeToolKey, "palette:line");
+  assert.equal(s(h).drawMode, "polyline");
   h.detach();
 });

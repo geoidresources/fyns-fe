@@ -176,7 +176,15 @@ export async function commitDraftMeasurement(
     s.setMeasurementVisible(created.id, true); // show the just-drawn shape
     s.selectMeasurement(created.id, { fly: false }); // opens the inspector on the draft
     await refreshMeasurements();
-    if (isVolumeKind(resolvedKind)) await triggerCompute(created.id);
+    // Assistance (enrichment §04, layer 3): "assisted" auto-computes and invites
+    // the refine step; "precise" leaves compute as the panel's explicit Run so
+    // params can be reviewed first. Defaults only — the draft is saved either way.
+    if (store.getState().drawingAssistance === "precise") {
+      toast.info("Draft saved — review the setup, then Run compute");
+    } else {
+      if (isVolumeKind(resolvedKind)) await triggerCompute(created.id);
+      toast.info("Saved — press Enter to refine the shape");
+    }
     return { id: created.id };
   } catch (err) {
     if (err instanceof Error) toast.error(`Couldn't create the draft: ${err.message}`);

@@ -120,6 +120,16 @@ export interface ViewerShellData {
   probing: boolean;
   probePoint: LngLatHeight | null;
 
+  /** Layer-2 behavior toggle (enrichment §04): vertex snapping while drawing.
+   * Session-scoped; its DEFAULT comes from `drawingAssistance`. Hold-Alt
+   * suspends it transiently in the adapter without touching this flag. */
+  snapEnabled: boolean;
+  /** Layer-3 defaults preference (enrichment §04): "assisted" (snap on, commit
+   * auto-computes, refine-bridge toast) vs "precise" (snap off by default,
+   * compute stays an explicit Run). Flips DEFAULTS only — gestures never change
+   * meaning. Persisted to localStorage. */
+  drawingAssistance: "assisted" | "precise";
+
   /**
    * When set, the live draw session is EDITING this measurement's geometry (not
    * drawing a fresh one) — mirrors ViewerCanvas's `editingMeasurementIdRef` so
@@ -191,6 +201,10 @@ export interface ViewerShellActions {
   openContextMenu: (x: number, y: number, measurementId: string) => void;
   closeContextMenu: () => void;
 
+  setSnapEnabled: (enabled: boolean) => void;
+  /** Persists to localStorage and re-seeds the snap default for the new level. */
+  setDrawingAssistance: (level: "assisted" | "precise") => void;
+
   setLayerVisible: (key: string, visible: boolean) => void;
   setLayerOpacity: (key: string, opacity: number) => void;
   setMeasurementVisible: (id: string, visible: boolean) => void;
@@ -232,6 +246,20 @@ export type ViewerShellState = ViewerShellData & ViewerShellActions;
 
 /** Initial data values. View-setting defaults mirror SurveyViewer's current
  * useState seeds so 1.3c re-parents without behavior churn. */
+const ASSISTANCE_STORAGE_KEY = "geoid.drawingAssistance";
+
+/** SSR-safe read of the persisted assistance preference (default "assisted"). */
+function readAssistancePref(): "assisted" | "precise" {
+  if (typeof window === "undefined") return "assisted";
+  try {
+    return window.localStorage.getItem(ASSISTANCE_STORAGE_KEY) === "precise"
+      ? "precise"
+      : "assisted";
+  } catch {
+    return "assisted";
+  }
+}
+
 function defaultData(surveyId: string): ViewerShellData {
   return {
     surveyId,
@@ -249,6 +277,8 @@ function defaultData(surveyId: string): ViewerShellData {
     activeTemplateId: null,
     probing: false,
     probePoint: null,
+    snapEnabled: readAssistancePref() !== "precise",
+    drawingAssistance: readAssistancePref(),
     editingMeasurementId: null,
 
     draft: { points: [], hover: null },
@@ -369,6 +399,17 @@ export function createViewerStore(
 
     openDetail: (mode) => set({ detailPanel: mode, detailPanelCollapsed: false }),
     closeDetail: () => set({ detailPanel: null, detailPanelCollapsed: false }),
+
+    setSnapEnabled: (enabled) => set({ snapEnabled: enabled }),
+    setDrawingAssistance: (level) => {
+      try {
+        window.localStorage.setItem(ASSISTANCE_STORAGE_KEY, level);
+      } catch {
+        // private-mode/quota failures: preference still applies for the session
+      }
+      // Re-seed the layer-2 default; the user can still flip snap right back.
+      set({ drawingAssistance: level, snapEnabled: level !== "precise" });
+    },
 
     openContextMenu: (x, y, measurementId) => set({ contextMenu: { x, y, measurementId } }),
     closeContextMenu: () => set({ contextMenu: null }),

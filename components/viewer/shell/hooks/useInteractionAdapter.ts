@@ -20,6 +20,7 @@ import {
   Cartesian3,
   Cartographic,
   Entity,
+  KeyboardEventModifier,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   type Viewer as CesiumViewer,
@@ -53,6 +54,10 @@ function pointToSegmentPx(p: Cartesian2, a: Cartesian2, b: Cartesian2): number {
 }
 
 type InteractionActor = ActorRefFrom<typeof interactionMachine>;
+
+/** Window-level `Enter` is shared with useViewerHotkeys — the first handler to
+ * act stamps the event so the other ignores it (registration order varies). */
+export type ClaimedKeyEvent = KeyboardEvent & { __geoidEnterClaimed?: boolean };
 
 export interface AdapterRefs {
   /** Cursor position (snapped when applicable) — renderer preview + live label. */
@@ -100,6 +105,8 @@ export function useInteractionAdapter(
   const snapPreviewRef = useRef<Cartesian3 | null>(null);
   const snapTargetsRef = useRef<Cartesian3[]>([]);
   const hoverThrottleRef = useRef(0);
+  // Hold-Alt transiently suspends vertex snapping (layer-1 override, §04).
+  const altSuspendRef = useRef(false);
 
   // Session lifecycle: build the snap pool when a draw starts (idle → placing,
   // mirroring legacy startDraw's snapshot semantics) and clear the hover refs
@@ -165,6 +172,10 @@ export function useInteractionAdapter(
           return { pos: pts[0], kind: "origin" };
         }
       }
+      // Vertex snapping honors the layer-2 toggle (S / toolbar chip) and the
+      // layer-1 hold-Alt suspend. Origin-close above is a GESTURE (how a ring
+      // closes), not snapping — it stays live regardless.
+      if (!store.getState().snapEnabled || altSuspendRef.current) return null;
       let best: Cartesian3 | null = null;
       let bestD = VERTEX_SNAP_PX;
       const consider = (c: Cartesian3) => {
@@ -421,12 +432,47 @@ export function useInteractionAdapter(
       viewer.scene.requestRender();
     }, ScreenSpaceEventType.LEFT_CLICK);
 
+    // Shift+click while editing: TOGGLE the clicked handle in the multi-
+    // selection (Cesium routes modifier-held clicks to their own registration,
+    // so this never collides with the plain-click insert/select/append path).
+    handler.setInputAction(
+      (event: ScreenSpaceEventHandler.PositionedEvent) => {
+        if (editSubstate() !== "ready") return;
+        const vi = pickHandleIndex(event.position);
+        if (vi === null) return;
+        actor.send({ type: "SELECT_VERTEX", index: vi, additive: true });
+        viewer.scene.requestRender();
+      },
+      ScreenSpaceEventType.LEFT_CLICK,
+      KeyboardEventModifier.SHIFT
+    );
+
     handler.setInputAction((movement: ScreenSpaceEventHandler.MotionEvent) => {
-      // Edit plane: follow the grabbed handle across the terrain.
+      // Edit plane: follow the grabbed handle across the terrain. When the
+      // grabbed vertex is part of a MULTI-selection, the whole group rides the
+      // same delta (rigid translation) — computed here, where Cartesian3 math
+      // lives, and applied verbatim by the machine.
       if (editSubstate() === "dragging") {
         const pos = pickScenePosition(viewer, movement.endPosition);
         if (pos) {
-          actor.send({ type: "HANDLE_MOVE", position: pos });
+          const ctx = actor.getSnapshot().context;
+          const g = ctx.grabbedIndex;
+          if (g === null) return;
+          const draft = ctx.draft as Cartesian3[];
+          const updates: Array<{ index: number; position: Cartesian3 }> = [
+            { index: g, position: pos },
+          ];
+          if (ctx.selectedVertices.length > 1 && draft[g]) {
+            const delta = Cartesian3.subtract(pos, draft[g], new Cartesian3());
+            for (const i of ctx.selectedVertices) {
+              if (i === g || !draft[i]) continue;
+              updates.push({
+                index: i,
+                position: Cartesian3.add(draft[i], delta, new Cartesian3()),
+              });
+            }
+          }
+          actor.send({ type: "HANDLE_MOVE", updates });
           viewer.scene.requestRender();
         }
         return;
@@ -492,6 +538,12 @@ export function useInteractionAdapter(
     //    This is the primary commit path; double-click stays but its stray-click
     //    risk (insert on a ghost / append while open) is why Enter exists.
     const onKeyDown = (e: KeyboardEvent) => {
+      // Alt suspend tracks regardless of focus — it only mutes snapping.
+      if (e.key === "Alt") {
+        altSuspendRef.current = true;
+        snapPreviewRef.current = null; // drop the cyan halo immediately
+        viewer.scene.requestRender();
+      }
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       if (e.key === "Delete" || e.key === "Backspace") {
@@ -501,20 +553,64 @@ export function useInteractionAdapter(
         viewer.scene.requestRender();
         return;
       }
+      // Walk the vertex selection while editing: Tab / arrows step ±1 around
+      // the ring (VS parity). Shift+Tab walks backward like ArrowLeft. Walking
+      // always collapses to a SINGLE selection — it's a focus traversal.
+      if (e.key === "Tab" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        if (editSubstate() !== "ready") return;
+        const ctx = actor.getSnapshot().context;
+        const n = ctx.draft.length;
+        if (n === 0) return;
+        e.preventDefault();
+        const dir = e.key === "ArrowLeft" || (e.key === "Tab" && e.shiftKey) ? -1 : 1;
+        const sel = ctx.selectedVertices;
+        const from = sel.length > 0 ? sel[sel.length - 1] : dir === 1 ? -1 : 0;
+        actor.send({ type: "SELECT_VERTEX", index: (from + dir + n) % n });
+        viewer.scene.requestRender();
+        return;
+      }
+      // Ctrl/Cmd+A while editing: select every vertex (batch move/delete).
+      // preventDefault stops the browser's select-all.
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+        if (editSubstate() !== "ready") return;
+        e.preventDefault();
+        actor.send({ type: "SELECT_ALL_VERTICES" });
+        viewer.scene.requestRender();
+        return;
+      }
       if (e.key === "Enter") {
+        // One keypress, one meaning: the hotkeys hook and this handler share
+        // window `Enter` and their registration ORDER is load-dependent (this
+        // effect re-registers when viewerReady flips). Whichever acts first
+        // claims the event so "Enter enters edit" can never cascade into an
+        // instant COMMIT in the same dispatch.
+        if ((e as ClaimedKeyEvent).__geoidEnterClaimed) return;
         if (editSubstate() === "ready") {
           e.preventDefault();
+          (e as ClaimedKeyEvent).__geoidEnterClaimed = true;
           finishWithGuard("COMMIT");
         } else if (actor.getSnapshot().value === "calcReady") {
           e.preventDefault();
+          (e as ClaimedKeyEvent).__geoidEnterClaimed = true;
           finishWithGuard("DOUBLE_CLICK");
         }
       }
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Alt") altSuspendRef.current = false;
+    };
+    // Alt-Tab / window switches can eat the keyup — never leave snap stuck off.
+    const onBlur = () => {
+      altSuspendRef.current = false;
+    };
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
 
     return () => {
       window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
       handler.destroy();
       // A teardown mid-drag must hand the camera back.
       if (!viewer.isDestroyed()) {

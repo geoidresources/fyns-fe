@@ -149,6 +149,8 @@ function FloatingToolbarV2() {
   // Store mirror keeps probe lit-state consistent with legacy panels.
   const activeToolKey = useViewerStore((s) => s.activeToolKey);
   const probing = useViewerStore((s) => s.probing);
+  const snapEnabled = useViewerStore((s) => s.snapEnabled);
+  const setSnapEnabled = useViewerStore((s) => s.setSnapEnabled);
   const machineState = useSelector(actor, (s) => s.value);
   const armedTemplateId = useSelector(actor, (s) => s.context.template?.id ?? null);
   const draftLen = useSelector(actor, (s) => s.context.draft.length);
@@ -262,10 +264,14 @@ function FloatingToolbarV2() {
         onClick={() => actor.send({ type: "REDO" })}
       />
       <ToolPill
-        label="Snap"
+        label={snapEnabled ? "Snap on" : "Snap off"}
         icon={<Grid3x3 size={18} />}
-        active={false}
-        onClick={() => toast.info("Snapping is on while drawing — a toggle comes with P2")}
+        active={snapEnabled}
+        onClick={() => {
+          const next = !snapEnabled;
+          setSnapEnabled(next);
+          toast.info(next ? "Snapping on" : "Snapping off — hold Alt for one-off");
+        }}
       />
     </div>
   );

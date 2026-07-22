@@ -325,8 +325,8 @@ test("editing: grab → move → drop relocates one vertex; undo reverts the who
   actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
   actor.send({ type: "HANDLE_GRAB", index: 1 });
   assert.deepEqual(actor.getSnapshot().value, { editing: "dragging" });
-  actor.send({ type: "HANDLE_MOVE", position: v(5, 5) });
-  actor.send({ type: "HANDLE_MOVE", position: v(9, 9) }); // live follow, no new snapshot
+  actor.send({ type: "HANDLE_MOVE", updates: [{ index: 1, position: v(5, 5) }] });
+  actor.send({ type: "HANDLE_MOVE", updates: [{ index: 1, position: v(9, 9) }] }); // live follow, no new snapshot
   actor.send({ type: "HANDLE_DROP" });
   let s = actor.getSnapshot();
   assert.deepEqual(s.value, { editing: "ready" });
@@ -342,7 +342,7 @@ test("editing COMMIT hands a PATCH (measurementId set) to the commit actor", asy
   const { actor, commits } = startActor();
   actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
   actor.send({ type: "HANDLE_GRAB", index: 0 });
-  actor.send({ type: "HANDLE_MOVE", position: v(-1, -1) });
+  actor.send({ type: "HANDLE_MOVE", updates: [{ index: 0, position: v(-1, -1) }] });
   actor.send({ type: "HANDLE_DROP" });
   actor.send({ type: "COMMIT" });
   await waitFor(actor, (s) => s.value === "idle");
@@ -364,7 +364,7 @@ test("editing CANCEL/ESC discards to idle (mid-drag too) with a clean context", 
   const { actor } = startActor();
   actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
   actor.send({ type: "HANDLE_GRAB", index: 2 });
-  actor.send({ type: "HANDLE_MOVE", position: v(3, 3) });
+  actor.send({ type: "HANDLE_MOVE", updates: [{ index: 2, position: v(3, 3) }] });
   actor.send({ type: "ESC" }); // cancel mid-drag
   const s = actor.getSnapshot();
   assert.equal(s.value, "idle");
@@ -377,7 +377,7 @@ test("edit commit FAILURE returns to editing.ready with the draft intact (origin
   const { actor } = startActor({ failCommit: true });
   actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: editVerts(), primitive: "polygon" });
   actor.send({ type: "HANDLE_GRAB", index: 1 });
-  actor.send({ type: "HANDLE_MOVE", position: v(4, 4) });
+  actor.send({ type: "HANDLE_MOVE", updates: [{ index: 1, position: v(4, 4) }] });
   actor.send({ type: "HANDLE_DROP" });
   actor.send({ type: "COMMIT" });
   await waitFor(actor, (s) => JSON.stringify(s.value) === JSON.stringify({ editing: "ready" }));
@@ -394,7 +394,7 @@ test("editing INSERT_VERTEX splices on the edge, selects the new vertex, snapsho
   const s = actor.getSnapshot();
   assert.equal(s.context.draft.length, 4);
   assert.deepEqual(s.context.draft[1], v(0.5, 0));
-  assert.equal(s.context.selectedVertex, 1);
+  assert.deepEqual(s.context.selectedVertices, [1]);
   actor.send({ type: "UNDO" });
   assert.equal(actor.getSnapshot().context.draft.length, 3); // insert reverted
 });
@@ -422,7 +422,7 @@ test("editing DELETE_VERTEX removes the selected vertex; ring stays closed and r
   const s = actor.getSnapshot();
   assert.equal(s.context.draft.length, 3);
   assert.deepEqual(s.context.draft, [v(0, 0), v(1, 1), v(0, 1)]); // v1 gone, ring re-routes
-  assert.equal(s.context.selectedVertex, null);
+  assert.deepEqual(s.context.selectedVertices, []);
   assert.equal(s.context.ringOpen, false); // stays CLOSED (unlike edge-erase)
 });
 
@@ -456,7 +456,7 @@ test("editing: grabbing a handle also selects it (Delete target)", () => {
   });
   actor.send({ type: "HANDLE_GRAB", index: 2 });
   actor.send({ type: "HANDLE_DROP" });
-  assert.equal(actor.getSnapshot().context.selectedVertex, 2);
+  assert.deepEqual(actor.getSnapshot().context.selectedVertices, [2]);
   actor.send({ type: "DELETE_VERTEX" }); // deletes the grabbed-then-selected vertex
   assert.equal(actor.getSnapshot().context.draft.length, 3);
 });
@@ -497,7 +497,7 @@ test("DELETE_EDGE opens the ring: rotates the gap to the end, clears selection, 
   assert.equal(s.context.ringOpen, true);
   // chain now runs v1 → v2 → v3 → v0, so the gap (old edge 0) sits between v0 and v1.
   assert.deepEqual(s.context.draft, [v(1, 0), v(1, 1), v(0, 1), v(0, 0)]);
-  assert.equal(s.context.selectedVertex, null);
+  assert.deepEqual(s.context.selectedVertices, []);
   assert.equal(s.context.history.length, 1);
   assert.deepEqual(s.value, { editing: "ready" });
 });
@@ -629,4 +629,90 @@ test("REDRAW_SHAPE commit FAILURE returns to calcReady (create plane), retry kee
   actor.send({ type: "DOUBLE_CLICK" });
   await waitFor(actor, (s) => s.value === "calcReady");
   assert.equal(actor.getSnapshot().context.measurementId, "m-9");
+});
+
+// ---------------------------------------------------------------- multi-vertex (Phase 2)
+
+test("shift-click TOGGLES membership; plain click collapses to one", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: [v(0, 0), v(1, 0), v(1, 1), v(0, 1)], primitive: "polygon" });
+  actor.send({ type: "SELECT_VERTEX", index: 0 });
+  actor.send({ type: "SELECT_VERTEX", index: 2, additive: true });
+  assert.deepEqual(actor.getSnapshot().context.selectedVertices, [0, 2]);
+  actor.send({ type: "SELECT_VERTEX", index: 0, additive: true }); // toggle 0 off
+  assert.deepEqual(actor.getSnapshot().context.selectedVertices, [2]);
+  actor.send({ type: "SELECT_VERTEX", index: 1 }); // plain click replaces
+  assert.deepEqual(actor.getSnapshot().context.selectedVertices, [1]);
+});
+
+test("SELECT_ALL_VERTICES selects the whole ring", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: [v(0, 0), v(1, 0), v(1, 1), v(0, 1)], primitive: "polygon" });
+  actor.send({ type: "SELECT_ALL_VERTICES" });
+  assert.deepEqual(actor.getSnapshot().context.selectedVertices, [0, 1, 2, 3]);
+});
+
+test("batch DELETE removes every selected vertex in one undoable step", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: [v(0, 0), v(1, 0), v(1, 1), v(0, 1), v(-1, 1)], primitive: "polygon" });
+  actor.send({ type: "SELECT_VERTEX", index: 1 });
+  actor.send({ type: "SELECT_VERTEX", index: 3, additive: true });
+  actor.send({ type: "DELETE_VERTEX" }); // 5 - 2 = 3 ≥ polygon min → allowed
+  const s = actor.getSnapshot();
+  assert.deepEqual(s.context.draft, [v(0, 0), v(1, 1), v(-1, 1)]);
+  assert.deepEqual(s.context.selectedVertices, []);
+  actor.send({ type: "UNDO" }); // one step restores all five
+  assert.equal(actor.getSnapshot().context.draft.length, 5);
+});
+
+test("batch DELETE is BLOCKED when it would drop below the minimum", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: [v(0, 0), v(1, 0), v(1, 1), v(0, 1)], primitive: "polygon" });
+  actor.send({ type: "SELECT_ALL_VERTICES" }); // 4 - 4 = 0 < 3
+  actor.send({ type: "DELETE_VERTEX" });
+  assert.equal(actor.getSnapshot().context.draft.length, 4); // untouched
+  actor.send({ type: "SELECT_VERTEX", index: 0 });
+  actor.send({ type: "SELECT_VERTEX", index: 1, additive: true }); // 4 - 2 = 2 < 3
+  actor.send({ type: "DELETE_VERTEX" });
+  assert.equal(actor.getSnapshot().context.draft.length, 4); // still blocked
+});
+
+test("batch drag: grabbing INSIDE the selection keeps it; the machine applies every update", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: [v(0, 0), v(1, 0), v(1, 1), v(0, 1)], primitive: "polygon" });
+  actor.send({ type: "SELECT_VERTEX", index: 0 });
+  actor.send({ type: "SELECT_VERTEX", index: 1, additive: true });
+  actor.send({ type: "HANDLE_GRAB", index: 0 }); // inside the selection → kept
+  assert.deepEqual(actor.getSnapshot().context.selectedVertices, [0, 1]);
+  // Adapter sends the whole group with the same delta (+2,+2 here).
+  actor.send({ type: "HANDLE_MOVE", updates: [
+    { index: 0, position: v(2, 2) },
+    { index: 1, position: v(3, 2) },
+  ]});
+  actor.send({ type: "HANDLE_DROP" });
+  const s = actor.getSnapshot();
+  assert.deepEqual(s.context.draft[0], v(2, 2));
+  assert.deepEqual(s.context.draft[1], v(3, 2));
+  assert.deepEqual(s.context.draft[2], v(1, 1)); // unselected verts untouched
+  actor.send({ type: "UNDO" }); // whole batch move is ONE step
+  assert.deepEqual(actor.getSnapshot().context.draft[0], v(0, 0));
+  assert.deepEqual(actor.getSnapshot().context.draft[1], v(1, 0));
+});
+
+test("grabbing OUTSIDE the selection collapses it to the grabbed vertex", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: [v(0, 0), v(1, 0), v(1, 1), v(0, 1)], primitive: "polygon" });
+  actor.send({ type: "SELECT_VERTEX", index: 0 });
+  actor.send({ type: "SELECT_VERTEX", index: 1, additive: true });
+  actor.send({ type: "HANDLE_GRAB", index: 3 }); // outside → collapse
+  assert.deepEqual(actor.getSnapshot().context.selectedVertices, [3]);
+});
+
+test("undo drops selection indices the restored draft no longer has", () => {
+  const { actor } = startActor();
+  actor.send({ type: "EDIT_SHAPE", measurementId: "m-7", geometry: [v(0, 0), v(1, 0), v(1, 1), v(0, 1)], primitive: "polygon" });
+  actor.send({ type: "INSERT_VERTEX", edgeIndex: 2, position: v(2, 2) }); // draft 5, selection [3]
+  actor.send({ type: "SELECT_VERTEX", index: 4, additive: true }); // [3, 4]
+  actor.send({ type: "UNDO" }); // back to 4 verts — index 4 must drop
+  assert.deepEqual(actor.getSnapshot().context.selectedVertices, [3]);
 });
