@@ -14,10 +14,18 @@
 
 import React, { useMemo } from "react";
 import Link from "next/link";
-import { ChevronLeft, Download, Loader2 } from "lucide-react";
+import { ChevronLeft, Download, FileJson, FileText, Loader2, Sheet } from "lucide-react";
 
 import { useViewerStore } from "@/lib/viewer/state/store";
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   ELEVATION_RAMPS,
   contourVectorRole,
@@ -63,14 +71,30 @@ export function TreePanel() {
             </p>
           )}
         </div>
-        <button
-          type="button"
-          aria-label="Export measurements"
-          onClick={actions.exportMeasurements}
-          className="shrink-0 rounded-[4px] p-1 text-gray-500 transition-colors hover:bg-white/[0.03] hover:text-gray-200"
-        >
-          <Download size={15} />
-        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            aria-label="Export & reports"
+            className="shrink-0 rounded-[4px] p-1 text-gray-500 outline-none transition-colors hover:bg-white/[0.03] hover:text-gray-200 data-[state=open]:bg-white/[0.05] data-[state=open]:text-gray-200"
+          >
+            <Download size={15} />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuLabel>Export & reports</DropdownMenuLabel>
+            <DropdownMenuItem onSelect={() => actions.openSiteReport()}>
+              <FileText size={14} className="text-[#C97A4E]" />
+              Site report…
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => actions.exportMeasurementsCsv()}>
+              <Sheet size={14} />
+              Measurements (CSV)
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => actions.exportMeasurements()}>
+              <FileJson size={14} />
+              Measurements (GeoJSON)
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <button
           type="button"
           aria-label="Collapse panel"
@@ -124,6 +148,7 @@ function SurveyTree({ projectId, surveyId }: { projectId: string; surveyId: stri
   const manifest = useViewerStore((s) => s.manifest);
   const layerControls = useViewerStore((s) => s.layerControls);
   const designControls = useViewerStore((s) => s.designControls);
+  const cutfillSettings = useViewerStore((s) => s.cutfillSettings);
   const project = useViewerStore((s) => s.project);
   const view = useViewerStore((s) => s.view);
   const actions = useViewerActions();
@@ -201,8 +226,10 @@ function SurveyTree({ projectId, surveyId }: { projectId: string; surveyId: stri
         showDigitalTwin={showDigitalTwin}
         sunLightingEnabled={view.sunLightingEnabled}
         sunHour={view.sunHour}
+        cutfillSettings={cutfillSettings}
         onToggle={actions.handleToggle}
         onOpacity={actions.handleOpacity}
+        onCutfillSettings={actions.handleCutfillSettings}
         onToggleDesign={actions.handleToggleDesign}
         onTerrainExaggeration={actions.setTerrainExaggeration}
         onSetBaseMap={actions.setBaseMap}

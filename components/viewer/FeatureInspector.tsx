@@ -29,6 +29,7 @@ import {
   DEFAULT_METHOD_STATE,
   calcTypesFor,
   coerceMethodForKind,
+  crossSurveyRefs,
   isVolumeKind,
   methodFromParams,
   LEAN_RENDER,
@@ -596,6 +597,15 @@ export function FeatureInspector({
 
   const runCompute = () => {
     if (!onCompute) return;
+    // Compare measurements (draw-to-compare) carry an explicit A→B survey_terrain
+    // pair, not a base method — re-run must preserve it. methodFromParams has no
+    // survey_terrain case, so calcCfg would have fallen back to smart-base and a
+    // naive re-run would silently recompute this as a single-survey volume.
+    if (comparePair) {
+      const refs = crossSurveyRefs(comparePair.aId, comparePair.bId);
+      onCompute(measurement.id, { from: refs.from, to: refs.to, render: LEAN_RENDER });
+      return;
+    }
     // Volume kinds always send the edited config as the override — the backend
     // persists the merge, so the row states what ran (§6.1).
     if (isVolume && calcCfg) {
@@ -779,7 +789,7 @@ export function FeatureInspector({
                     </span>
                   </p>
                 )}
-                {isVolume && calcCfg && (
+                {isVolume && calcCfg && !comparePair && (
                   <button
                     type="button"
                     className="group flex items-center gap-1"
@@ -804,7 +814,7 @@ export function FeatureInspector({
 
               {/* Disclosed base-method editor — same component as the drawing
                   panel; edits ride the next Run compute as the §6.1 override. */}
-              {editBase && isVolume && calcCfg && !demo && (
+              {editBase && isVolume && calcCfg && !comparePair && !demo && (
                 <div className="rounded-lg border border-white/[0.06] bg-[#151518] p-2.5">
                   <CalcConfig
                     idPrefix="inspect"

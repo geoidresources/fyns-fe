@@ -27,6 +27,7 @@ import type { Cartesian3 } from "cesium";
 import type { EstimateResult, Manifest, Measurement } from "@/lib/api/assetSvc";
 import type { Project } from "@/lib/api/userSvc";
 import type { LayerControl, DesignControl } from "@/components/viewer/LayerPanel";
+import type { CutFillSettings } from "@/lib/viewer/cutfillColormap";
 import type { DrawMode, DrawOptions } from "@/components/viewer/MeasurementPanel";
 import type { LngLatHeight } from "@/lib/viewer/measure";
 
@@ -157,6 +158,14 @@ export interface ViewerShellData {
   designControls: DesignControl[];
 
   /**
+   * Per-cut/fill-layer render settings, keyed by layer key (`cutfill-<i>`).
+   * Seeded when a diff-raster resolves (from its p98 stats); a change here
+   * re-colorizes the live heatmap. In-memory/session only — not URL-encoded
+   * (fine-grained palette prefs, unlike the layer visibility toggles).
+   */
+  cutfillSettings: Record<string, CutFillSettings>;
+
+  /**
    * Per-measurement canvas visibility (eye toggles in WorkspaceTree).
    * Missing keys are hidden — the viewer starts with no stockpiles painted;
    * geometry appears only after the user turns an eye on.
@@ -251,6 +260,8 @@ export interface ViewerShellActions {
   setMeasurements: (measurements: Measurement[]) => void;
   setLayerControls: (layers: LayerControl[]) => void;
   setDesignControls: (designs: DesignControl[]) => void;
+  /** Replace the settings for one cut/fill layer (seed on load, patch on edit). */
+  setCutfillSettings: (key: string, settings: CutFillSettings) => void;
   setBusy: (id: string, busy: boolean) => void;
   setSaving: (saving: boolean) => void;
   setMeasurementSearch: (search: string) => void;
@@ -316,6 +327,7 @@ function defaultData(surveyId: string): ViewerShellData {
     measurements: [],
     layerControls: [],
     designControls: [],
+    cutfillSettings: {},
 
     measurementVisibility: {},
     estimates: {},
@@ -522,6 +534,8 @@ export function createViewerStore(
     setProject: (project) => set({ project }),
     setMeasurements: (measurements) => set({ measurements }),
     setLayerControls: (layers) => set({ layerControls: layers }),
+    setCutfillSettings: (key, settings) =>
+      set({ cutfillSettings: { ...get().cutfillSettings, [key]: settings } }),
     setDesignControls: (designs) => set({ designControls: designs }),
 
     setBusy: (id, busy) => {

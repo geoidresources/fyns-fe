@@ -48,7 +48,12 @@ export interface ViewerActions {
     id: string,
     body: { name?: string; folder?: string; kind?: string; params?: Record<string, unknown>; draft?: boolean }
   ) => Promise<void>;
+  /** Download the measurement table as GeoJSON (geometry + metrics). */
   exportMeasurements: () => void;
+  /** Download the measurement table as RFC-4180 CSV (one metric column per key). */
+  exportMeasurementsCsv: () => void;
+  /** Open the printable, client-facing Site Report overlay. */
+  openSiteReport: () => void;
 
   // Layer / view interaction (scene side effects live in ViewerCanvas).
   handleToggle: (key: string) => void;
@@ -59,6 +64,11 @@ export interface ViewerActions {
   handleColorMapChange: (value: string) => void;
   handleShadingChange: (value: string) => void;
   handleContourIntervalChange: (intervalM: number) => void;
+  /** Patch a live cut/fill layer's colormap settings and re-colorize in place. */
+  handleCutfillSettings: (
+    key: string,
+    patch: Partial<import("@/lib/viewer/cutfillColormap").CutFillSettings>
+  ) => void;
   handleToggleImages: () => void;
   handleToggleGcps: () => void;
   handleToggleDigitalTwin: () => void;

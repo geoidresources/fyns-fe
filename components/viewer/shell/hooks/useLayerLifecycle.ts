@@ -64,11 +64,18 @@ import {
   designIsGeoJson,
   isThinSurfaceMesh,
   lensLabel,
+  makeCutfillProvider,
   parseLensRamp,
   pickTilesetUrl,
   pickXyzTemplate,
   type LayerHandle,
 } from "@/components/viewer/shell/sceneHelpers";
+import { loadCutfillRaster, type CutFillRaster } from "@/lib/viewer/cutfillRaster";
+import {
+  colorizeCutfill,
+  defaultCutfillSettings,
+  type CutFillSettings,
+} from "@/lib/viewer/cutfillColormap";
 
 export function useLayerLifecycle(deps: {
   viewerReady: boolean;
@@ -94,8 +101,13 @@ export function useLayerLifecycle(deps: {
   clipCollectionRef: RefObject<ClippingPolygonCollection | null>;
   defaultTerrainSigRef: RefObject<string | null>;
   measurementDsRef: RefObject<GeoJsonDataSource | null>;
+  // Live cut/fill heatmap: the loaded Float32 raster + its offscreen canvas per
+  // layer key, so `handleCutfillSettings` can recolorize without re-fetching.
+  cutfillRastersRef: RefObject<Map<string, CutFillRaster>>;
+  cutfillCanvasesRef: RefObject<Map<string, HTMLCanvasElement>>;
   setClipInputsVersion: Dispatch<SetStateAction<number>>;
   patchControl: (key: string, patch: Partial<LayerControl>) => void;
+  setCutfillSettings: (key: string, settings: CutFillSettings) => void;
   registerSurveyBounds: (tileset: Cesium3DTileset) => void;
   updateCloudPreload: () => void;
   applyTerrain: (url: string | null) => Promise<boolean>;
@@ -126,8 +138,11 @@ export function useLayerLifecycle(deps: {
     clipCollectionRef,
     defaultTerrainSigRef,
     measurementDsRef,
+    cutfillRastersRef,
+    cutfillCanvasesRef,
     setClipInputsVersion,
     patchControl,
+    setCutfillSettings,
     registerSurveyBounds,
     updateCloudPreload,
     applyTerrain,
@@ -197,6 +212,10 @@ export function useLayerLifecycle(deps: {
     footprintsRef.current.clear();
     meshReadyRef.current.clear();
     meshPreloadWaiverRef.current.clear();
+    // Drop the previous survey's cut/fill rasters/canvases (keyed by cutfill-<i>,
+    // which restart at 0), so a new survey re-loads + re-seeds fresh settings.
+    cutfillRastersRef.current.clear();
+    cutfillCanvasesRef.current.clear();
     setClipInputsVersion((v) => v + 1);
     surveyBoundsRef.current = null;
     tilesetFramedRef.current = false;
@@ -263,6 +282,134 @@ export function useLayerLifecycle(deps: {
         addImagery(`lens-${i}-${k}`, lensLabel(k), "lens", l, template, false, { lensRamp: ramp });
       });
     });
+
+    // Cut/Fill heatmap — whole-site cross-epoch Δ (analytics.cut_fill[]). The
+    // PRIMARY render is a LIVE client-colorized layer built from the raw diff-
+    // raster (`diff_raster_url`, a Float32 Δz GeoTIFF): the raster is loaded once
+    // (down-sampled), then a configurable palette/range/deadband recolorizes it
+    // instantly on the CPU — the same instant control the DSM gear gives. The
+    // server's baked PNG pyramid (`heatmap_tiles_url`) is only a FALLBACK when no
+    // diff-raster is present (or its load fails). Only the `global` scope becomes
+    // a layer. Off by default; the net-volume label comes from the server.
+    // The cut_fill entry carries no bbox, so bound the (fallback) pyramid with the
+    // survey extent: prefer the DSM terrain bbox, then any terrain, then any ortho.
+    const siteBbox =
+      (manifest.layers.terrain || []).find((t) => (t.surface_type || "").toLowerCase() === "dsm")?.bbox ||
+      (manifest.layers.terrain || []).find((t) => t.bbox)?.bbox ||
+      (manifest.layers.ortho || []).find((o) => o.bbox)?.bbox;
+    const siteRectangle = bboxToRectangle(siteBbox);
+    (manifest.analytics?.cut_fill || [])
+      .filter((cf) => cf.scope === "global" && (!!cf.diff_raster_url || !!cf.heatmap_tiles_url))
+      .forEach((cf, i) => {
+        const key = `cutfill-${i}`;
+        const net = cf.net_change_m3;
+        const netStr = Number.isFinite(net)
+          ? `${net >= 0 ? "+" : ""}${Math.round(net).toLocaleString()} m³`
+          : "";
+        const label = netStr ? `Cut / Fill Δ · ${netStr}` : "Cut / Fill Δ";
+
+        // Server's baked XYZ pyramid — the fallback render. Returns false when it
+        // can't be built (no tiles URL, or no survey extent to bound it).
+        const buildBaked = (): boolean => {
+          if (!cf.heatmap_tiles_url || !siteRectangle) return false;
+          const provider = new UrlTemplateImageryProvider({
+            url: cf.heatmap_tiles_url.replace(/\/+$/, "") + "/{z}/{x}/{y}.png",
+            rectangle: siteRectangle,
+            minimumLevel: 14,
+            maximumLevel: 18,
+          });
+          const layer = viewer.imageryLayers.addImageryProvider(provider);
+          layer.show = visibleRef.current.get(key) ?? false;
+          layer.alpha = 0.85;
+          // The baked ramp paints no-change ground solid white; knock white →
+          // transparent so only real cut (red) / fill (blue) shows over the ortho.
+          layer.colorToAlpha = Color.WHITE;
+          layer.colorToAlphaThreshold = 0.22;
+          handles.set(key, { type: "imagery", layer });
+          return true;
+        };
+
+        if (cf.diff_raster_url) {
+          // Live path: load + colorize the diff-raster, then drape it as one tile.
+          // The raster URL is already same-origin (/gcs proxied via proxyGcsUrls).
+          loadCutfillRaster(cf.diff_raster_url)
+            .then((raster) => {
+              // Commit on PERSISTENT state, not the effect-run-scoped `cancelled`:
+              // a StrictMode / fast-refresh double-mount cancels the starting run
+              // while the layer-signature guard blocks a restart, which would
+              // orphan this resolved load. It stays valid as long as the viewer
+              // lives and this is still the current build (a survey switch bumps
+              // the signature → a stale load then correctly no-ops).
+              if (viewer.isDestroyed() || layersSignatureRef.current !== signature) return;
+              if (handles.get(key)) return; // already built (baked fallback or a prior resolve)
+              const rect = (raster.bbox && bboxToRectangle(raster.bbox)) || siteRectangle;
+              if (!rect) {
+                // No extent from either the raster or the survey — fall back.
+                if (buildBaked()) patchControl(key, { loading: false });
+                else patchControl(key, { loading: false, error: "No extent for cut/fill" });
+                viewer.scene.requestRender();
+                return;
+              }
+              const settings = defaultCutfillSettings(raster);
+              const canvas = document.createElement("canvas");
+              canvas.width = raster.width;
+              canvas.height = raster.height;
+              const ctx = canvas.getContext("2d");
+              if (ctx) {
+                const img = ctx.createImageData(raster.width, raster.height);
+                colorizeCutfill(
+                  raster.data,
+                  raster.width,
+                  raster.height,
+                  {
+                    min: settings.min,
+                    max: settings.max,
+                    deadbandM: settings.deadbandM,
+                    palette: settings.palette,
+                    noData: raster.noData,
+                  },
+                  img.data
+                );
+                ctx.putImageData(img, 0, 0);
+              }
+              const layer = viewer.imageryLayers.addImageryProvider(makeCutfillProvider(canvas, rect));
+              layer.show = visibleRef.current.get(key) ?? false;
+              layer.alpha = settings.opacity;
+              handles.set(key, { type: "imagery", layer });
+              cutfillRastersRef.current.set(key, raster);
+              cutfillCanvasesRef.current.set(key, canvas);
+              setCutfillSettings(key, settings);
+              patchControl(key, { loading: false, cutfillLive: true });
+              viewer.scene.requestRender();
+            })
+            .catch((err) => {
+              if (viewer.isDestroyed() || layersSignatureRef.current !== signature) return;
+              if (handles.get(key)) return;
+              console.error("Failed to load cut/fill diff-raster:", err);
+              if (buildBaked()) patchControl(key, { loading: false });
+              else patchControl(key, { loading: false, error: "Failed to load cut/fill" });
+              viewer.scene.requestRender();
+            });
+          controls.push({
+            key,
+            label,
+            category: "lens",
+            visible: false,
+            opacity: 0.85,
+            supportsOpacity: true,
+            loading: true,
+          });
+        } else if (buildBaked()) {
+          controls.push({
+            key,
+            label,
+            category: "lens",
+            visible: false,
+            opacity: 0.85,
+            supportsOpacity: true,
+          });
+        }
+      });
 
     // Terrain — quantized-mesh surfaces (exclusive). The DSM is ON by default so
     // the ortho drapes on real relief: otherwise the globe is a flat ellipsoid

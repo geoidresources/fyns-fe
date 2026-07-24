@@ -37,6 +37,15 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import {
+  CUTFILL_PALETTES,
+  formatDelta,
+  niceCeil,
+  paletteCssGradient,
+  roundDelta,
+  type CutFillPaletteId,
+  type CutFillSettings,
+} from "@/lib/viewer/cutfillColormap";
 
 export type LayerCategory = "terrain" | "ortho" | "pointcloud" | "lens" | "vector";
 
@@ -57,6 +66,9 @@ export interface LayerControl {
   intervalM?: number;
   /** Manifest vector role (image_positions, gcps, contours, …). */
   vectorRole?: string;
+  /** Cut/fill row backed by a live client-colorized diff-raster (gets the gear)
+   * rather than the server's baked PNG tiles (plain toggle). */
+  cutfillLive?: boolean;
 }
 
 /** A CAD/vector design overlay (DXF, LandXML, …) from the manifest. */
@@ -97,8 +109,11 @@ interface LayerPanelProps {
   showDigitalTwin?: boolean;
   sunLightingEnabled?: boolean;
   sunHour?: number;
+  /** Live cut/fill render settings keyed by layer key (empty until a raster loads). */
+  cutfillSettings?: Record<string, CutFillSettings>;
   onToggle: (key: string) => void;
   onOpacity: (key: string, opacity: number) => void;
+  onCutfillSettings?: (key: string, patch: Partial<CutFillSettings>) => void;
   onToggleDesign: (key: string) => void;
   onTerrainExaggeration: (value: number) => void;
   onSetBaseMap: (value: string) => void;
@@ -526,6 +541,168 @@ function TerrainLayerRow({
   );
 }
 
+/** Live-colormap settings card for a cut/fill layer: palette, legend, symmetric
+ * range (auto ±p98 or manual), opacity, and a deadband. Every change flows out
+ * through `onChange` → recolorizes the diff-raster in place (instant CPU pass).
+ * All derived (span/slider bounds) is computed in render — no stored copies. */
+function CutFillSettingsCard({
+  settings,
+  onChange,
+}: {
+  settings: CutFillSettings;
+  onChange: (patch: Partial<CutFillSettings>) => void;
+}) {
+  const isAuto = settings.rangeMode === "auto";
+  // Symmetric half-width the ramp currently spans (the diverging map is centered
+  // on 0, so |min| and |max| match; guard asymmetry defensively).
+  const span = Math.max(Math.abs(settings.min), Math.abs(settings.max));
+  const sliderMax = Math.max(niceCeil(settings.absMax || span || 1), roundDelta(span) || 1);
+  const step = sliderMax >= 50 ? 1 : sliderMax >= 10 ? 0.5 : sliderMax >= 2 ? 0.1 : 0.05;
+  const deadMax = Math.max(0.5, roundDelta(Math.max(settings.absP98, 0.5)));
+  const deadStep = deadMax >= 5 ? 0.1 : 0.05;
+
+  const setAuto = (auto: boolean) => {
+    if (auto) {
+      const p98 = roundDelta(Math.max(settings.absP98, 0.01));
+      onChange({ rangeMode: "auto", min: -p98, max: p98 });
+    } else {
+      onChange({ rangeMode: "manual" });
+    }
+  };
+
+  return (
+    <div className="mx-2 mb-2 space-y-4 rounded-lg border border-white/[0.06] bg-[#16161a] p-3">
+      <div>
+        <div className="mb-1.5 text-[11px] text-gray-400">Palette</div>
+        <Select
+          value={settings.palette}
+          onValueChange={(v) => onChange({ palette: v as CutFillPaletteId })}
+        >
+          <SelectTrigger className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {CUTFILL_PALETTES.map((p) => (
+              <SelectItem key={p.id} value={p.id}>
+                {p.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div>
+        <div
+          className="h-3 w-full rounded-sm border border-white/[0.06]"
+          style={{ background: paletteCssGradient(settings.palette) }}
+        />
+        <div className="mt-1 flex justify-between text-[10px] text-gray-500">
+          <span className="tabular-nums">{formatDelta(settings.min)}</span>
+          <span className="text-gray-400">cut · 0 · fill</span>
+          <span className="tabular-nums">{formatDelta(settings.max)}</span>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] text-gray-400">Auto range (±p98)</span>
+        <Switch checked={isAuto} onCheckedChange={setAuto} />
+      </div>
+
+      <div>
+        <div className="mb-1.5 flex items-center justify-between text-[11px]">
+          <span className="text-gray-400">Range ±</span>
+          <span className="tabular-nums text-gray-300">{roundDelta(span)} m</span>
+        </div>
+        <Slider
+          value={[Math.min(Math.max(span, step), sliderMax)]}
+          min={step}
+          max={sliderMax}
+          step={step}
+          disabled={isAuto}
+          onValueChange={([v]) => onChange({ rangeMode: "manual", min: -v, max: v })}
+          aria-label="Cut/fill symmetric range"
+        />
+      </div>
+
+      <div>
+        <div className="mb-1.5 flex items-center justify-between text-[11px]">
+          <span className="text-gray-400">Opacity</span>
+          <span className="tabular-nums text-gray-300">{Math.round(settings.opacity * 100)}%</span>
+        </div>
+        <Slider
+          value={[Math.round(settings.opacity * 100)]}
+          min={0}
+          max={100}
+          step={1}
+          onValueChange={([v]) => onChange({ opacity: v / 100 })}
+          aria-label="Cut/fill opacity"
+        />
+      </div>
+
+      <div>
+        <div className="mb-1.5 flex items-center justify-between text-[11px]">
+          <span className="text-gray-400">Hide |Δ| below</span>
+          <span className="tabular-nums text-gray-300">{settings.deadbandM.toFixed(2)} m</span>
+        </div>
+        <Slider
+          value={[Math.min(settings.deadbandM, deadMax)]}
+          min={0}
+          max={deadMax}
+          step={deadStep}
+          onValueChange={([v]) => onChange({ deadbandM: v })}
+          aria-label="Cut/fill deadband"
+        />
+      </div>
+    </div>
+  );
+}
+
+/** A cut/fill row backed by the live diff-raster: switch + gear opening the
+ * colormap card (mirrors TerrainLayerRow's gear UX). */
+function CutFillLayerRow({
+  control,
+  settings,
+  onToggle,
+  onChange,
+}: {
+  control: LayerControl;
+  settings: CutFillSettings;
+  onToggle: () => void;
+  onChange: (patch: Partial<CutFillSettings>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <div className="flex h-9 items-center gap-2.5 px-2">
+        <span className={`shrink-0 ${control.visible ? "text-[#C97A4E]" : "text-gray-500"}`}>
+          <HugeiconsIcon icon={SparklesIcon} size={16} />
+        </span>
+        <span
+          className={`min-w-0 flex-1 truncate text-[13px] ${
+            control.visible ? "font-medium text-[#F3F4F6]" : "text-gray-300"
+          }`}
+        >
+          {control.label}
+        </span>
+        {control.loading && (
+          <HugeiconsIcon icon={Loading03Icon} size={13} className="shrink-0 animate-spin text-[#C97A4E]" />
+        )}
+        <button
+          type="button"
+          aria-label="Cut/fill colormap settings"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          className="shrink-0 text-gray-500 transition-colors hover:text-gray-300"
+        >
+          <HugeiconsIcon icon={Settings01Icon} size={14} />
+        </button>
+        <Switch checked={control.visible} onCheckedChange={onToggle} />
+      </div>
+      {open && <CutFillSettingsCard settings={settings} onChange={onChange} />}
+    </div>
+  );
+}
+
 /** Row controlling a whole group of layers (View Types master toggles). */
 function GroupRow({
   icon,
@@ -600,8 +777,10 @@ export function LayerPanel({
   showDigitalTwin = true,
   sunLightingEnabled = false,
   sunHour = 12,
+  cutfillSettings = {},
   onToggle,
   onOpacity,
+  onCutfillSettings,
   onToggleDesign,
   onTerrainExaggeration,
   onSetBaseMap,
@@ -623,6 +802,7 @@ export function LayerPanel({
   const contourVectors = vectors.filter((l) => contourRole(l.vectorRole));
   const pointClouds = byPrefix("pointcloud-");
   const siteModels = byPrefix("sitemodel-");
+  const cutFill = byPrefix("cutfill-");
 
   return (
     <div className="flex flex-col pb-2">
@@ -640,7 +820,7 @@ export function LayerPanel({
       )}
 
       {/* ---------------------------------------------------- MAP LAYERS */}
-      {(ortho.length > 0 || terrain.length > 0 || lenses.length > 0 || designs.length > 0) && (
+      {(ortho.length > 0 || terrain.length > 0 || lenses.length > 0 || cutFill.length > 0 || designs.length > 0) && (
         <Section title="Map Layers" defaultOpen>
           {ortho.map((l) => (
             <ControlRow
@@ -678,6 +858,30 @@ export function LayerPanel({
               onToggle={() => onToggle(l.key)}
             />
           ))}
+          {cutFill.map((l) => {
+            // Live diff-raster rows get the colormap gear; the baked-tile
+            // fallback (no raster / load failure) keeps the plain toggle.
+            const settings = l.cutfillLive ? cutfillSettings[l.key] : undefined;
+            return settings && onCutfillSettings ? (
+              <CutFillLayerRow
+                key={l.key}
+                control={l}
+                settings={settings}
+                onToggle={() => onToggle(l.key)}
+                onChange={(patch) => onCutfillSettings(l.key, patch)}
+              />
+            ) : (
+              <ControlRow
+                key={l.key}
+                icon={<HugeiconsIcon icon={SparklesIcon} size={16} />}
+                label={l.label}
+                active={l.visible}
+                loading={l.loading}
+                error={l.error}
+                onToggle={() => onToggle(l.key)}
+              />
+            );
+          })}
           {designs.map((d) => (
             <ControlRow
               key={d.key}

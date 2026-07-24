@@ -12,6 +12,7 @@ import {
   GeoJsonDataSource,
   ImageryLayer,
   Rectangle,
+  SingleTileImageryProvider,
 } from "cesium";
 import type { Manifest, Measurement } from "@/lib/api/assetSvc";
 import type { DrawMode } from "@/components/viewer/MeasurementPanel";
@@ -122,6 +123,23 @@ export function bboxToRectangle(bbox?: number[]): Rectangle | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Build a single-tile imagery provider from a colorized cut/fill canvas. The
+ * synchronous constructor lazily loads the PNG data-URL on first `requestImage`
+ * (no network — it's in-memory), so this returns instantly and the swap in
+ * `handleCutfillSettings` needs no await. The image is treated as EPSG:4326 and
+ * draped over `rectangle`. */
+export function makeCutfillProvider(
+  canvas: HTMLCanvasElement,
+  rectangle: Rectangle
+): SingleTileImageryProvider {
+  return new SingleTileImageryProvider({
+    url: canvas.toDataURL(),
+    rectangle,
+    tileWidth: canvas.width,
+    tileHeight: canvas.height,
+  });
 }
 
 export function manifestLayersEmpty(m: Manifest | null): boolean {

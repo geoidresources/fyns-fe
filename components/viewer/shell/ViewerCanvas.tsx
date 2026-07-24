@@ -74,16 +74,21 @@ import {
   metricsOf,
   resultForKind,
 } from "@/lib/viewer/calc";
+import { measurementsToCsv, type ReportRow } from "@/lib/viewer/exportReport";
+import { SiteReport } from "@/components/viewer/shell/SiteReport";
 import { buildPointCloudStyle } from "@/lib/viewer/pointcloud";
 import { USE_WORLD_TERRAIN } from "@/lib/viewer/cesiumIon";
 import {
   DEFAULT_CENTER,
   bboxToRectangle,
   isThinSurfaceMesh,
+  makeCutfillProvider,
   manifestLayersEmpty,
   proxyGcsUrls,
   type LayerHandle,
 } from "@/components/viewer/shell/sceneHelpers";
+import { colorizeCutfill, type CutFillSettings } from "@/lib/viewer/cutfillColormap";
+import type { CutFillRaster } from "@/lib/viewer/cutfillRaster";
 import {
   useViewerStore,
   useViewerStoreApi,
@@ -286,6 +291,11 @@ export function ViewerCanvas() {
   const baseTerrainRef = useRef<TerrainProvider | null>(null);
   const terrainSeqRef = useRef(0);
   const defaultTerrainSigRef = useRef<string | null>(null);
+  // Live cut/fill heatmap: loaded Δz raster + its offscreen canvas per layer key,
+  // so a colormap change recolorizes in place (no re-fetch). Built in
+  // useLayerLifecycle, read/rewritten by handleCutfillSettings.
+  const cutfillRastersRef = useRef<Map<string, CutFillRaster>>(new Map());
+  const cutfillCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
 
   // Always-current mirrors of the control arrays — the toggle/opacity handlers
   // read these to compute the next state and run their Cesium side effects
@@ -705,6 +715,70 @@ export function ViewerCanvas() {
       if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender();
       layerControlsRef.current = next;
       store.getState().setLayerControls(next);
+    },
+    [store, viewerRef, patchControl]
+  );
+
+  // Live cut/fill colormap change. Merges the patch into the store, then applies
+  // it to the scene OUTSIDE render (like handleColorMapChange): opacity is a cheap
+  // alpha set; palette/range/deadband trigger a pure CPU recolorize of the already-
+  // loaded Δz raster → a fresh single-tile provider swapped in at the same stacking
+  // index (the sync SingleTileImageryProvider loads its data-URL lazily, so no await
+  // and no flicker of the old layer being removed before the new one exists).
+  const handleCutfillSettings = useCallback(
+    (key: string, patch: Partial<CutFillSettings>) => {
+      const cur = store.getState().cutfillSettings[key];
+      if (!cur) return;
+      const merged = { ...cur, ...patch };
+      store.getState().setCutfillSettings(key, merged);
+
+      const viewer = viewerRef.current;
+      const handle = handlesRef.current.get(key);
+      if (!viewer || viewer.isDestroyed() || handle?.type !== "imagery") return;
+
+      const recolor =
+        "palette" in patch || "rangeMode" in patch || "min" in patch ||
+        "max" in patch || "deadbandM" in patch;
+      const raster = cutfillRastersRef.current.get(key);
+      const canvas = cutfillCanvasesRef.current.get(key);
+
+      if (recolor && raster && canvas) {
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          const img = ctx.createImageData(raster.width, raster.height);
+          colorizeCutfill(
+            raster.data,
+            raster.width,
+            raster.height,
+            {
+              min: merged.min,
+              max: merged.max,
+              deadbandM: merged.deadbandM,
+              palette: merged.palette,
+              noData: raster.noData,
+            },
+            img.data
+          );
+          ctx.putImageData(img, 0, 0);
+        }
+        const layers = viewer.imageryLayers;
+        const old = handle.layer;
+        const rect = old.imageryProvider.rectangle;
+        const idx = layers.indexOf(old);
+        const next = layers.addImageryProvider(
+          makeCutfillProvider(canvas, rect),
+          idx >= 0 ? idx : undefined
+        );
+        next.show = old.show;
+        next.alpha = merged.opacity;
+        layers.remove(old, true);
+        handlesRef.current.set(key, { type: "imagery", layer: next });
+      } else {
+        handle.layer.alpha = merged.opacity;
+      }
+      // Keep the row's opacity mirror in sync with the popover.
+      patchControl(key, { opacity: merged.opacity });
+      viewer.scene.requestRender();
     },
     [store, viewerRef, patchControl]
   );
@@ -1179,6 +1253,35 @@ export function ViewerCanvas() {
     toast.success(`Exported ${features.length} measurement${features.length === 1 ? "" : "s"}`);
   }, [store, surveyId]);
 
+  const exportMeasurementsCsv = useCallback(() => {
+    const rows: ReportRow[] = store
+      .getState()
+      .measurements.filter((m) => m.geometry)
+      .map((m) => ({
+        name: m.name,
+        kind: m.kind,
+        folder: m.folder ?? null,
+        status: m.status,
+        metrics: metricsOf(resultForKind(m)),
+      }));
+    if (rows.length === 0) {
+      toast.info("No measurements with geometry to export yet");
+      return;
+    }
+    // Prefix a UTF-8 BOM so Excel reads the m³/m² headers correctly.
+    const blob = new Blob(["﻿" + measurementsToCsv(rows)], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `survey-${surveyId}-measurements.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success(`Exported ${rows.length} measurement${rows.length === 1 ? "" : "s"} to CSV`);
+  }, [store, surveyId]);
+
+  const [siteReportOpen, setSiteReportOpen] = useState(false);
+  const openSiteReport = useCallback(() => setSiteReportOpen(true), []);
+
   // ----------------------------------------------------- relocated effects
   useManifestLoad({ manifest, layersEmpty, loadManifest, refreshMeasurements, setProject });
   useMeasurementsPoll({
@@ -1239,8 +1342,11 @@ export function ViewerCanvas() {
     clipCollectionRef,
     defaultTerrainSigRef,
     measurementDsRef,
+    cutfillRastersRef,
+    cutfillCanvasesRef,
     setClipInputsVersion,
     patchControl,
+    setCutfillSettings: (key, settings) => store.getState().setCutfillSettings(key, settings),
     registerSurveyBounds,
     updateCloudPreload,
     applyTerrain,
@@ -1273,6 +1379,8 @@ export function ViewerCanvas() {
       saveMeasurement,
       patchMeasurement,
       exportMeasurements,
+      exportMeasurementsCsv,
+      openSiteReport,
       handleToggle,
       handleOpacity,
       handleToggleDesign,
@@ -1281,6 +1389,7 @@ export function ViewerCanvas() {
       handleColorMapChange,
       handleShadingChange,
       handleContourIntervalChange,
+      handleCutfillSettings,
       handleToggleImages,
       handleToggleGcps,
       handleToggleDigitalTwin,
@@ -1300,12 +1409,15 @@ export function ViewerCanvas() {
       saveMeasurement,
       patchMeasurement,
       exportMeasurements,
+      exportMeasurementsCsv,
+      openSiteReport,
       handleToggle,
       handleOpacity,
       handleToggleDesign,
       handleColorMapChange,
       handleShadingChange,
       handleContourIntervalChange,
+      handleCutfillSettings,
       handleToggleImages,
       handleToggleGcps,
       handleToggleDigitalTwin,
@@ -1449,6 +1561,7 @@ export function ViewerCanvas() {
       `,
         }}
       />
+      <SiteReport open={siteReportOpen} onClose={() => setSiteReportOpen(false)} />
     </ViewerActionsProvider>
     </InteractionProvider>
   );

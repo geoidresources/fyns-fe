@@ -78,3 +78,120 @@ export function temporalComparePair(
   if (!aId || !bId || aId === bId) return null;
   return { aId, bId };
 }
+
+// ------------------------------------------------- progress sparkline (trajectory)
+// Pure series math for the ComparisonCard's trajectory sparkline: the shape's
+// cumulative volume change across ALL consecutive epochs (not just the A→B
+// headline). The React orchestration (firing the per-pair instant estimates)
+// lives in components/viewer/shell/hooks/useEpochSeries.ts; everything numeric
+// stays here so it is unit-testable without React or Cesium.
+
+/** One epoch on the trajectory. `cumulative` is the net volume change relative
+ * to the earliest epoch (0 at index 0); null once an upstream gap breaks the
+ * running total (see cumulativeEpochSeries). */
+export interface EpochPoint {
+  surveyId: string;
+  date: string;
+  cumulative: number | null;
+}
+
+/** A resolved epoch (non-null cumulative) — what the sparkline actually plots. */
+export interface ComputedEpochPoint {
+  surveyId: string;
+  date: string;
+  cumulative: number;
+}
+
+/** Net volume change for one consecutive-pair estimate. Prefers the server's
+ * `net_change_m3`; falls back to `fill − cut` when net is absent (older diff
+ * docs). Returns null when neither is derivable, so the pair becomes a gap in
+ * the trajectory rather than a fabricated zero. */
+export function netChangeFromMetrics(
+  metrics: Record<string, number> | null | undefined
+): number | null {
+  if (!metrics) return null;
+  const net = metrics.net_change_m3;
+  if (typeof net === "number" && Number.isFinite(net)) return net;
+  const fill = metrics.fill_volume_m3;
+  const cut = metrics.cut_volume_m3;
+  if (
+    typeof fill === "number" &&
+    Number.isFinite(fill) &&
+    typeof cut === "number" &&
+    Number.isFinite(cut)
+  ) {
+    return fill - cut;
+  }
+  return null;
+}
+
+/** Cumulative trajectory across consecutive epochs. `deltas[i]` is the net
+ * change surveys[i] → surveys[i+1] (null = a pair the instant tier couldn't
+ * serve). y0 = 0 at the earliest survey; the running total can't cross an
+ * unknown delta, so a gap nulls that epoch AND every later one. That keeps the
+ * resolved points a contiguous prefix (see validEpochPrefix), so the polyline
+ * is never broken by an interior hole. */
+export function cumulativeEpochSeries(
+  surveys: readonly { id: string; survey_date: string }[],
+  deltas: readonly (number | null)[]
+): EpochPoint[] {
+  const points: EpochPoint[] = [];
+  let running: number | null = 0;
+  for (let i = 0; i < surveys.length; i++) {
+    if (i > 0) {
+      const d = deltas[i - 1] ?? null;
+      running = running !== null && d !== null ? running + d : null;
+    }
+    points.push({ surveyId: surveys[i].id, date: surveys[i].survey_date, cumulative: running });
+  }
+  return points;
+}
+
+/** The leading run of resolved epochs (cumulative non-null). Because a gap
+ * nulls every later epoch, the resolved set is always a contiguous prefix, so
+ * this both narrows the type and enforces "a hole ends the plotted line". */
+export function validEpochPrefix(points: readonly EpochPoint[]): ComputedEpochPoint[] {
+  const out: ComputedEpochPoint[] = [];
+  for (const p of points) {
+    if (p.cumulative === null) break;
+    out.push({ surveyId: p.surveyId, date: p.date, cumulative: p.cumulative });
+  }
+  return out;
+}
+
+export interface SparklinePoint {
+  x: number;
+  y: number;
+  value: number;
+}
+
+export interface SparklineGeometry {
+  /** Per-epoch screen coordinates for the polyline + dots. */
+  points: SparklinePoint[];
+  /** Screen y of the value-0 baseline. */
+  baselineY: number;
+}
+
+/** Map cumulative values to SVG coordinates in a `width`×`height` box. The
+ * domain always includes 0 (the baseline) so a monotonic climb still shows its
+ * zero origin at the bottom and a negative excursion pushes the baseline up.
+ * `pad*` inset the dots from the edges. A degenerate (all-equal) domain
+ * collapses to the vertical middle; a single point centers horizontally. */
+export function sparklineGeometry(
+  values: readonly number[],
+  opts: { width: number; height: number; padX: number; padY: number }
+): SparklineGeometry {
+  const { width, height, padX, padY } = opts;
+  const innerW = Math.max(1, width - 2 * padX);
+  const innerH = Math.max(1, height - 2 * padY);
+  const lo = Math.min(0, ...values);
+  const hi = Math.max(0, ...values);
+  const span = hi - lo;
+  const n = values.length;
+  const yFor = (v: number) => (span === 0 ? height / 2 : padY + ((hi - v) / span) * innerH);
+  const xFor = (i: number) => (n <= 1 ? width / 2 : padX + (i / (n - 1)) * innerW);
+  return {
+    points: values.map((v, i) => ({ x: xFor(i), y: yFor(v), value: v })),
+    baselineY: yFor(0),
+  };
+}

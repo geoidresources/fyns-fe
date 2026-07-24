@@ -542,14 +542,22 @@ export interface EstimateResult {
  * panel-scale boundary. Methods the instant tier can't serve (custom_base, an
  * unregistered surface, timeout, busy) come back as a fallback-shaped ApiError
  * (409/422/429/503/504) — callers catch and skip the instant number, letting
- * the authoritative worker compute stand alone. */
+ * the authoritative worker compute stand alone.
+ *
+ * `body.params` is an OPTIONAL partial params object the backend deep-merges
+ * over the measurement's stored params before evaluating (same override
+ * semantics as compute's `params`, but nothing is persisted). Omitted → the
+ * stored params are estimated as-is. The compare trajectory sparkline uses it
+ * to re-diff the SAME geometry against arbitrary consecutive survey pairs
+ * (cross-survey `survey_terrain` from/to refs). */
 export function estimateMeasurement(
   surveyId: string,
-  measurementId: string
+  measurementId: string,
+  body?: { params?: Record<string, unknown> }
 ): Promise<EstimateResult> {
   return apiFetch<EstimateResult>(
     BASE,
     `/surveys/${surveyId}/measurements/${measurementId}/estimate`,
-    { method: "POST", body: {} }
+    { method: "POST", body: body ?? {} }
   );
 }
