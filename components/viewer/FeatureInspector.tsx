@@ -14,6 +14,7 @@ import {
   FileText,
   Loader2,
   Pencil,
+  DraftingCompass,
   Play,
   Save,
   Spline,
@@ -45,6 +46,7 @@ import { STYLE_SWATCHES, styleOf, type MeasurementStyle } from "@/lib/viewer/sty
 import { temporalComparePair } from "@/lib/viewer/compare";
 import { ComparisonCard } from "@/components/viewer/shell/ComparisonCard";
 import { loadMaterialCatalog, type MaterialEntry } from "@/lib/viewer/materials";
+import { CadExportDialog } from "@/components/viewer/shell/CadExportDialog";
 
 // Right contextual inspector — the DESIGN panel (SP-12 mock): header title with
 // pencil-rename; a type dropdown (re-template, teardown §2 "type is mutable
@@ -542,6 +544,7 @@ export function FeatureInspector({
   const [calcCfg, setCalcCfg] = React.useState<CalcMethodState | null>(() => seedCalcCfg(measurement));
   const [editBase, setEditBase] = React.useState(false);
   const [showReceipt, setShowReceipt] = React.useState(false);
+  const [cadOpen, setCadOpen] = React.useState(false);
   // STYLE tab local state — seeded from params.style, PATCHed (debounced).
   const [style, setStyle] = React.useState<MeasurementStyle>(() => styleOf(measurement?.params));
   const styleTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -557,6 +560,7 @@ export function FeatureInspector({
     setCalcCfg(seedCalcCfg(measurement));
     setEditBase(false);
     setShowReceipt(false);
+    setCadOpen(false);
     setStyle(styleOf(measurement?.params));
   }
 
@@ -1013,6 +1017,14 @@ export function FeatureInspector({
                     disabled={busy}
                   />
                 )}
+                {!demo && measurement.geometry && (
+                  <ActionRow
+                    icon={<DraftingCompass size={15} />}
+                    label="Export CAD"
+                    onClick={() => setCadOpen(true)}
+                  />
+                )}
+                <CadExportDialog open={cadOpen} onOpenChange={setCadOpen} measurementId={measurement.id} />
                 {isDraft && (
                   <ActionRow
                     accent

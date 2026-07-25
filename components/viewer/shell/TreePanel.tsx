@@ -12,9 +12,17 @@
 // are the same `useMemo`s that lived in SurveyViewer, now computed here from
 // store state.
 
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import Link from "next/link";
-import { ChevronLeft, Download, FileJson, FileText, Loader2, Sheet } from "lucide-react";
+import {
+  ChevronLeft,
+  DraftingCompass,
+  Download,
+  FileJson,
+  FileText,
+  Loader2,
+  Sheet,
+} from "lucide-react";
 
 import { useViewerStore } from "@/lib/viewer/state/store";
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
@@ -36,6 +44,7 @@ import { USE_WORLD_TERRAIN } from "@/lib/viewer/cesiumIon";
 import { LayerPanel } from "@/components/viewer/LayerPanel";
 import { SurveyList } from "@/components/viewer/SurveyList";
 import { WorkspaceTree } from "@/components/viewer/shell/WorkspaceTree";
+import { CadExportDialog } from "@/components/viewer/shell/CadExportDialog";
 import type { ModuleKey } from "@/lib/viewer/state/store";
 
 const MODULE_TITLES: Record<Exclude<ModuleKey, "measure" | "survey">, string> = {
@@ -52,7 +61,9 @@ export function TreePanel() {
   const manifestError = useViewerStore((s) => s.manifestError);
   const surveyId = useViewerStore((s) => s.surveyId);
   const setTreePanelOpen = useViewerStore((s) => s.setTreePanelOpen);
+  const hasExportableGeometry = useViewerStore((s) => s.measurements.some((m) => m.geometry));
   const actions = useViewerActions();
+  const [cadExportOpen, setCadExportOpen] = useState(false);
 
   const surveyTitle = manifest ? `Survey ${manifest.survey.survey_date}` : "Survey viewer";
 
@@ -93,8 +104,22 @@ export function TreePanel() {
               <FileJson size={14} />
               Measurements (GeoJSON)
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={!hasExportableGeometry}
+              onSelect={() => setCadExportOpen(true)}
+            >
+              <DraftingCompass size={14} />
+              CAD export (DXF / LandXML)…
+            </DropdownMenuItem>
+            {!hasExportableGeometry && (
+              <p className="px-2 pb-1 pt-0.5 text-[10px] leading-tight text-gray-600">
+                Draw a measurement to enable
+              </p>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
+        <CadExportDialog open={cadExportOpen} onOpenChange={setCadExportOpen} />
         <button
           type="button"
           aria-label="Collapse panel"

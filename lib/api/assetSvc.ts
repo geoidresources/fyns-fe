@@ -221,6 +221,19 @@ export interface AssetLayer {
   crs?: string;
 }
 
+/** A survey_assets-backed CAD/survey export bundle (asset_kind "export",
+ * processor_type "export-cad"). No bbox/zoom — these are downloadable file
+ * deliverables. `output_urls` maps each format to its stored URL; `formats`
+ * lists them in request order for a stable "download as …" menu. The
+ * grid-extract ("points") and profile-extract ("profile") kinds will mirror
+ * this shape under their own manifest groups. */
+export interface ExportLayer {
+  processor_type: string; // export-cad
+  output_urls?: Record<string, string>; // format -> URL (dxf, csv, landxml, geojson, shp)
+  formats?: string[]; // available formats, in request order
+  crs?: string;
+}
+
 export interface VectorLayer {
   role: string;
   geojson_url?: string;
@@ -259,6 +272,7 @@ export interface ManifestLayers {
   ortho: AssetLayer[] | null;
   pointcloud: AssetLayer[] | null;
   lenses: AssetLayer[] | null;
+  exports: ExportLayer[] | null; // CAD/survey deliverables (export-cad → dxf/csv/landxml/…)
   vectors: VectorLayer[] | null;
   site_models: SiteModelLayer[] | null;
   designs: DesignLayer[] | null;

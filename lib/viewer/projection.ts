@@ -13,6 +13,8 @@
 // Browser-only steps (localStorage, epsg.io fetch) are guarded so the module is
 // import-safe and unit-testable under node (the computed-UTM path needs no I/O).
 
+import type { GeoJsonGeometry } from "@/lib/api/assetSvc";
+
 // proj4 ships CommonJS types (`export = proj4`, a function+namespace merge), so
 // the module type IS the callable. Node/webpack ESM interop exposes it at
 // runtime under `.default`; we resolve that defensively so the code works under
@@ -195,4 +197,32 @@ export async function getWorkingTransform(
 
   // Step 5 — give up; caller degrades gracefully.
   return null;
+}
+
+/** Recursively reproject a GeoJSON geometry's coordinates from WGS84 lon/lat to
+ * the working CRS via `forward` (a `WorkingTransform.forward`). A leaf position
+ * — an array whose first two entries are numbers — maps `[lon, lat, …rest]` →
+ * `[E, N, …rest]`: the 3rd element (Z / elevation) and anything beyond pass
+ * through untouched, so heights survive into LandXML CgPoints / CSV. Nested
+ * coordinate arrays (LineString, Polygon rings, Multi*) recurse; the geometry
+ * `type` is preserved. Used to turn a lon/lat measurement FeatureCollection into
+ * projected metres before a CAD/survey export (a lon/lat DXF is useless in CAD).
+ */
+export function reprojectGeometry(
+  geometry: GeoJsonGeometry,
+  forward: (lonLat: [number, number]) => [number, number]
+): GeoJsonGeometry {
+  return { ...geometry, coordinates: reprojectCoordinates(geometry.coordinates, forward) };
+}
+
+function reprojectCoordinates(
+  node: unknown,
+  forward: (lonLat: [number, number]) => [number, number]
+): unknown {
+  if (!Array.isArray(node)) return node;
+  if (typeof node[0] === "number" && typeof node[1] === "number") {
+    const [e, n] = forward([node[0], node[1]]);
+    return node.length > 2 ? [e, n, ...node.slice(2)] : [e, n];
+  }
+  return node.map((child) => reprojectCoordinates(child, forward));
 }

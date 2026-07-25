@@ -75,6 +75,7 @@ import {
   resultForKind,
 } from "@/lib/viewer/calc";
 import { measurementsToCsv, type ReportRow } from "@/lib/viewer/exportReport";
+import { buildMeasurementFeatureCollection } from "@/lib/viewer/measurementFeatures";
 import { SiteReport } from "@/components/viewer/shell/SiteReport";
 import { buildPointCloudStyle } from "@/lib/viewer/pointcloud";
 import { USE_WORLD_TERRAIN } from "@/lib/viewer/cesiumIon";
@@ -1220,36 +1221,21 @@ export function ViewerCanvas() {
   );
 
   const exportMeasurements = useCallback(() => {
-    const list = store.getState().measurements;
-    const features = list
-      .filter((m) => m.geometry)
-      .map((m) => ({
-        type: "Feature" as const,
-        properties: {
-          id: m.id,
-          name: m.name,
-          kind: m.kind,
-          folder: m.folder ?? null,
-          status: m.status,
-          ...metricsOf(resultForKind(m)),
-        },
-        geometry: m.geometry!,
-      }));
-    if (features.length === 0) {
+    // Plain geographic (WGS84 lon/lat) GeoJSON — no `forward`, so geometry is
+    // untouched. The projected-metres variant lives in the CAD-export flow.
+    const fc = buildMeasurementFeatureCollection(store.getState().measurements);
+    if (fc.features.length === 0) {
       toast.info("No measurements with geometry to export yet");
       return;
     }
-    const blob = new Blob(
-      [JSON.stringify({ type: "FeatureCollection", features }, null, 2)],
-      { type: "application/geo+json" }
-    );
+    const blob = new Blob([JSON.stringify(fc, null, 2)], { type: "application/geo+json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = `survey-${surveyId}-measurements.geojson`;
     a.click();
     URL.revokeObjectURL(url);
-    toast.success(`Exported ${features.length} measurement${features.length === 1 ? "" : "s"}`);
+    toast.success(`Exported ${fc.features.length} measurement${fc.features.length === 1 ? "" : "s"}`);
   }, [store, surveyId]);
 
   const exportMeasurementsCsv = useCallback(() => {
