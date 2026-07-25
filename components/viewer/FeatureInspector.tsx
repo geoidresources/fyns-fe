@@ -44,6 +44,7 @@ import { UNIT_SYSTEMS, convertForDisplay, unitSystemOf, type UnitSystem } from "
 import { STYLE_SWATCHES, styleOf, type MeasurementStyle } from "@/lib/viewer/style";
 import { temporalComparePair } from "@/lib/viewer/compare";
 import { ComparisonCard } from "@/components/viewer/shell/ComparisonCard";
+import { loadMaterialCatalog, type MaterialEntry } from "@/lib/viewer/materials";
 
 // Right contextual inspector — the DESIGN panel (SP-12 mock): header title with
 // pencil-rename; a type dropdown (re-template, teardown §2 "type is mutable
@@ -238,6 +239,107 @@ function MetricsGrid({ metrics }: { metrics: { label: string; value: string }[] 
         </div>
       ))}
     </div>
+  );
+}
+
+/** "+ Tonnage" — attach a material (→ density) to a stockpile/volume measurement
+ * and show tonnage = volume × density, derived client-side (no recompute needed). */
+function TonnageBlock({
+  volumeM3,
+  material,
+  canPatch,
+  onAssign,
+}: {
+  volumeM3: number;
+  material: { name?: string; density_t_m3?: number } | null;
+  canPatch: boolean;
+  onAssign: (name: string, density: number) => void;
+}) {
+  const [catalog] = React.useState<MaterialEntry[]>(() => loadMaterialCatalog());
+  const [picking, setPicking] = React.useState(false);
+  const density = typeof material?.density_t_m3 === "number" ? material.density_t_m3 : null;
+  const tonnage = density != null ? volumeM3 * density : null;
+
+  // Material assigned → show the derived tonnage.
+  if (tonnage != null && !picking) {
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-[#C97A4E]/25 bg-[#C97A4E]/[0.06] px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">Tonnage</div>
+          <div className="font-mono text-[15px] tracking-tight text-gray-100">
+            {tonnage.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            <span className="ml-1 text-[11px] text-gray-400">t</span>
+          </div>
+          <div className="truncate text-[10px] text-gray-500">
+            {material?.name ? `${material.name} · ` : ""}
+            {density} t/m³
+          </div>
+        </div>
+        {canPatch && (
+          <button
+            type="button"
+            onClick={() => setPicking(true)}
+            className="shrink-0 rounded-md border border-white/10 px-2 py-1 text-[10.5px] text-gray-300 transition-colors hover:bg-white/[0.05]"
+          >
+            Change
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  // Picking a material.
+  if (picking) {
+    return (
+      <div className="rounded-lg border border-white/10 bg-[#19191d] px-3 py-2.5">
+        <div className="mb-1.5 text-[10px] uppercase tracking-wide text-gray-500">Tonnage — pick a material</div>
+        <div className="flex items-center gap-1.5">
+          <select
+            autoFocus
+            defaultValue={material?.name ?? ""}
+            onChange={(e) => {
+              const m = catalog.find((c) => c.name === e.target.value);
+              if (m) {
+                onAssign(m.name, m.densityTPerM3);
+                setPicking(false);
+              }
+            }}
+            className="h-8 min-w-0 flex-1 rounded-md border border-white/10 bg-[#111114] px-2 text-[12px] text-gray-200 outline-none"
+          >
+            <option value="" disabled>
+              Choose material…
+            </option>
+            {catalog.map((m) => (
+              <option key={m.id} value={m.name}>
+                {m.name} · {m.densityTPerM3} t/m³
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => setPicking(false)}
+            className="shrink-0 rounded-md px-1.5 py-1.5 text-[11px] text-gray-500 transition-colors hover:text-gray-300"
+          >
+            Cancel
+          </button>
+        </div>
+        <div className="mt-1.5 text-[9.5px] leading-snug text-gray-600">
+          Tonnage = volume × density. Densities are editable in the material list.
+        </div>
+      </div>
+    );
+  }
+
+  // No material yet → the "+ Tonnage" affordance.
+  return (
+    <button
+      type="button"
+      disabled={!canPatch}
+      onClick={() => setPicking(true)}
+      className="flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-white/15 px-3 py-2 text-[12px] font-medium text-gray-400 transition-colors hover:border-[#C97A4E]/40 hover:text-[#C97A4E] disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      + Tonnage
+    </button>
   );
 }
 
@@ -522,6 +624,21 @@ export function FeatureInspector({
       ]
     : resultMetrics(localStats ?? estimateMetricMap ?? resultMetricMap, unitSystem, measurement.kind);
 
+  // Tonnage (derived, no recompute): volume × the assigned material density.
+  // Volume comes from the authoritative doc, else the instant estimate.
+  const volumeForTonnage =
+    typeof resultMetricMap.volume_m3 === "number"
+      ? resultMetricMap.volume_m3
+      : estimateMetricMap && typeof estimateMetricMap.volume_m3 === "number"
+        ? estimateMetricMap.volume_m3
+        : null;
+  const assignTonnageMaterial = (name: string, density: number) => {
+    if (canPatch)
+      void onPatch!(measurement.id, {
+        params: { material: { name, density_t_m3: density } },
+      }).catch(() => undefined);
+  };
+
   const computeError = showFailure ? resultErrorOf(measurement.result) : null;
   const receipt = demo ? null : provenanceOf(doc);
   // Chip reflects the SELECTED kind: computing (row-level) → this kind's doc →
@@ -771,6 +888,17 @@ export function FeatureInspector({
                 <p className="-mt-1 text-[10px] text-gray-600">
                   Plan values measured from the drawn geometry — run compute for surface-true results.
                 </p>
+              )}
+
+              {/* + Tonnage: attach a material → tonnage = volume × density. */}
+              {isVolume && !comparePair && !demo && volumeForTonnage != null && (
+                <TonnageBlock
+                  key={measurement.id}
+                  volumeM3={volumeForTonnage}
+                  material={material}
+                  canPatch={canPatch}
+                  onAssign={assignTonnageMaterial}
+                />
               )}
 
               {/* Metadata block (design): Material / Density / Base method /

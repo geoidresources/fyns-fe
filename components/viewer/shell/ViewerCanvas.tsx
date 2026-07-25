@@ -126,7 +126,6 @@ import { useCompareLayers } from "@/components/viewer/shell/hooks/useCompareLaye
 // already close to the ground — mirrors scroll-wheel zoom.
 const ZOOM_STEP_FACTOR = 0.4;
 
-
 export function ViewerCanvas() {
   const { viewerRef, viewerReady, handleViewerRef, baseImageryRef } = useCesiumViewer();
   const store = useViewerStoreApi();
