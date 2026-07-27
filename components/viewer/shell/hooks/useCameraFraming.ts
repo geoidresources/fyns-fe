@@ -17,6 +17,7 @@ import { Cartesian3, Rectangle, type Viewer as CesiumViewer } from "cesium";
 import { getProject } from "@/lib/api/userSvc";
 import type { Manifest } from "@/lib/api/assetSvc";
 import { DEFAULT_CENTER, bboxToRectangle } from "@/components/viewer/shell/sceneHelpers";
+import { pumpRendersDuringFlight } from "@/lib/viewer/camera";
 
 export type CameraTarget = "none" | "center" | "tileset" | "bbox" | "url";
 
@@ -63,10 +64,13 @@ export function useCameraFraming(deps: {
         if (cancelled || !viewer || viewer.isDestroyed() || centerSuperseded()) return;
         const lat = p.center_lat ?? DEFAULT_CENTER.lat;
         const lng = p.center_lng ?? DEFAULT_CENTER.lng;
+        // Async (post-getProject) flyTo into a possibly-idle requestRenderMode
+        // scene — pump renders so the tween animates instead of stalling.
         viewer.camera.flyTo({
           destination: Cartesian3.fromDegrees(lng, lat, DEFAULT_CENTER.height),
           duration: 2.0,
         });
+        pumpRendersDuringFlight(viewer, 2.0);
       })
       .catch(() => {
         if (cancelled || !viewer || viewer.isDestroyed() || centerSuperseded()) return;
@@ -74,6 +78,7 @@ export function useCameraFraming(deps: {
           destination: Cartesian3.fromDegrees(DEFAULT_CENTER.lng, DEFAULT_CENTER.lat, DEFAULT_CENTER.height),
           duration: 2.0,
         });
+        pumpRendersDuringFlight(viewer, 2.0);
       });
     return () => {
       cancelled = true;

@@ -58,7 +58,7 @@ export const ACCEPT: Record<DataType, string> = {
   survey: ".jpg,.jpeg,.png,.tif,.tiff,.zip,.csv",
   lidar: ".las,.laz,.zip",
   preprocessed: ".tif,.tiff,.las,.laz,.dxf,.shp,.geojson,.json,.zip,.csv,.obj,.osgb,.3mx",
-  design: ".dxf,.xml,.geojson,.json,.obj,.ifc",
+  design: ".dxf,.xml,.landxml,.geojson,.json,.obj,.ifc",
 };
 
 export const DROPZONE_HINT: Record<DataType, string> = {
@@ -322,6 +322,7 @@ export function designFormat(filename: string): string {
     case "dxf":
       return "dxf";
     case "xml":
+    case "landxml": // LandXML surfaces are commonly named *.landxml, not *.xml
       return "landxml";
     case "obj":
       return "obj";

@@ -29,6 +29,11 @@ function centerFromBbox(bbox?: number[]): Wgs84Center | null {
   const [west, south, east, north] = bbox;
   if ([west, south, east, north].some((n) => typeof n !== "number" || !Number.isFinite(n))) return null;
   if (west >= east || south >= north) return null;
+  // Reject a bbox that isn't WGS84 degrees (e.g. a raster whose bbox was
+  // mistakenly stamped in projected easting/northing) — otherwise it resolves a
+  // garbage center and the globe flies to nowhere. Mirrors projectWgs84Center's
+  // range guard; a rejected bbox falls through to the next candidate.
+  if (west < -180 || east > 180 || south < -90 || north > 90) return null;
   return { lat: (south + north) / 2, lng: (west + east) / 2 };
 }
 
@@ -73,12 +78,19 @@ export async function resolveProjectCenter(project: Project): Promise<Wgs84Cente
 
   try {
     const { surveys } = await listSurveys(project.id);
-    const latest = [...(surveys || [])].sort((a, b) =>
-      b.survey_date.localeCompare(a.survey_date)
-    )[0];
-    if (!latest) return null;
-    const manifest = await getManifest(latest.id);
-    return centerFromManifest(manifest);
+    const sorted = [...(surveys || [])].sort((a, b) => b.survey_date.localeCompare(a.survey_date));
+    // Try each survey newest-first until one yields a center. A single survey
+    // whose manifest is empty (unprocessed) or errors (e.g. a 500) must not
+    // sink the whole project's locate — fall through to the next.
+    for (const s of sorted) {
+      try {
+        const center = centerFromManifest(await getManifest(s.id));
+        if (center) return center;
+      } catch {
+        // this survey's manifest failed — try an older one
+      }
+    }
+    return null;
   } catch {
     return null;
   }

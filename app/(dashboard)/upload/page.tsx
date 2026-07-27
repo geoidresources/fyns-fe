@@ -37,7 +37,7 @@ import {
   type FileRole,
   type PlannedSkip,
 } from "@/lib/upload/planner";
-import { putToSignedUrl } from "@/lib/upload/putToSignedUrl";
+import { putToSignedUrl, UploadAbortedError } from "@/lib/upload/putToSignedUrl";
 
 // ---------------------------------------------------------------- constants
 
@@ -108,6 +108,50 @@ function formatBytes(n: number): string {
   return `${n} B`;
 }
 
+/** Bounded retry for an IDEMPOTENT call — used for the mark-uploaded PATCH so a
+ * transient blip after the bytes are safely in GCS doesn't discard a completed
+ * upload (apiFetch never auto-retries non-GET). */
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3, backoffMs = 400): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, backoffMs * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+/** Cross-attempt progress for the upload run, so a retry after a partial failure
+ * REUSES what already succeeded instead of duplicating the project/survey,
+ * re-PUTting multi-GB files, or re-dispatching workflows (idempotent retry). */
+interface RunProgress {
+  projectId?: string;
+  surveyId?: string;
+  workingCrs?: string;
+  uploadedUrls: Map<string, string>; // filename → stored asset URL
+  dispatched: Set<string>; // processor-plan labels already dispatched
+  registeredDesigns: Set<string>; // design filenames already registered
+}
+
+function emptyRunProgress(): RunProgress {
+  return { uploadedUrls: new Map(), dispatched: new Set(), registeredDesigns: new Set() };
+}
+
+/** True when the file's extension is allowed for this data type (the same
+ * ACCEPT list the picker enforces — drag-drop bypasses `accept`, so re-check). */
+function isAcceptedFile(name: string, dataType: DataType): boolean {
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return false;
+  const fileExt = name.slice(dot).toLowerCase(); // includes the dot, e.g. ".landxml"
+  return ACCEPT[dataType]
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .includes(fileExt);
+}
+
 // -------------------------------------------------------------------- page
 
 export default function UploadPage() {
@@ -127,7 +171,9 @@ export default function UploadPage() {
   // State, not a ref — it is read during render to derive the shown name.
   const [datasetEdited, setDatasetEdited] = useState(false);
   const [surveyDate, setSurveyDate] = useState(todayISO());
-  const [epsg, setEpsg] = useState("EPSG:4326");
+  // No default CRS: a silently-wrong one (e.g. UTM data left as 4326) places data
+  // at the equator while looking successful. The user must choose explicitly.
+  const [epsg, setEpsg] = useState("");
   const [vdatum, setVdatum] = useState("EGM2008");
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");
@@ -139,6 +185,23 @@ export default function UploadPage() {
   const [dragOver, setDragOver] = useState(false);
   const [draftSaved, setDraftSaved] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Idempotent-retry bookkeeping. Reset whenever the TARGET of the run changes
+  // (destination/site/type or the file SET), so re-clicking after a failure with
+  // the same inputs finishes the remaining work, while changing the inputs starts
+  // a genuinely fresh run.
+  const runProgressRef = useRef<RunProgress>(emptyRunProgress());
+  const runKey = `${destination}|${siteId}|${newSiteName}|${dataType}|${files
+    .map((q) => q.file.name)
+    .join(",")}`;
+  useEffect(() => {
+    runProgressRef.current = emptyRunProgress();
+  }, [runKey]);
+
+  // Aborts the in-flight upload (Cancel button, or unmount/navigation) so a
+  // stalled or abandoned PUT doesn't keep running against a dead component.
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   // ------------------------------------------------------------ bootstrap
 
@@ -233,14 +296,29 @@ export default function UploadPage() {
 
   const addFiles = useCallback(
     (list: FileList | File[]) => {
+      // Validate here, not just via the picker's `accept` — drag-drop bypasses
+      // `accept` entirely. Reject wrong extensions and empty (0-byte) files with
+      // a reason, rather than queueing junk that fails deep in dispatch.
+      const rejected: string[] = [];
       setFiles((prev) => {
         const next = [...prev];
         for (const f of Array.from(list)) {
           if (next.some((q) => q.file.name === f.name)) continue; // dedupe by name
+          if (f.size === 0) {
+            rejected.push(`${f.name} (empty file)`);
+            continue;
+          }
+          if (!isAcceptedFile(f.name, dataType)) {
+            rejected.push(`${f.name} (unsupported type)`);
+            continue;
+          }
           next.push({ file: f, role: guessRole(f.name, dataType), progress: 0, status: "queued" });
         }
         return next;
       });
+      if (rejected.length > 0) {
+        toast.warning(`Skipped ${rejected.length} file(s): ${rejected.join(", ")}`);
+      }
     },
     [dataType]
   );
@@ -271,44 +349,64 @@ export default function UploadPage() {
     phase === "form" &&
     files.length > 0 &&
     effectiveDatasetName.trim().length > 0 &&
+    epsg.length > 0 && // an explicit CRS is required (no silently-wrong default)
     (destination === "existing" ? !!siteId : newSiteName.trim().length >= 2);
 
   const run = async () => {
     setPhase("working");
+    const prog = runProgressRef.current;
+    const ac = new AbortController();
+    abortRef.current = ac;
+    const outcome: RunResult = { surveyId: prog.surveyId ?? null, workflows: [], designs: [], skips: [] };
     try {
-      // 1) Resolve the destination project.
-      let project = selectedProject ?? null;
+      // 1) Project — reuse one created on a prior attempt so a retry never
+      //    duplicates the site.
+      let projectId: string;
       if (destination === "new") {
-        setStepText("Creating site…");
-        project = await createProject({
-          name: newSiteName.trim(),
-          crs_epsg: Number(epsg.replace("EPSG:", "")) || undefined,
-          crs_label: CRS_OPTIONS.find((o) => o.value === epsg)?.label,
-          vertical_datum: vdatum,
-        });
+        if (!prog.projectId) {
+          setStepText("Creating site…");
+          const created = await createProject({
+            name: newSiteName.trim(),
+            crs_epsg: Number(epsg.replace("EPSG:", "")) || undefined,
+            crs_label: CRS_OPTIONS.find((o) => o.value === epsg)?.label,
+            vertical_datum: vdatum,
+          });
+          prog.projectId = created.id;
+        }
+        projectId = prog.projectId;
+      } else {
+        if (!selectedProject) throw new Error("Select a site first");
+        projectId = selectedProject.id;
       }
-      if (!project) throw new Error("Select a site first");
 
-      // 2) Resolve the survey that hosts the upload. Data uploads are a new
-      //    epoch (new survey); designs attach to the latest existing survey's
-      //    storage folder, creating one only when the project has none.
-      let survey: Survey;
-      if (dataType === "design") {
+      // 2) Survey — reuse on retry; data uploads are a new epoch (new survey),
+      //    designs attach to the latest existing survey, creating one only when
+      //    the project has none.
+      let surveyId: string;
+      let workingCrs: string | undefined;
+      if (prog.surveyId) {
+        surveyId = prog.surveyId;
+        workingCrs = prog.workingCrs;
+      } else if (dataType === "design") {
         setStepText("Resolving survey…");
-        const { surveys } = await listSurveys(project.id);
+        const { surveys } = await listSurveys(projectId);
         const latest = [...(surveys || [])].sort((a, b) => b.survey_date.localeCompare(a.survey_date))[0];
-        survey =
+        const survey: Survey =
           latest ??
           (await createSurvey({
-            project_id: project.id,
+            project_id: projectId,
             survey_date: surveyDate,
             survey_type: "design",
             metadata: { dataset_name: effectiveDatasetName.trim(), tags, source: "platform-upload" },
           }));
+        surveyId = survey.id;
+        workingCrs = survey.working_crs;
+        prog.surveyId = surveyId;
+        prog.workingCrs = workingCrs;
       } else {
         setStepText("Creating survey…");
-        survey = await createSurvey({
-          project_id: project.id,
+        const survey: Survey = await createSurvey({
+          project_id: projectId,
           survey_date: surveyDate,
           survey_type: dataType === "lidar" ? "lidar" : dataType === "preprocessed" ? "preprocessed" : "aerial",
           metadata: {
@@ -319,74 +417,130 @@ export default function UploadPage() {
             source_vertical_datum: vdatum,
           },
         });
+        surveyId = survey.id;
+        workingCrs = survey.working_crs;
+        prog.surveyId = surveyId;
+        prog.workingCrs = workingCrs;
       }
+      outcome.surveyId = surveyId;
 
-      // 3) Signed upload slots.
-      setStepText("Requesting upload URLs…");
-      const { uploads } = await initUploads(
-        survey.id,
-        files.map((q) => ({
-          filename: q.file.name,
-          kind: roleToAssetKind(q.role),
-          role: q.role,
-          content_type: contentTypeFor(q.file.name),
-          crs: epsg,
-        }))
-      );
-      const uploadByName = new Map(uploads.map((u) => [u.asset.filename || "", u]));
-
-      // 4) PUT each file, then mark it uploaded. Sequential keeps memory and
-      //    connection pressure sane for multi-GB rasters.
-      const uploadedUrls = new Map<string, string>();
-      for (const q of files) {
-        const slot = uploadByName.get(q.file.name);
-        if (!slot) throw new Error(`No upload slot returned for ${q.file.name}`);
-        setStepText(`Uploading ${q.file.name}…`);
-        setFiles((prev) => prev.map((p) => (p.file.name === q.file.name ? { ...p, status: "uploading" } : p)));
-        try {
-          await putToSignedUrl(slot.upload_url, q.file, contentTypeFor(q.file.name), (frac) => {
-            setFiles((prev) => prev.map((p) => (p.file.name === q.file.name ? { ...p, progress: frac } : p)));
-          });
-        } catch (err) {
-          setFiles((prev) => prev.map((p) => (p.file.name === q.file.name ? { ...p, status: "error" } : p)));
-          throw err;
-        }
-        await markAssetUploaded(survey.id, slot.asset.id);
-        uploadedUrls.set(q.file.name, slot.asset.url);
-        setFiles((prev) =>
-          prev.map((p) => (p.file.name === q.file.name ? { ...p, status: "uploaded", progress: 1 } : p))
+      // 3) Upload — only files not already stored on a prior attempt, so a retry
+      //    never re-PUTs multi-GB rasters. Sequential keeps memory/connection
+      //    pressure sane.
+      const pending = files.filter((q) => !prog.uploadedUrls.has(q.file.name));
+      if (pending.length > 0) {
+        setStepText("Requesting upload URLs…");
+        const { uploads } = await initUploads(
+          surveyId,
+          pending.map((q) => ({
+            filename: q.file.name,
+            kind: roleToAssetKind(q.role),
+            role: q.role,
+            content_type: contentTypeFor(q.file.name),
+            crs: epsg,
+          }))
         );
+        const uploadByName = new Map(uploads.map((u) => [u.asset.filename || "", u]));
+
+        for (let i = 0; i < pending.length; i++) {
+          const q = pending[i];
+          // Prefer an exact filename match; fall back to positional (the backend
+          // may sanitize/dedup the stored filename, which would break name-keying
+          // and orphan the survey). initUploads preserves request order.
+          const slot = uploadByName.get(q.file.name) ?? uploads[i];
+          if (!slot) throw new Error(`No upload slot returned for ${q.file.name}`);
+          if (!slot.asset.url) throw new Error(`Upload slot for ${q.file.name} returned no storage URL`);
+          setStepText(`Uploading ${q.file.name}…`);
+          setFiles((prev) => prev.map((p) => (p.file.name === q.file.name ? { ...p, status: "uploading" } : p)));
+          try {
+            await putToSignedUrl(
+              slot.upload_url,
+              q.file,
+              contentTypeFor(q.file.name),
+              (frac) => {
+                setFiles((prev) => prev.map((p) => (p.file.name === q.file.name ? { ...p, progress: frac } : p)));
+              },
+              ac.signal
+            );
+            // Bytes are in GCS now. mark-uploaded is an idempotent PATCH that
+            // apiFetch won't auto-retry, so retry it here — a blip must not
+            // discard a completed upload and force a re-PUT.
+            await withRetry(() => markAssetUploaded(surveyId, slot.asset.id));
+          } catch (err) {
+            setFiles((prev) => prev.map((p) => (p.file.name === q.file.name ? { ...p, status: "error" } : p)));
+            throw err;
+          }
+          prog.uploadedUrls.set(q.file.name, slot.asset.url);
+          setFiles((prev) =>
+            prev.map((p) => (p.file.name === q.file.name ? { ...p, status: "uploaded", progress: 1 } : p))
+          );
+        }
       }
 
-      // 5) Dispatch processing / register designs.
-      const outcome: RunResult = { surveyId: survey.id, workflows: [], designs: [], skips: [] };
+      // 4) Dispatch / register — skip work already done on a prior attempt, and
+      //    collect per-item failures so a PARTIAL success is reported honestly
+      //    (and finishable by re-running) instead of as a total failure.
+      const failures: string[] = [];
       if (dataType === "design") {
         for (const q of files) {
+          if (prog.registeredDesigns.has(q.file.name)) continue;
+          const url = prog.uploadedUrls.get(q.file.name);
+          if (!url) {
+            failures.push(q.file.name);
+            continue;
+          }
           setStepText(`Registering design ${q.file.name}…`);
-          const d = await createDesign({
-            project_id: project.id,
-            name: files.length === 1 ? effectiveDatasetName.trim() : q.file.name,
-            format: designFormat(q.file.name),
-            file_url: uploadedUrls.get(q.file.name) || "",
-            source_crs: epsg,
-            metadata: { tags, source: "platform-upload" },
-          });
-          outcome.designs.push(d.name);
+          try {
+            const d = await createDesign({
+              project_id: projectId,
+              name: files.length === 1 ? effectiveDatasetName.trim() : q.file.name,
+              format: designFormat(q.file.name),
+              file_url: url,
+              source_crs: epsg,
+              metadata: { tags, source: "platform-upload" },
+            });
+            prog.registeredDesigns.add(q.file.name);
+            outcome.designs.push(d.name);
+          } catch (err) {
+            console.error(`Design registration failed for ${q.file.name}:`, err);
+            failures.push(q.file.name);
+          }
         }
       } else {
         const plan = buildProcessorPlan(
-          files.map((q) => ({ name: q.file.name, role: q.role, url: uploadedUrls.get(q.file.name) || "" })),
-          { epsg, workingCrs: survey.working_crs }
+          files.map((q) => ({ name: q.file.name, role: q.role, url: prog.uploadedUrls.get(q.file.name) || "" })),
+          { epsg, workingCrs }
         );
         outcome.skips = plan.skips;
         for (const d of plan.dispatches) {
+          if (prog.dispatched.has(d.label)) continue;
           setStepText(`Dispatching ${d.label}…`);
-          const res = await generateSurvey(survey.id, { ...d.request, version: "v1" });
-          outcome.workflows.push({ label: d.label, id: res.workflow_id });
+          try {
+            const res = await generateSurvey(surveyId, { ...d.request, version: "v1" });
+            prog.dispatched.add(d.label);
+            outcome.workflows.push({ label: d.label, id: res.workflow_id });
+          } catch (err) {
+            console.error(`Dispatch failed for ${d.label}:`, err);
+            failures.push(d.label);
+          }
         }
       }
 
+      if (failures.length > 0) {
+        // Partial — return to the form (where the Upload button lives) so the
+        // user can re-run; the ref remembers what already succeeded, so the retry
+        // finishes ONLY the pending items. Draft is intentionally NOT cleared.
+        setPhase("form");
+        setStepText("");
+        toast.warning(
+          `Completed with ${failures.length} item(s) pending: ${failures.join(", ")}. Click Upload again to retry the rest.`
+        );
+        return;
+      }
+
+      // Full success — clear the draft and the retry bookkeeping.
       localStorage.removeItem(DRAFT_KEY);
+      runProgressRef.current = emptyRunProgress();
       setResult(outcome);
       setPhase("done");
       toast.success(
@@ -395,10 +549,25 @@ export default function UploadPage() {
           : `Upload complete — ${outcome.workflows.length} processing workflow${outcome.workflows.length === 1 ? "" : "s"} dispatched`
       );
     } catch (err) {
+      if (err instanceof UploadAbortedError) {
+        // User cancelled (or navigated away) — not a failure. Reset every file
+        // that isn't already safely stored back to "queued" so a resume re-runs
+        // only those; the progress ref keeps the completed ones.
+        setFiles((prev) =>
+          prev.map((p) =>
+            prog.uploadedUrls.has(p.file.name) ? p : { ...p, status: "queued", progress: 0 }
+          )
+        );
+        setPhase("form");
+        setStepText("");
+        return;
+      }
       console.error("Upload & process failed:", err);
       toast.error(err instanceof Error ? err.message : "Upload failed");
       setPhase("form");
       setStepText("");
+      // runProgressRef persists so a retry reuses the created project/survey and
+      // already-uploaded files instead of duplicating them.
     }
   };
 
@@ -554,22 +723,26 @@ export default function UploadPage() {
                           ))}
                         </SelectContent>
                       </Select>
-                      {phase === "form" ? (
-                        <button
-                          type="button"
-                          onClick={() => removeFile(q.file.name)}
-                          className="shrink-0 text-gray-500 transition-colors hover:text-red-400"
-                          aria-label={`Remove ${q.file.name}`}
-                        >
-                          <X size={15} />
-                        </button>
-                      ) : q.status === "uploading" ? (
-                        <Loader2 size={14} className="shrink-0 animate-spin text-[#C97A4E]" />
-                      ) : q.status === "uploaded" ? (
-                        <span className="shrink-0 text-xs text-green-400">done</span>
-                      ) : q.status === "error" ? (
-                        <span className="shrink-0 text-xs text-red-400">failed</span>
-                      ) : null}
+                      {/* Status badge (both phases, so a failed/done state stays
+                          visible after a partial run returns to the form) + a
+                          remove button while editing. */}
+                      <div className="flex shrink-0 items-center gap-2">
+                        {q.status === "uploading" && (
+                          <Loader2 size={14} className="animate-spin text-[#C97A4E]" />
+                        )}
+                        {q.status === "uploaded" && <span className="text-xs text-green-400">done</span>}
+                        {q.status === "error" && <span className="text-xs text-red-400">failed</span>}
+                        {phase === "form" && (
+                          <button
+                            type="button"
+                            onClick={() => removeFile(q.file.name)}
+                            className="text-gray-500 transition-colors hover:text-red-400"
+                            aria-label={`Remove ${q.file.name}`}
+                          >
+                            <X size={15} />
+                          </button>
+                        )}
+                      </div>
                     </div>
                     {(q.status === "uploading" || q.status === "uploaded") && (
                       <div className="mt-2 h-1 overflow-hidden rounded-full bg-[#1E2028]">
@@ -591,8 +764,11 @@ export default function UploadPage() {
                 <Input
                   value={effectiveDatasetName}
                   onChange={(e) => {
-                    setDatasetEdited(true);
-                    setDatasetName(e.target.value);
+                    const v = e.target.value;
+                    // Clearing the field resumes the "<site> — <date>" autofill;
+                    // any non-empty text is treated as a user override.
+                    setDatasetEdited(v.trim().length > 0);
+                    setDatasetName(v);
                   }}
                   disabled={phase === "working"}
                   placeholder="Site — date"
@@ -616,7 +792,7 @@ export default function UploadPage() {
             <div className="mb-6 grid grid-cols-2 gap-3">
               <Select value={epsg} onValueChange={setEpsg} disabled={phase === "working"}>
                 <SelectTrigger className={`w-full px-4 text-gray-200 ${boxClass}`} style={{ height: "3.25rem" }}>
-                  <SelectValue />
+                  <SelectValue placeholder="Select a CRS…" />
                 </SelectTrigger>
                 <SelectContent>
                   {CRS_OPTIONS.map((o) => (
@@ -707,11 +883,16 @@ export default function UploadPage() {
               <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  disabled={phase === "working"}
-                  onClick={() => router.push("/globe")}
-                  className="h-12 rounded-xl bg-[#16181D] border border-[#1E2028] px-6 text-sm font-medium text-gray-300 transition-colors hover:bg-[#1E2028] disabled:opacity-50"
+                  onClick={() => {
+                    // During an upload, Cancel aborts the in-flight run (the
+                    // progress ref keeps what already succeeded); otherwise it
+                    // leaves the page.
+                    if (phase === "working") abortRef.current?.abort();
+                    else router.push("/globe");
+                  }}
+                  className="h-12 rounded-xl bg-[#16181D] border border-[#1E2028] px-6 text-sm font-medium text-gray-300 transition-colors hover:bg-[#1E2028]"
                 >
-                  Cancel
+                  {phase === "working" ? "Cancel upload" : "Cancel"}
                 </button>
                 <button
                   type="button"

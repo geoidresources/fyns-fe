@@ -16,6 +16,9 @@ const eslintConfig = defineConfig([
     // errors in ~31k vendor findings and breaks CI.
     "public/cesium/**",
     ".pnpm-store/**",
+    // Standalone Node data-gen scripts (run with `node`, CommonJS) — not part of
+    // the app bundle, so the app's ESM/TS rules don't apply.
+    "scripts/**",
   ]),
 ]);
 

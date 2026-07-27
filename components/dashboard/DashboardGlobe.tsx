@@ -10,6 +10,7 @@ import {
   resolveProjectCenter,
   type Wgs84Center,
 } from "@/lib/dashboard/resolveProjectCenter";
+import { pumpRendersDuringFlight } from "@/lib/viewer/camera";
 
 export function DashboardGlobe({
   projects,
@@ -84,10 +85,17 @@ export function DashboardGlobe({
       const viewer = viewerRef.current?.cesiumElement;
       if (!viewer || viewer.isDestroyed() || cancelled) return;
 
+      // The globe Viewer runs with requestRenderMode on; without a per-frame
+      // render pump the flyTo tween never advances once the scene is idle. This
+      // bit the MINE SITE specifically: sites with a stored WGS84 center fly
+      // synchronously (during the viewer's initial render churn), but a mine
+      // site resolves its center via an async manifest-bbox lookup, so the flyTo
+      // fired seconds later into a fully idle scene and the camera never moved.
       viewer.camera.flyTo({
         destination: Cartesian3.fromDegrees(center.lng, center.lat, 15000),
         duration: 2.0,
       });
+      pumpRendersDuringFlight(viewer, 2.0);
     };
 
     void fly();

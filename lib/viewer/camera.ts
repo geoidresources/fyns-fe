@@ -31,6 +31,39 @@ export function captureCameraPose(viewer: CesiumViewer): CameraPose {
   };
 }
 
+/**
+ * Drive per-frame renders for the duration of an ANIMATED camera flight
+ * (`camera.flyTo` / `flyToBoundingSphere`). Our viewers run with
+ * `requestRenderMode` on (and `maximumRenderTimeChange = Infinity`), so the
+ * scene renders only when a render is explicitly requested. An animated flight
+ * advances through per-frame tweens that are updated *inside* `scene.render()` —
+ * so once the scene is idle, the tween never ticks and the camera appears frozen
+ * (the "flyTo does nothing" bug). Instant moves avoid this by calling
+ * `scene.requestRender()` once; an animated flight needs a render every frame
+ * until it settles.
+ *
+ * Call this right after issuing the flight, passing the flight's `duration`.
+ * Self-contained per flight (a short rAF pump bounded by the flight duration +
+ * a small settle tail), so overlapping flights are safe — `requestRender()` is
+ * idempotent within a frame and we never mutate the shared `requestRenderMode`.
+ * No-op when `requestRenderMode` is already off (the scene renders every frame).
+ */
+export function pumpRendersDuringFlight(viewer: CesiumViewer, durationSeconds: number): void {
+  // Browser-only: the pump is driven by requestAnimationFrame. Under SSR / unit
+  // tests (node has no rAF) there is no live scene to animate, so no-op.
+  if (typeof requestAnimationFrame !== "function" || typeof performance === "undefined") return;
+  const { scene } = viewer;
+  if (viewer.isDestroyed() || !scene.requestRenderMode) return; // renders every frame already
+  // 150ms tail so the final resting frame (flight `complete`) is drawn.
+  const endAt = performance.now() + durationSeconds * 1000 + 150;
+  const tick = () => {
+    if (viewer.isDestroyed()) return;
+    scene.requestRender();
+    if (performance.now() < endAt) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
 /** Apply a pose to the camera. Default is an instant `setView` (used on URL
  * restore, §5.6 step 4); `animate` runs a 1.2s `flyTo` (bookmarks/presets,
  * §5.7). Destination from degrees, orientation in radians (§5.3). */
@@ -47,6 +80,7 @@ export function applyCameraPose(
   };
   if (opts?.animate) {
     viewer.camera.flyTo({ destination, orientation, duration: 1.2 });
+    pumpRendersDuringFlight(viewer, 1.2);
   } else {
     viewer.camera.setView({ destination, orientation });
   }

@@ -58,6 +58,7 @@ import { INTERACTION_V2 } from "@/lib/viewer/interaction/flag";
 import { hasSelfIntersection } from "@/lib/viewer/interaction/validity";
 import { attachStoreBridge } from "@/lib/viewer/interaction/bridge";
 import { machineWithCommit } from "@/lib/viewer/commitMeasurement";
+import { pumpRendersDuringFlight } from "@/lib/viewer/camera";
 import { useInteractionAdapter } from "@/components/viewer/shell/hooks/useInteractionAdapter";
 import { useDraftRenderer } from "@/components/viewer/shell/hooks/useDraftRenderer";
 import {
@@ -399,6 +400,7 @@ export function ViewerCanvas() {
         duration: 1.8,
         offset: new HeadingPitchRange(0, CesiumMath.toRadians(-45), sphere.radius * 2.8),
       });
+      pumpRendersDuringFlight(viewer, 1.8);
     },
     [viewerRef]
   );
@@ -408,7 +410,10 @@ export function ViewerCanvas() {
     (rect: Rectangle) => {
       const viewer = viewerRef.current;
       if (!viewer || viewer.isDestroyed()) return;
+      // requestRenderMode is on — pump renders so the flyTo tween animates
+      // instead of stalling when the scene is idle (e.g. a Changes-card fly-to).
       viewer.camera.flyTo({ destination: rect, duration: 2.0 });
+      pumpRendersDuringFlight(viewer, 2.0);
     },
     [viewerRef]
   );
@@ -453,6 +458,7 @@ export function ViewerCanvas() {
         duration: 1.8,
         offset: new HeadingPitchRange(0, CesiumMath.toRadians(-45), sphere.radius * 2.8),
       });
+      pumpRendersDuringFlight(viewer, 1.8);
       return;
     }
 
@@ -464,6 +470,7 @@ export function ViewerCanvas() {
       ),
       duration: 2.0,
     });
+    pumpRendersDuringFlight(viewer, 2.0);
   }, [viewerRef, manifest, flyToRectangle]);
 
   const zoomIn = useCallback(() => {
