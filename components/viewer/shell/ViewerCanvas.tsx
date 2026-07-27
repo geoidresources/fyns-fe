@@ -74,6 +74,7 @@ import {
   metricsOf,
   resultForKind,
 } from "@/lib/viewer/calc";
+import { buildCrossSectionPolyline } from "@/lib/viewer/crossSection";
 import { measurementsToCsv, type ReportRow } from "@/lib/viewer/exportReport";
 import { buildMeasurementFeatureCollection } from "@/lib/viewer/measurementFeatures";
 import { SiteReport } from "@/components/viewer/shell/SiteReport";
@@ -107,6 +108,7 @@ import { ModuleRail } from "@/components/viewer/shell/ModuleRail";
 import { TreePanel } from "@/components/viewer/shell/TreePanel";
 import { FloatingToolbar } from "@/components/viewer/shell/FloatingToolbar";
 import { SurveyCompare } from "@/components/viewer/shell/SurveyCompare";
+import { ChangesCard } from "@/components/viewer/shell/ChangesCard";
 import { DetailPanel } from "@/components/viewer/shell/DetailPanel";
 import { StatusBar } from "@/components/viewer/shell/StatusBar";
 import { CameraJoystick } from "@/components/viewer/CameraJoystick";
@@ -121,6 +123,7 @@ import { useDrawInteraction } from "@/components/viewer/shell/hooks/useDrawInter
 import { useScenePicking } from "@/components/viewer/shell/hooks/useScenePicking";
 import { useLayerLifecycle } from "@/components/viewer/shell/hooks/useLayerLifecycle";
 import { useCompareLayers } from "@/components/viewer/shell/hooks/useCompareLayers";
+import { useChangeLayer } from "@/components/viewer/shell/hooks/useChangeLayer";
 
 // Zoom-button step: a fraction of the camera's CURRENT altitude, not a fixed
 // meter amount, so one click feels the same whether orbiting the whole site or
@@ -193,6 +196,9 @@ export function ViewerCanvas() {
   const compareA = useViewerStore((s) => s.compareA);
   const compareB = useViewerStore((s) => s.compareB);
   const splitPosition = useViewerStore((s) => s.splitPosition);
+  const changeSet = useViewerStore((s) => s.changeSet);
+  const changeLayerVisible = useViewerStore((s) => s.changeLayerVisible);
+  const setChangeSet = useViewerStore((s) => s.setChangeSet);
   const terrainExaggeration = useViewerStore((s) => s.view.terrainExaggeration);
   const sunLightingEnabled = useViewerStore((s) => s.view.sunLightingEnabled);
   const sunHour = useViewerStore((s) => s.view.sunHour);
@@ -278,6 +284,12 @@ export function ViewerCanvas() {
   const editingMeasurementIdRef = useRef<string | null>(null);
   const probeEntityRef = useRef<Entity | null>(null);
   const measurementDsRef = useRef<GeoJsonDataSource | null>(null);
+  // Change-detection scene layer (useChangeLayer): the dedicated polygons
+  // datasource, a persisted mirror of its visibility for the async build, and the
+  // fetch effect's URL-diff guard.
+  const changeDsRef = useRef<GeoJsonDataSource | null>(null);
+  const changeVisibleRef = useRef<boolean>(true);
+  const lastChangeUrlRef = useRef<string | null>(null);
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
   const measurementsSigRef = useRef<string>("");
   const searchRef = useRef<string>("");
@@ -399,6 +411,18 @@ export function ViewerCanvas() {
       viewer.camera.flyTo({ destination: rect, duration: 2.0 });
     },
     [viewerRef]
+  );
+
+  // Fly to a change-detection region (Changes card row click). Reads the parsed
+  // feature geometry from the store and reuses the shared rectangle framing.
+  const flyToChangeRegion = useCallback(
+    (index: number) => {
+      const feat = store.getState().changeSet?.features[index];
+      if (!feat?.geometry) return;
+      const rect = geometryToRectangle(feat.geometry);
+      if (rect) flyToRectangle(rect);
+    },
+    [store, flyToRectangle]
   );
 
   /** Reset to the survey's first framing (bbox → tileset bounds → default center). */
@@ -1055,6 +1079,35 @@ export function ViewerCanvas() {
 
   const triggerCompute = useCallback(
     async (id: string, override?: Record<string, unknown>) => {
+      // cross_section: the profile-extract processor wants a `polyline` in the
+      // DSM's CRS. Build it here (store-aware — the prop-driven FeatureInspector
+      // can't read the manifest) BEFORE flipping busy, so a missing-DSM bail
+      // doesn't strand the row's spinner. `override` (usually none for a
+      // cross_section) merges on top. Volume/other kinds pass `override` straight
+      // through as before.
+      let params = override;
+      const target = store.getState().measurements.find((x) => x.id === id);
+      if (target?.kind === "cross_section") {
+        const dsm = store
+          .getState()
+          .manifest?.layers.terrain?.find((t) => t.surface_type === "dsm");
+        if (!dsm) {
+          toast.warning("Needs a processed DSM to sample the elevation profile");
+          return;
+        }
+        const polyline = await buildCrossSectionPolyline(target.geometry, dsm.crs);
+        if (!polyline) {
+          toast.warning(
+            "Couldn't build the profile line — a cross-section needs ≥2 vertices and a resolvable DSM CRS"
+          );
+          return;
+        }
+        // spacing_m stays omitted → the processor defaults to 1 m (plain metres;
+        // it computes ground-metric chainage for both geographic and projected
+        // DSMs, so there is no metres→degrees bridge here). `source` is omitted —
+        // the backend auto-resolves the survey's DSM.
+        params = { polyline, ...(override ?? {}) };
+      }
       store.getState().setBusy(id, true);
       try {
         // computeMeasurement persists the override (§6.1). A PROMOTED method
@@ -1065,7 +1118,7 @@ export function ViewerCanvas() {
         const res = await computeMeasurement(
           surveyId,
           id,
-          override ? { params: override } : undefined
+          params ? { params } : undefined
         );
         if (res.status === "completed") {
           toast.success("Computed");
@@ -1349,6 +1402,20 @@ export function ViewerCanvas() {
     viewerRef,
     handlesRef,
   });
+  // Change-detection (P0): fetch the current survey's change polygons off the
+  // manifest and render them as a dedicated cut=red / fill=blue clamped layer.
+  // Reactive off manifest.analytics.changes, so a prior run reappears on reload.
+  useChangeLayer({
+    viewerReady,
+    manifest,
+    changeSet,
+    changeLayerVisible,
+    viewerRef,
+    changeDsRef,
+    changeVisibleRef,
+    lastChangeUrlRef,
+    setChangeSet,
+  });
 
   // ------------------------------------------------------------- actions
   const actions = useMemo<ViewerActions>(
@@ -1366,6 +1433,7 @@ export function ViewerCanvas() {
       exportMeasurements,
       exportMeasurementsCsv,
       openSiteReport,
+      flyToChangeRegion,
       handleToggle,
       handleOpacity,
       handleToggleDesign,
@@ -1396,6 +1464,7 @@ export function ViewerCanvas() {
       exportMeasurements,
       exportMeasurementsCsv,
       openSiteReport,
+      flyToChangeRegion,
       handleToggle,
       handleOpacity,
       handleToggleDesign,
@@ -1489,6 +1558,10 @@ export function ViewerCanvas() {
           {/* Compare swipe — floating control that overlays two epochs' orthos
               split by a draggable divider (before | after) over this project. */}
           {manifest && <SurveyCompare projectId={manifest.survey.project_id} />}
+
+          {/* Changes card — AI change-detection analytics (bottom-left). Renders
+              only when a change set is loaded (fresh run or on reload). */}
+          <ChangesCard />
 
           {/* Zero-size top-left anchor for the camera joystick. The wrapper has
               no area, so it never intercepts canvas pointer events. */}

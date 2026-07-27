@@ -7,13 +7,14 @@
 // A/B + flips the store), so there is no always-on launcher here. The split
 // imagery layers live in useCompareLayers; this owns the divider + pill chrome.
 
-import { useRef } from "react";
-import { ArrowLeftRight, GripVertical, X } from "lucide-react";
+import { useRef, useState } from "react";
+import { ArrowLeftRight, GripVertical, ScanSearch, X } from "lucide-react";
 
 import { type Survey } from "@/lib/api/assetSvc";
 import { formatSurveyDate } from "@/lib/utils";
 import { useViewerStore } from "@/lib/viewer/state/store";
 import { useCompareSurveys } from "@/components/viewer/shell/hooks/useCompareSurveys";
+import { ChangeDetectDialog } from "@/components/viewer/shell/ChangeDetectDialog";
 import {
   Select,
   SelectContent,
@@ -76,6 +77,11 @@ export function SurveyCompare({ projectId }: { projectId: string }) {
   // dragging never re-renders — the store's splitPosition drives the UI).
   const canvasRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
+
+  // AI change-detection trigger — mounted with the compare surface (its A/B
+  // default from the compare slice). Scoped here so it lives and dies with
+  // compare mode; its own unmount guard bails an in-flight poll on exit.
+  const [changeDetectOpen, setChangeDetectOpen] = useState(false);
 
   // Nothing here unless compare mode is ON (the toolbar tool turns it on) and
   // the project actually has ≥2 epochs to compare.
@@ -147,6 +153,18 @@ export function SurveyCompare({ projectId }: { projectId: string }) {
           <ArrowLeftRight size={13} className="shrink-0 text-gray-500" />
           <EpochPicker tag="B" value={compareB} surveys={surveys} onChange={setCompareB} />
           <div className="h-5 w-px bg-white/[0.08]" />
+          {/* Detect changes — dispatches change-detect on the current (B/to)
+              survey vs the reference (A/from). Needs both epochs picked. */}
+          <button
+            type="button"
+            onClick={() => setChangeDetectOpen(true)}
+            disabled={!compareA || !compareB}
+            className="flex h-7 shrink-0 items-center gap-1.5 rounded-lg border border-[#C97A4E]/30 bg-[#C97A4E]/[0.12] px-2.5 text-[11px] font-medium text-[#C97A4E] transition-colors hover:bg-[#C97A4E]/20 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <ScanSearch size={13} className="shrink-0" />
+            Detect changes
+          </button>
+          <div className="h-5 w-px bg-white/[0.08]" />
           <button
             type="button"
             aria-label="Exit compare"
@@ -157,6 +175,8 @@ export function SurveyCompare({ projectId }: { projectId: string }) {
           </button>
         </div>
       </div>
+
+      <ChangeDetectDialog open={changeDetectOpen} onOpenChange={setChangeDetectOpen} />
     </>
   );
 }

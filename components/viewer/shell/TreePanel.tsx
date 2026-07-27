@@ -20,6 +20,7 @@ import {
   Download,
   FileJson,
   FileText,
+  Grid3x3,
   Loader2,
   Sheet,
 } from "lucide-react";
@@ -45,6 +46,8 @@ import { LayerPanel } from "@/components/viewer/LayerPanel";
 import { SurveyList } from "@/components/viewer/SurveyList";
 import { WorkspaceTree } from "@/components/viewer/shell/WorkspaceTree";
 import { CadExportDialog } from "@/components/viewer/shell/CadExportDialog";
+import { GridExportDialog } from "@/components/viewer/shell/GridExportDialog";
+import { ContourGenerateDialog } from "@/components/viewer/shell/ContourGenerateDialog";
 import type { ModuleKey } from "@/lib/viewer/state/store";
 
 const MODULE_TITLES: Record<Exclude<ModuleKey, "measure" | "survey">, string> = {
@@ -62,8 +65,14 @@ export function TreePanel() {
   const surveyId = useViewerStore((s) => s.surveyId);
   const setTreePanelOpen = useViewerStore((s) => s.setTreePanelOpen);
   const hasExportableGeometry = useViewerStore((s) => s.measurements.some((m) => m.geometry));
+  const hasDsm = useViewerStore((s) =>
+    (s.manifest?.layers.terrain ?? []).some(
+      (t) => t.surface_type === "dsm" && !!t.raw_raster_url
+    )
+  );
   const actions = useViewerActions();
   const [cadExportOpen, setCadExportOpen] = useState(false);
+  const [gridExportOpen, setGridExportOpen] = useState(false);
 
   const surveyTitle = manifest ? `Survey ${manifest.survey.survey_date}` : "Survey viewer";
 
@@ -117,9 +126,19 @@ export function TreePanel() {
                 Draw a measurement to enable
               </p>
             )}
+            <DropdownMenuItem disabled={!hasDsm} onSelect={() => setGridExportOpen(true)}>
+              <Grid3x3 size={14} />
+              Survey points (CSV / GeoJSON)…
+            </DropdownMenuItem>
+            {!hasDsm && (
+              <p className="px-2 pb-1 pt-0.5 text-[10px] leading-tight text-gray-600">
+                Needs a processed DSM
+              </p>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
         <CadExportDialog open={cadExportOpen} onOpenChange={setCadExportOpen} />
+        <GridExportDialog open={gridExportOpen} onOpenChange={setGridExportOpen} />
         <button
           type="button"
           aria-label="Collapse panel"
@@ -177,6 +196,7 @@ function SurveyTree({ projectId, surveyId }: { projectId: string; surveyId: stri
   const project = useViewerStore((s) => s.project);
   const view = useViewerStore((s) => s.view);
   const actions = useViewerActions();
+  const [contourGenOpen, setContourGenOpen] = useState(false);
 
   const availableColorMaps = useMemo(() => {
     const ramps = new Set<string>();
@@ -261,11 +281,13 @@ function SurveyTree({ projectId, surveyId }: { projectId: string; surveyId: stri
         onColorMapChange={actions.handleColorMapChange}
         onShadingChange={actions.handleShadingChange}
         onContourIntervalChange={actions.handleContourIntervalChange}
+        onGenerateContours={() => setContourGenOpen(true)}
         onToggleImages={actions.handleToggleImages}
         onToggleGcps={actions.handleToggleGcps}
         onToggleDigitalTwin={actions.handleToggleDigitalTwin}
         onSunLightingChange={actions.handleSunLightingChange}
       />
+      <ContourGenerateDialog open={contourGenOpen} onOpenChange={setContourGenOpen} />
     </>
   );
 }

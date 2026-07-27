@@ -54,6 +54,8 @@ export interface ViewerActions {
   exportMeasurementsCsv: () => void;
   /** Open the printable, client-facing Site Report overlay. */
   openSiteReport: () => void;
+  /** Fly the camera to the Nth change-detection region (Changes card row click). */
+  flyToChangeRegion: (index: number) => void;
 
   // Layer / view interaction (scene side effects live in ViewerCanvas).
   handleToggle: (key: string) => void;

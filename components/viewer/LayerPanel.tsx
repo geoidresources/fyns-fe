@@ -120,6 +120,9 @@ interface LayerPanelProps {
   onColorMapChange: (value: string) => void;
   onShadingChange: (value: string) => void;
   onContourIntervalChange: (intervalM: number) => void;
+  /** Open the contour-generation dialog (the trigger that populates
+   * `availableContourIntervals`). Omitted → the "Generate…" affordance hides. */
+  onGenerateContours?: () => void;
   onToggleImages?: () => void;
   onToggleGcps?: () => void;
   onToggleDigitalTwin?: () => void;
@@ -787,6 +790,7 @@ export function LayerPanel({
   onColorMapChange,
   onShadingChange,
   onContourIntervalChange,
+  onGenerateContours,
   onToggleImages,
   onToggleGcps,
   onToggleDigitalTwin,
@@ -991,6 +995,15 @@ export function LayerPanel({
         <div className="mt-1 flex h-9 items-center gap-2.5 px-2">
           <HugeiconsIcon icon={RippleIcon} size={16} className="shrink-0 text-gray-500" />
           <span className="min-w-0 flex-1 text-[13px] text-gray-300">Contour Interval</span>
+          {onGenerateContours && (
+            <button
+              type="button"
+              onClick={onGenerateContours}
+              className="shrink-0 rounded-[4px] px-1.5 py-0.5 text-[11px] text-gray-400 outline-none transition-colors hover:bg-white/[0.04] hover:text-[#C97A4E] focus-visible:ring-1 focus-visible:ring-[#C97A4E]/50"
+            >
+              {availableContourIntervals.length === 0 ? "Generate…" : "+ Add…"}
+            </button>
+          )}
           <Select
             value={contourIntervalM != null ? String(contourIntervalM) : undefined}
             onValueChange={(v) => onContourIntervalChange(Number(v))}

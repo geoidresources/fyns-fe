@@ -91,6 +91,17 @@ export const ELEVATION_RAMPS = ["viridis", "terrain", "plasma", "grayscale"] as 
 // and Cesium's WebGL fetches require it. Applied once at manifest load so
 // every consumer (imagery, terrain, tilesets, GeoJSON) sees proxied URLs.
 export const GCS_PREFIX = "https://storage.googleapis.com/";
+
+/** Un-proxy `/gcs/<path>` back to the canonical storage.googleapis.com URL — the
+ * inverse of proxyGcsUrls. The store manifest is rewritten onto the same-origin
+ * `/gcs` proxy (Cesium CORS), but workflow-geo-svc reads the bucket with its own
+ * credentials and wants the canonical URL for a dispatch ArtifactRef. Idempotent:
+ * a non-proxied (already-canonical) URL is returned untouched. Shared by the
+ * grid-extract and change-detect dispatch flows. */
+export function unproxyGcsUrl(url: string): string {
+  return url.startsWith("/gcs/") ? GCS_PREFIX + url.slice("/gcs/".length) : url;
+}
+
 export function proxyGcsUrls<T>(value: T): T {
   if (typeof value === "string") {
     return (value.startsWith(GCS_PREFIX)

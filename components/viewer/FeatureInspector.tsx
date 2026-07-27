@@ -31,6 +31,7 @@ import {
   calcTypesFor,
   coerceMethodForKind,
   crossSurveyRefs,
+  isComputableKind,
   isVolumeKind,
   methodFromParams,
   LEAN_RENDER,
@@ -45,6 +46,7 @@ import { UNIT_SYSTEMS, convertForDisplay, unitSystemOf, type UnitSystem } from "
 import { STYLE_SWATCHES, styleOf, type MeasurementStyle } from "@/lib/viewer/style";
 import { temporalComparePair } from "@/lib/viewer/compare";
 import { ComparisonCard } from "@/components/viewer/shell/ComparisonCard";
+import { CrossSectionChart } from "@/components/viewer/shell/CrossSectionChart";
 import { loadMaterialCatalog, type MaterialEntry } from "@/lib/viewer/materials";
 import { CadExportDialog } from "@/components/viewer/shell/CadExportDialog";
 
@@ -135,6 +137,18 @@ const METRICS_BY_KIND: Record<string, [key: string, label: string][]> = {
     ["cut_volume_m3", "Cut"],
     ["fill_volume_m3", "Fill"],
     ["net_change_m3", "Net change"],
+    ["area_m2", "Area"],
+  ],
+  // Design conformance (cut_fill with a `design` base, from=design/to=survey):
+  // the engine's cut/fill are INVERTED vs the earthworks "to-design" meaning —
+  // engine fill_volume_m3 = survey ABOVE design = over-built = CUT to design;
+  // engine cut_volume_m3 = survey BELOW design = under-built = FILL to design.
+  // So the keys are deliberately swapped + relabeled here (volume-compute keeps
+  // the generic keys; the FE owns the design-earthworks labeling).
+  cut_fill_design: [
+    ["fill_volume_m3", "Cut to design"],
+    ["cut_volume_m3", "Fill to design"],
+    ["net_change_m3", "Net to design"],
     ["area_m2", "Area"],
   ],
 };
@@ -580,10 +594,11 @@ export function FeatureInspector({
   const canPatch = !demo && !!onPatch;
   // Volume kinds may re-run on completed too (edit method → recompute); the
   // backend's in-flight gate (409) covers the computing state.
-  // Only the volume family dispatches today (processorForKind on the backend);
-  // other kinds get no Run row rather than a 422 toast. Completed volume rows
-  // may re-run (edit method → recompute); the in-flight 409 gate covers computing.
-  const canCompute = !demo && isVolume && measurement.status !== "computing";
+  // The volume family AND cross_section (profile-extract) dispatch today
+  // (isComputableKind); other kinds get no Run row rather than a 422 toast.
+  // Completed rows may re-run (edit method / re-sample); the 409 gate covers
+  // computing.
+  const canCompute = !demo && isComputableKind(measurement.kind) && measurement.status !== "computing";
   // Vertex-drag editing needs a real (non-demo) polygon/line and the handler.
   const geomType = measurement.geometry?.type;
   const canEditGeometry =
@@ -619,6 +634,12 @@ export function FeatureInspector({
     !demo && !doc && !showingEstimate && measurement.geometry
       ? geometryLocalStats(measurement.geometry)
       : null;
+  // A cut_fill computed against a `design` base (from=design/to=survey) surfaces
+  // design-conformance labels ("Cut/Fill to design") via the swapped mapping.
+  const isDesignCompute =
+    measurement.kind === "cut_fill" &&
+    (measurement.params?.from as { type?: string } | undefined)?.type === "design";
+  const metricsKind = isDesignCompute ? "cut_fill_design" : measurement.kind;
   const metrics = demo
     ? [
         { label: "Volume", value: "12,840 m³" },
@@ -626,7 +647,7 @@ export function FeatureInspector({
         { label: "Area", value: "1,420 m²" },
         { label: "Perimeter", value: "142 m" },
       ]
-    : resultMetrics(localStats ?? estimateMetricMap ?? resultMetricMap, unitSystem, measurement.kind);
+    : resultMetrics(localStats ?? estimateMetricMap ?? resultMetricMap, unitSystem, metricsKind);
 
   // Tonnage (derived, no recompute): volume × the assigned material density.
   // Volume comes from the authoritative doc, else the instant estimate.
@@ -744,6 +765,14 @@ export function FeatureInspector({
         if (err instanceof CalcParamsError) toast.warning(err.message);
         else throw err;
       }
+      return;
+    }
+    // cross_section (elevation profile): the `polyline` param is built store-side
+    // in ViewerCanvas.triggerCompute — it needs the DSM CRS to reproject, which
+    // this prop-driven panel (demo / sampleData contexts) can't read. Just
+    // dispatch; the params are assembled there.
+    if (measurement.kind === "cross_section") {
+      onCompute(measurement.id);
       return;
     }
     onCompute(measurement.id);
@@ -873,6 +902,13 @@ export function FeatureInspector({
                       : "No computed metrics yet. Run compute to populate volume and area."}
                   </p>
                 )
+              )}
+
+              {/* Cross-section: station-vs-elevation chart from the profile-extract
+                  sidecar (mounts once the selected measurement's result carries a
+                  profile_url; unmounts on deselect / kind switch). */}
+              {!demo && measurement.kind === "cross_section" && doc?.artifacts?.profile_url && (
+                <CrossSectionChart profileUrl={doc.artifacts.profile_url} unitSystem={unitSystem} />
               )}
 
               {showingEstimate && (

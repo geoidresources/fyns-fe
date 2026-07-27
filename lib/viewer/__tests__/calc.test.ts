@@ -7,6 +7,7 @@ import {
   calcTypesFor,
   crossSurveyRefs,
   defaultKindFor,
+  isComputableKind,
   isVolumeKind,
   kindForCalcType,
   methodFromParams,
@@ -49,6 +50,13 @@ test("defaultKindFor is the panel's displayed default — saved kind == shown pi
 test("isVolumeKind matches the backend's unified volume-compute set", () => {
   for (const k of ["volume", "stockpile", "cut_fill"]) assert.ok(isVolumeKind(k));
   for (const k of ["cross_section", "area", "distance", "elevation"]) assert.ok(!isVolumeKind(k));
+});
+
+test("isComputableKind adds cross_section to the volume family (Run row gate)", () => {
+  // The volume family plus cross_section dispatch a compute today.
+  for (const k of ["volume", "stockpile", "cut_fill", "cross_section"]) assert.ok(isComputableKind(k));
+  // Geometry-only kinds have no compute path yet — no Run row.
+  for (const k of ["area", "distance", "elevation", "contour"]) assert.ok(!isComputableKind(k));
 });
 
 // ------------------------------------------------------------- surface refs

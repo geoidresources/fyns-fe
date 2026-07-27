@@ -56,6 +56,24 @@ function parseEpsgCode(crs: string): number | null {
   return Number.isFinite(code) ? code : null;
 }
 
+// Geographic (degree-based) CRSs. A polyline/grid over one of these is already
+// in the raster's units (lon/lat), so no reprojection is needed. 4326 (WGS84) is
+// the Mine Site case; the rest are the common lat/lon datums a survey may carry.
+// Everything else (UTM/MGA/NZTM/BNG …) is projected metres. Mirrors the set
+// GridExportDialog uses for its metres bridge.
+const GEOGRAPHIC_EPSG = new Set([4326, 4979, 4269, 4258, 4283, 7844, 4167, 4759, 4008]);
+
+/** True when the CRS measures in degrees (a raw `+proj=longlat` def counts too).
+ * Callers use it to short-circuit reprojection: over a geographic raster the
+ * lon/lat coordinates ARE the raster's units, so `forward` would be a no-op (and
+ * `getWorkingTransform` would otherwise chase an epsg.io fetch for 4326). */
+export function isGeographicCrs(crs?: string | null): boolean {
+  if (!crs) return false;
+  if (crs.toLowerCase().includes("longlat")) return true;
+  const code = parseEpsgCode(crs);
+  return code !== null && GEOGRAPHIC_EPSG.has(code);
+}
+
 /** Step 2 — a UTM EPSG code maps directly to a proj4 def with no lookup.
  * 326zz = WGS84 / UTM zone zz N; 327zz = zone zz S. */
 function computedUtmDef(code: number): string | null {

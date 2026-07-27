@@ -234,6 +234,22 @@ export interface ExportLayer {
   crs?: string;
 }
 
+/** A survey_assets-backed renderable survey point set (asset_kind "points",
+ * processor_type "grid-extract"). Mirrors ExportLayer's single-row shape but is
+ * its own group: a point set is renderable geometry, not a download bundle.
+ * `output_urls` maps each serialization (geojson, csv) to its stored sidecar
+ * URL; `point_count` / `spacing_m` (from the artifact metadata) drive the layer
+ * summary + density UI. `bbox` is present only when the artifact stamped a real
+ * extent — grid-extract omits it today, so treat it as usually absent. */
+export interface PointsLayer {
+  processor_type: string; // grid-extract
+  output_urls?: Record<string, string>; // format -> URL (geojson, csv)
+  point_count?: number;
+  spacing_m?: number; // sample grid spacing, meters
+  bbox?: number[];
+  crs?: string;
+}
+
 export interface VectorLayer {
   role: string;
   geojson_url?: string;
@@ -273,6 +289,7 @@ export interface ManifestLayers {
   pointcloud: AssetLayer[] | null;
   lenses: AssetLayer[] | null;
   exports: ExportLayer[] | null; // CAD/survey deliverables (export-cad → dxf/csv/landxml/…)
+  points: PointsLayer[] | null; // grid-extract renderable survey point sets (geojson/csv sidecars)
   vectors: VectorLayer[] | null;
   site_models: SiteModelLayer[] | null;
   designs: DesignLayer[] | null;
@@ -302,6 +319,25 @@ export interface CutFillEntry {
   diff_raster_url?: string;
 }
 
+// One AI change-detection result (analytics.changes). geojson_url is the
+// change_polygons FeatureCollection (cut/fill change regions, EPSG:4326),
+// returned as a storage.googleapis.com URL — proxy it through /gcs/ like the
+// other manifest artifact URLs. from_survey/to_survey/dataset_version are
+// optional: the change-detect processor contract does not require the from/to
+// refs, so they appear only when it echoes them.
+export interface ChangeSetEntry {
+  processor_type: string; // "change-detect"
+  geojson_url?: string;
+  cut_volume_m3: number;
+  fill_volume_m3: number;
+  net_m3: number;
+  region_count: number;
+  threshold_m: number;
+  from_survey?: string;
+  to_survey?: string;
+  dataset_version?: string;
+}
+
 // The §7.1 v1 result document stored verbatim on measurements.result by the
 // measurement-result consumer: metrics + artifacts + provenance ("receipt") on
 // success, error {class, message} on failure. Legacy rows are flat metric maps —
@@ -314,6 +350,8 @@ export interface MeasurementResultDoc {
     diff_raster_url?: string;
     heatmap_tiles_url?: string;
     base_surface_url?: string;
+    /** cross_section (profile-extract) sidecar JSON: { samples:[{distance_m,x,y,z}], length_m }. */
+    profile_url?: string;
     bbox?: number[];
   };
   provenance?: {
@@ -344,6 +382,7 @@ export interface Manifest {
   analytics: {
     stockpiles: StockpileEntry[] | null;
     cut_fill: CutFillEntry[] | null;
+    changes: ChangeSetEntry[] | null;
   };
   measurements: MeasurementSummary[] | null;
 }

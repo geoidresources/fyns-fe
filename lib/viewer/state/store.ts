@@ -25,6 +25,7 @@ import {
 import type { Cartesian3 } from "cesium";
 
 import type { EstimateResult, Manifest, Measurement } from "@/lib/api/assetSvc";
+import type { ChangeSet } from "@/lib/viewer/changeDetect";
 import type { Project } from "@/lib/api/userSvc";
 import type { LayerControl, DesignControl } from "@/components/viewer/LayerPanel";
 import type { CutFillSettings } from "@/lib/viewer/cutfillColormap";
@@ -193,6 +194,19 @@ export interface ViewerShellData {
   compareB: string | null;
   splitPosition: number;
 
+  /**
+   * AI change-detection (P0): the current survey's loaded change set — the
+   * `manifest.analytics.changes` entry plus its fetched + parsed cut/fill change
+   * polygons — or null when the survey has none. Populated by useChangeLayer's
+   * fetch effect off the manifest (so a previously-computed set reappears on
+   * reload), and refreshed after a ChangeDetectDialog run. Feeds both the scene
+   * layer and the Changes card off ONE fetch.
+   */
+  changeSet: ChangeSet | null;
+  /** Visibility of the change-polygons scene layer (the Changes card's toggle).
+   * Defaults on so a fresh/loaded set is visible; per-mount like the rest. */
+  changeLayerVisible: boolean;
+
   busyIds: Set<string>;
   saving: boolean;
   measurementSearch: string;
@@ -244,6 +258,10 @@ export interface ViewerShellActions {
   setCompareB: (id: string | null) => void;
   /** Divider x-position, 0..1 (the caller clamps to a visible band). */
   setSplitPosition: (pos: number) => void;
+
+  /** Change-detection (P0) slice setters. */
+  setChangeSet: (changeSet: ChangeSet | null) => void;
+  setChangeLayerVisible: (visible: boolean) => void;
 
   setView: (patch: Partial<ViewSettings>) => void;
   setCameraPose: (pose: CameraPose | null) => void;
@@ -336,6 +354,9 @@ function defaultData(surveyId: string): ViewerShellData {
     compareA: null,
     compareB: null,
     splitPosition: 0.5,
+
+    changeSet: null,
+    changeLayerVisible: true,
 
     busyIds: new Set<string>(),
     saving: false,
@@ -499,6 +520,9 @@ export function createViewerStore(
     setCompareA: (id) => set({ compareA: id }),
     setCompareB: (id) => set({ compareB: id }),
     setSplitPosition: (pos) => set({ splitPosition: pos }),
+
+    setChangeSet: (changeSet) => set({ changeSet }),
+    setChangeLayerVisible: (visible) => set({ changeLayerVisible: visible }),
 
     setView: (patch) => set({ view: { ...get().view, ...patch } }),
     setCameraPose: (pose) => set({ cameraPose: pose }),

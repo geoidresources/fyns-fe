@@ -87,6 +87,14 @@ export function isVolumeKind(kind: string): boolean {
   return kind === "volume" || kind === "stockpile" || kind === "cut_fill";
 }
 
+/** Kinds the FE can dispatch a compute for today: the volume family (unified
+ * volume-compute path) plus cross_section (profile-extract). Gates the panel's
+ * Run/Re-run row — other kinds get no row rather than a 422 toast. Grows as more
+ * processors are wired to the measurement-compute endpoint. */
+export function isComputableKind(kind: string): boolean {
+  return isVolumeKind(kind) || kind === "cross_section";
+}
+
 // ------------------------------------------------------------- base methods
 
 export const VOLUME_METHODS = [
