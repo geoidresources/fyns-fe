@@ -6,6 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { measurementDeleteRequest } from "@/components/viewer/deleteConfirm";
 import {
   Check,
   ChevronDown,
@@ -15,6 +17,7 @@ import {
   Loader2,
   Pencil,
   Play,
+  RefreshCw,
   Save,
   Spline,
   X,
@@ -29,6 +32,8 @@ import {
   DEFAULT_METHOD_STATE,
   calcTypesFor,
   coerceMethodForKind,
+  formatComputeElapsed,
+  isComputeStuck,
   isVolumeKind,
   methodFromParams,
   LEAN_RENDER,
@@ -36,9 +41,11 @@ import {
   provenanceOf,
   resultErrorOf,
   resultForKind,
+  hasDesignBase,
   surfaceRefsForMethod,
   type CalcMethodState,
 } from "@/lib/viewer/calc";
+import { useComputeClock } from "@/components/viewer/shell/hooks/useComputeClock";
 import { UNIT_SYSTEMS, convertForDisplay, unitSystemOf, type UnitSystem } from "@/lib/viewer/units";
 import { STYLE_SWATCHES, styleOf, type MeasurementStyle } from "@/lib/viewer/style";
 import { temporalComparePair } from "@/lib/viewer/compare";
@@ -73,7 +80,11 @@ interface FeatureInspectorProps {
     body: { name?: string; kind?: string; params?: Record<string, unknown>; draft?: boolean }
   ) => Promise<void>;
   onDelete?: (id: string) => void;
-  onCompute?: (id: string, override?: Record<string, unknown>) => void;
+  onCompute?: (
+    id: string,
+    override?: Record<string, unknown>,
+    opts?: { force?: boolean }
+  ) => void;
   /** Enter the vertex-drag geometry editor for this measurement (Line tool lit
    * as the edit indicator); double-click on the map commits + recomputes. */
   onEditGeometry?: () => void;
@@ -135,6 +146,47 @@ const METRICS_BY_KIND: Record<string, [key: string, label: string][]> = {
   ],
 };
 
+// ORB-54 — Cut/Fill against a DESIGN base are relabelled (and therefore
+// swapped), because the engine's labels are mechanical while the panel's are
+// earthworks terms.
+//
+// A design comparison dispatches from = design, to = as-built survey
+// (lib/viewer/calc.ts surfaceRefsForMethod, case "design-surface"). The engine
+// differences Δ = TO − FROM and buckets purely by sign — workflow-geo-svc
+// cutfillengine/compute.py: `diff_raw = arr_b - arr_a` with
+// dsm_a = BaselinePath = FROM, then `cut = Σ max(−Δ,0)`, `fill = Σ max(Δ,0)`.
+// With the design in the FROM slot that means:
+//
+//   fill_volume_m3 = Σ max(as-built − design, 0) = material ABOVE design = OVER-built
+//   cut_volume_m3  = Σ max(design − as-built, 0) = voids BELOW design    = UNDER-built
+//
+// Earthworks naming runs the other way: over-built material is what you CUT to
+// reach design, and an under-built void is what you FILL. So the two source
+// keys are exchanged for display.
+//
+// This is a presentation relabel, NOT a claim that the engine is inverted: a
+// design surface is rasterized into the same from/to slot any terrain base
+// would occupy (volumecompute/stage1.py `out_paths[role] = design_path`), with
+// no design-specific arithmetic anywhere. The engine's own design golden says
+// the naming is ours to own, and pins the direction: a z=51 design pad over a
+// z=50 plane carrying a z=52 prism yields cut=1900 (the below-design plane) and
+// fill=600 (the above-design prism) — see
+// cutfillengine/goldens/design_goldens_test.go TestGolden17DesignFlatPad, and
+// TestGolden17DesignSwap for the from/to symmetry.
+//
+// Scope: `design-surface` is only offered for the cut_fill kind
+// (calc.ts METHODS_FOR_KIND), and the adjusted/tonnage splits are not surfaced
+// in this grid, so these four rows are the entire swap surface.
+const METRICS_CUT_FILL_DESIGN: [key: string, label: string][] = [
+  ["fill_volume_m3", "Cut to design"],
+  ["cut_volume_m3", "Fill to design"],
+  // net_change_m3 = engine fill − engine cut = displayed Cut − displayed Fill.
+  // The label states that arithmetic so the sign can't be misread against the
+  // two swapped rows above it.
+  ["net_change_m3", "Net (cut − fill)"],
+  ["area_m2", "Area"],
+];
+
 // Internal / debug metrics never shown in the grid (they are provenance, not
 // results — sample_count, and the material-adjusted splits which surface as
 // Tonnage instead).
@@ -162,11 +214,13 @@ function prettifyKey(key: string): string {
 
 /** Metric map → display rows, converted into the measurement's unit system.
  * A `kind` with a curated grid shows ONLY that grid; other kinds fall back to
- * the generic label table plus any remaining (non-internal) keys. */
+ * the generic label table plus any remaining (non-internal) keys.
+ * `designBase` switches cut_fill onto the earthworks-named grid (ORB-54). */
 function resultMetrics(
   result: Record<string, number>,
   system: UnitSystem,
-  kind?: string
+  kind?: string,
+  designBase = false
 ): { label: string; value: string }[] {
   const rows: { label: string; value: string }[] = [];
   const seen = new Set<string>();
@@ -174,7 +228,12 @@ function resultMetrics(
     const c = convertForDisplay(key, value, system);
     rows.push({ label, value: `${formatMetric(c.value)}${c.unit ? ` ${c.unit}` : ""}` });
   };
-  const curated = kind ? METRICS_BY_KIND[kind] : undefined;
+  const curated =
+    designBase && kind === "cut_fill"
+      ? METRICS_CUT_FILL_DESIGN
+      : kind
+        ? METRICS_BY_KIND[kind]
+        : undefined;
   for (const [key, label] of curated ?? METRIC_LABELS) {
     const value = result[key];
     if (typeof value === "number" && Number.isFinite(value)) {
@@ -443,6 +502,12 @@ export function FeatureInspector({
   const [style, setStyle] = React.useState<MeasurementStyle>(() => styleOf(measurement?.params));
   const styleTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const [prevId, setPrevId] = React.useState(measurement?.id);
+  // ORB-37: delete is gated behind a confirmation. Declared above the early
+  // returns below so the hook order stays stable across feature/measurement.
+  const { confirm, confirmDialog } = useConfirm();
+  // ORB-39: local clock so the stuck-compute affordance can appear while this
+  // measurement sits in `computing` with no data changing underneath it.
+  const now = useComputeClock(measurement?.status === "computing");
 
   // Reset the editable state when a different feature is selected. Adjusting
   // state during render (instead of in an effect) avoids the cascading
@@ -477,6 +542,11 @@ export function FeatureInspector({
   // other kinds get no Run row rather than a 422 toast. Completed volume rows
   // may re-run (edit method → recompute); the in-flight 409 gate covers computing.
   const canCompute = !demo && isVolume && measurement.status !== "computing";
+  // ORB-39: once a compute job dies server-side the row is stranded in
+  // `computing` — the Run row above is hidden and the tree's Play button only
+  // shows for draft/failed, so nothing can restart it. After a few minutes,
+  // offer a re-dispatch that sets `force` to bypass the in-flight 409.
+  const computeStuck = !demo && isVolume && isComputeStuck(measurement, now);
   // Vertex-drag editing needs a real (non-demo) polygon/line and the handler.
   const geomType = measurement.geometry?.type;
   const canEditGeometry =
@@ -512,6 +582,9 @@ export function FeatureInspector({
     !demo && !doc && !showingEstimate && measurement.geometry
       ? geometryLocalStats(measurement.geometry)
       : null;
+  // ORB-54: a design base flips the panel onto earthworks Cut/Fill naming.
+  const designBase = !demo && hasDesignBase(measurement.params);
+  const designCutFill = designBase && measurement.kind === "cut_fill";
   const metrics = demo
     ? [
         { label: "Volume", value: "12,840 m³" },
@@ -519,7 +592,12 @@ export function FeatureInspector({
         { label: "Area", value: "1,420 m²" },
         { label: "Perimeter", value: "142 m" },
       ]
-    : resultMetrics(localStats ?? estimateMetricMap ?? resultMetricMap, unitSystem, measurement.kind);
+    : resultMetrics(
+        localStats ?? estimateMetricMap ?? resultMetricMap,
+        unitSystem,
+        measurement.kind,
+        designBase
+      );
 
   const computeError = showFailure ? resultErrorOf(measurement.result) : null;
   const receipt = demo ? null : provenanceOf(doc);
@@ -594,28 +672,32 @@ export function FeatureInspector({
     }, 600);
   };
 
-  const runCompute = () => {
+  const runCompute = (opts?: { force?: boolean }) => {
     if (!onCompute) return;
     // Volume kinds always send the edited config as the override — the backend
     // persists the merge, so the row states what ran (§6.1).
     if (isVolume && calcCfg) {
       try {
         const refs = surfaceRefsForMethod(calcCfg);
-        onCompute(measurement.id, {
-          volume_method: calcCfg.method,
-          from: refs.from,
-          to: refs.to,
-          // Lean run: skip the gdal2tiles pyramid — the panel needs the
-          // number + receipt; heatmap tiles are the result-views phase.
-          render: LEAN_RENDER,
-        });
+        onCompute(
+          measurement.id,
+          {
+            volume_method: calcCfg.method,
+            from: refs.from,
+            to: refs.to,
+            // Lean run: skip the gdal2tiles pyramid — the panel needs the
+            // number + receipt; heatmap tiles are the result-views phase.
+            render: LEAN_RENDER,
+          },
+          opts
+        );
       } catch (err) {
         if (err instanceof CalcParamsError) toast.warning(err.message);
         else throw err;
       }
       return;
     }
-    onCompute(measurement.id);
+    onCompute(measurement.id, undefined, opts);
   };
 
   const runLabel = doc ? "Re-run compute" : "Run compute";
@@ -763,6 +845,17 @@ export function FeatureInspector({
                 </p>
               )}
 
+              {/* ORB-54: state the convention explicitly — these two rows read
+                  against the design, which is the opposite sense to a
+                  survey-to-survey compare. */}
+              {designCutFill && !localStats && metrics.length > 0 && (
+                <p className="-mt-1 text-[10px] text-gray-600">
+                  Measured against the design surface: <span className="text-gray-500">Cut</span> is
+                  material sitting above design (to remove),{" "}
+                  <span className="text-gray-500">Fill</span> is volume still below it (to add).
+                </p>
+              )}
+
               {/* Metadata block (design): Material / Density / Base method /
                   Calculated. Base method discloses the shared CalcConfig. */}
               <div className="space-y-1 text-xs text-gray-400">
@@ -871,9 +964,37 @@ export function FeatureInspector({
                   <ActionRow
                     icon={busy ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}
                     label={runLabel}
-                    onClick={runCompute}
+                    onClick={() => runCompute()}
                     disabled={busy}
                   />
+                )}
+                {/* Stuck-compute recovery (ORB-39) — the only route back for a
+                    row whose worker died: every other Run affordance is hidden
+                    while status is `computing`. */}
+                {computeStuck && onCompute && (
+                  <>
+                    <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.08] p-3 text-xs">
+                      <p className="font-medium text-amber-400">
+                        Computing for {formatComputeElapsed(measurement, now)}
+                      </p>
+                      <p className="mt-1 text-amber-300/80">
+                        That is well past a normal run. If the job died server-side the row stays
+                        like this indefinitely — a forced re-run dispatches it again.
+                      </p>
+                    </div>
+                    <ActionRow
+                      icon={
+                        busy ? (
+                          <Loader2 size={15} className="animate-spin" />
+                        ) : (
+                          <RefreshCw size={15} />
+                        )
+                      }
+                      label="Force re-run"
+                      onClick={() => runCompute({ force: true })}
+                      disabled={busy}
+                    />
+                  </>
                 )}
                 {isDraft && (
                   <ActionRow
@@ -888,10 +1009,14 @@ export function FeatureInspector({
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => {
-                      onDelete(measurement.id);
-                      onClose();
-                    }}
+                    onClick={() =>
+                      confirm(
+                        measurementDeleteRequest({ name: measurement.name, draft: isDraft }, () => {
+                          onDelete(measurement.id);
+                          onClose();
+                        })
+                      )
+                    }
                     className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-red-400 transition-colors hover:bg-red-500/[0.08] disabled:opacity-50"
                   >
                     <X size={15} />
@@ -981,6 +1106,7 @@ export function FeatureInspector({
           </Tabs>
         </>
       )}
+      {confirmDialog}
     </div>
   );
 }

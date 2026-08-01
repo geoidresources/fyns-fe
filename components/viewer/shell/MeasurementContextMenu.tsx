@@ -11,6 +11,8 @@ import { PenLine, Spline, Trash2 } from "lucide-react";
 
 import { useViewerStore } from "@/lib/viewer/state/store";
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { measurementDeleteRequest } from "@/components/viewer/deleteConfirm";
 
 const MENU_WIDTH = 168;
 
@@ -48,6 +50,10 @@ export function MeasurementContextMenu() {
   const closeContextMenu = useViewerStore((s) => s.closeContextMenu);
   const selectMeasurement = useViewerStore((s) => s.selectMeasurement);
   const actions = useViewerActions();
+  // ORB-37. The dialog is owned here but rendered as a SIBLING of the menu:
+  // `run()` closes the menu synchronously, so a dialog nested inside the menu
+  // markup would unmount before it could be answered.
+  const { confirm, confirmDialog } = useConfirm();
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -58,67 +64,87 @@ export function MeasurementContextMenu() {
     return () => window.removeEventListener("keydown", onKey);
   }, [contextMenu, closeContextMenu]);
 
-  if (!contextMenu) return null;
-  const measurement = measurements.find((m) => m.id === contextMenu.measurementId);
-  if (!measurement) return null;
-
-  const geomType = measurement.geometry?.type;
-  const editable = geomType === "Polygon" || geomType === "LineString";
-
-  // Keep the menu on-screen: flip left if it would overflow the right edge.
-  const maxLeft = typeof window !== "undefined" ? window.innerWidth - MENU_WIDTH - 8 : contextMenu.x;
-  const left = Math.min(contextMenu.x, Math.max(8, maxLeft));
-
-  // Selection-dependent actions (Edit / Redraw read the current selection); make
-  // the menu self-consistent by re-selecting its target first, regardless of how
-  // it was opened.
-  const run = (fn: () => void) => {
-    closeContextMenu();
-    selectMeasurement(measurement.id, { fly: false });
-    fn();
-  };
-
   if (typeof document === "undefined") return null;
+
+  const measurement = contextMenu
+    ? (measurements.find((m) => m.id === contextMenu.measurementId) ?? null)
+    : null;
+
+  let menu: React.ReactNode = null;
+  if (contextMenu && measurement) {
+    const geomType = measurement.geometry?.type;
+    const editable = geomType === "Polygon" || geomType === "LineString";
+
+    // Keep the menu on-screen: flip left if it would overflow the right edge.
+    const maxLeft =
+      typeof window !== "undefined" ? window.innerWidth - MENU_WIDTH - 8 : contextMenu.x;
+    const left = Math.min(contextMenu.x, Math.max(8, maxLeft));
+
+    // Selection-dependent actions (Edit / Redraw read the current selection); make
+    // the menu self-consistent by re-selecting its target first, regardless of how
+    // it was opened.
+    const run = (fn: () => void) => {
+      closeContextMenu();
+      selectMeasurement(measurement.id, { fly: false });
+      fn();
+    };
+
+    menu = (
+      <>
+        <div
+          className="fixed inset-0 z-[60]"
+          onPointerDown={closeContextMenu}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            closeContextMenu();
+          }}
+        />
+        <div
+          role="menu"
+          aria-label={`Actions for ${measurement.name}`}
+          className="fixed z-[61] rounded-lg border border-white/[0.08] bg-[#18181b]/95 p-1 shadow-[0_8px_30px_rgba(0,0,0,0.5)] backdrop-blur-md"
+          style={{ left, top: contextMenu.y, width: MENU_WIDTH }}
+        >
+          {editable && (
+            <MenuItem
+              icon={<Spline size={14} />}
+              label="Edit shape"
+              onClick={() => run(actions.editGeometry)}
+            />
+          )}
+          {editable && (
+            <MenuItem
+              icon={<PenLine size={14} />}
+              label="Redraw"
+              onClick={() => run(actions.redrawGeometry)}
+            />
+          )}
+          <MenuItem
+            icon={<Trash2 size={14} />}
+            label="Delete"
+            danger
+            onClick={() =>
+              run(() =>
+                confirm(
+                  measurementDeleteRequest(
+                    { name: measurement.name, draft: measurement.draft },
+                    () => actions.removeMeasurement(measurement.id)
+                  )
+                )
+              )
+            }
+          />
+        </div>
+      </>
+    );
+  }
 
   // Portaled to <body> so `position: fixed` is viewport-relative (the shell's
   // framer-motion ancestors set `transform`, which would otherwise capture it).
   return createPortal(
     <>
-      <div
-        className="fixed inset-0 z-[60]"
-        onPointerDown={closeContextMenu}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          closeContextMenu();
-        }}
-      />
-      <div
-        role="menu"
-        aria-label={`Actions for ${measurement.name}`}
-        className="fixed z-[61] rounded-lg border border-white/[0.08] bg-[#18181b]/95 p-1 shadow-[0_8px_30px_rgba(0,0,0,0.5)] backdrop-blur-md"
-        style={{ left, top: contextMenu.y, width: MENU_WIDTH }}
-      >
-        {editable && (
-          <MenuItem
-            icon={<Spline size={14} />}
-            label="Edit shape"
-            onClick={() => run(actions.editGeometry)}
-          />
-        )}
-        {editable && (
-          <MenuItem
-            icon={<PenLine size={14} />}
-            label="Redraw"
-            onClick={() => run(actions.redrawGeometry)}
-          />
-        )}
-        <MenuItem
-          icon={<Trash2 size={14} />}
-          label="Delete"
-          danger
-          onClick={() => run(() => actions.removeMeasurement(measurement.id))}
-        />
-      </div>
+      {menu}
+      {confirmDialog}
     </>,
     document.body
   );

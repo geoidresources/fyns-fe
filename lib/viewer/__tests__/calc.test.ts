@@ -4,9 +4,13 @@ import assert from "node:assert/strict";
 import {
   CalcParamsError,
   DEFAULT_METHOD_STATE,
+  STUCK_COMPUTE_MS,
   calcTypesFor,
   crossSurveyRefs,
   defaultKindFor,
+  formatComputeElapsed,
+  hasDesignBase,
+  isComputeStuck,
   isVolumeKind,
   kindForCalcType,
   methodFromParams,
@@ -225,4 +229,89 @@ test("resultForKind: map hit, map miss, legacy fallback", async () => {
   assert.equal(resultForKind({ kind: "stockpile", result: spDoc }), spDoc);
   // Nothing anywhere → null.
   assert.equal(resultForKind({ kind: "stockpile" }), null);
+});
+
+// -------------------------------------------------- stuck compute (ORB-39)
+
+const STUCK_NOW = Date.parse("2026-07-28T12:00:00Z");
+const minutesAgo = (n: number) => new Date(STUCK_NOW - n * 60_000).toISOString();
+
+test("STUCK_COMPUTE_MS is the documented three minutes", () => {
+  assert.equal(STUCK_COMPUTE_MS, 180_000);
+});
+
+test("isComputeStuck only fires for the computing status", () => {
+  for (const status of ["draft", "completed", "failed"]) {
+    assert.equal(
+      isComputeStuck({ status, updated_at: minutesAgo(60) }, STUCK_NOW),
+      false,
+      `${status} must never be reported as stuck`
+    );
+  }
+});
+
+test("isComputeStuck is false for a compute still inside the threshold", () => {
+  assert.equal(isComputeStuck({ status: "computing", updated_at: minutesAgo(1) }, STUCK_NOW), false);
+  // Exactly at the boundary is not yet stuck (strict >).
+  assert.equal(isComputeStuck({ status: "computing", updated_at: minutesAgo(3) }, STUCK_NOW), false);
+});
+
+test("isComputeStuck is true once past the threshold", () => {
+  assert.equal(isComputeStuck({ status: "computing", updated_at: minutesAgo(4) }, STUCK_NOW), true);
+  assert.equal(isComputeStuck({ status: "computing", updated_at: minutesAgo(600) }, STUCK_NOW), true);
+});
+
+test("isComputeStuck tolerates a missing or unparseable timestamp", () => {
+  assert.equal(isComputeStuck({ status: "computing" }, STUCK_NOW), false);
+  assert.equal(isComputeStuck({ status: "computing", updated_at: "not-a-date" }, STUCK_NOW), false);
+});
+
+test("isComputeStuck never fires on a future stamp (server clock ahead)", () => {
+  assert.equal(isComputeStuck({ status: "computing", updated_at: minutesAgo(-30) }, STUCK_NOW), false);
+});
+
+test("formatComputeElapsed renders minutes then hours, floored at 1 min", () => {
+  assert.equal(formatComputeElapsed({ updated_at: minutesAgo(4) }, STUCK_NOW), "4 min");
+  assert.equal(formatComputeElapsed({ updated_at: minutesAgo(59) }, STUCK_NOW), "59 min");
+  assert.equal(formatComputeElapsed({ updated_at: minutesAgo(75) }, STUCK_NOW), "1 hr");
+  assert.equal(formatComputeElapsed({ updated_at: minutesAgo(0) }, STUCK_NOW), "1 min");
+  assert.equal(formatComputeElapsed({}, STUCK_NOW), "a while");
+});
+
+// ---------------------------------------------------- design base (ORB-54)
+
+test("hasDesignBase detects a design SurfaceRef in params.from", () => {
+  assert.equal(hasDesignBase({ from: { type: "design", design_id: "d-1" } }), true);
+});
+
+test("hasDesignBase is false for every non-design base", () => {
+  assert.equal(hasDesignBase({ from: { type: "previous_survey", surface: "dsm" } }), false);
+  assert.equal(hasDesignBase({ from: { type: "reference_level", elevation_m: 12 } }), false);
+  assert.equal(hasDesignBase({ from: { type: "smart_base" } }), false);
+});
+
+test("hasDesignBase ignores a design in the TO slot", () => {
+  // Only the BASE (from) drives the relabel — a design in `to` is the swapped
+  // ordering, where the engine's raw labels are already earthworks-correct.
+  assert.equal(hasDesignBase({ from: { type: "survey_terrain" }, to: { type: "design" } }), false);
+});
+
+test("hasDesignBase tolerates missing / malformed params", () => {
+  assert.equal(hasDesignBase(undefined), false);
+  assert.equal(hasDesignBase(null), false);
+  assert.equal(hasDesignBase({}), false);
+  assert.equal(hasDesignBase({ from: null }), false);
+  assert.equal(hasDesignBase({ from: "design" }), false);
+});
+
+test("surfaceRefsForMethod puts the design in FROM — the premise of the relabel", () => {
+  // If this ever flips to design-in-`to`, the inspector's Cut/Fill swap becomes
+  // wrong: the engine's raw labels would already be earthworks-correct.
+  const refs = surfaceRefsForMethod({
+    ...DEFAULT_METHOD_STATE,
+    method: "design-surface",
+    baseDesignId: "d-17",
+  });
+  assert.deepEqual(refs.from, { type: "design", design_id: "d-17" });
+  assert.equal((refs.to as { type: string }).type, "survey_terrain");
 });

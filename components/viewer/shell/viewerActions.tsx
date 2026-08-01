@@ -36,8 +36,14 @@ export interface ViewerActions {
   // Measurement CRUD + framing.
   selectMeasurementRow: (m: PanelMeasurement) => void;
   /** `override` is a partial params object (e.g. {volume_method, from, to})
-   * deep-merged + persisted by the backend before dispatch (§6.1). */
-  triggerCompute: (id: string, override?: Record<string, unknown>) => void;
+   * deep-merged + persisted by the backend before dispatch (§6.1).
+   * `opts.force` bypasses asset-svc's compute-in-flight 409 — the recovery path
+   * for a row stuck in `computing` because its job died server-side (ORB-39). */
+  triggerCompute: (
+    id: string,
+    override?: Record<string, unknown>,
+    opts?: { force?: boolean }
+  ) => void;
   removeMeasurement: (id: string) => void;
   /** PROMOTES a draw-first draft: PATCH {name, draft:false} (draft-first flow —
    * the row/geometry/params/result already exist). */

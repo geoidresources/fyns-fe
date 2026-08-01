@@ -304,3 +304,57 @@ export function provenanceOf(result: MeasurementResultDoc | null | undefined) {
   if (!prov || typeof prov !== "object") return null;
   return prov;
 }
+
+// ------------------------------------------------------- stuck compute (ORB-39)
+
+/** How long a measurement may sit in `computing` before the UI offers a FORCED
+ * re-run.
+ *
+ * Once a compute job dies server-side the row is stranded: the inspector drops
+ * the Run row for `computing` and the tree's Play button only shows for
+ * draft/failed, so there is otherwise no way back. asset-svc's compute endpoint
+ * already accepts `force` to bypass the compute-in-flight 409 — this threshold
+ * decides when to surface it.
+ *
+ * Sized off the observable cadence in this codebase rather than a guess: the
+ * measurement poll runs every 5s while anything is computing
+ * (useMeasurementsPoll) and the manifest refresh is 30s, so a healthy compute is
+ * expected to settle within a handful of poll cycles. 3 minutes is ~36 cycles —
+ * far past any normal run, while still letting someone recover quickly. */
+export const STUCK_COMPUTE_MS = 3 * 60_000;
+
+/** True when `m` has been `computing` for longer than {@link STUCK_COMPUTE_MS}.
+ * `updated_at` is the dispatch stamp — asset-svc persists the params and flips
+ * the row to `computing` in the same write. `now` is passed in so the caller
+ * controls the clock (and so this stays pure/testable). */
+export function isComputeStuck(
+  m: { status: string; updated_at?: string },
+  now: number
+): boolean {
+  if (m.status !== "computing" || !m.updated_at) return false;
+  const started = Date.parse(m.updated_at);
+  if (!Number.isFinite(started)) return false;
+  return now - started > STUCK_COMPUTE_MS;
+}
+
+/** Rough "running for 4 min" copy for the stuck-compute notice. */
+export function formatComputeElapsed(m: { updated_at?: string }, now: number): string {
+  const started = m.updated_at ? Date.parse(m.updated_at) : NaN;
+  if (!Number.isFinite(started)) return "a while";
+  const minutes = Math.max(1, Math.floor((now - started) / 60_000));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} hr`;
+}
+
+// -------------------------------------------------- design base (ORB-54)
+
+/** True when this measurement's BASE surface is a design, i.e. `params.from` is
+ * a `design` SurfaceRef (what surfaceRefsForMethod emits for the
+ * "design-surface" method). Drives the earthworks Cut/Fill relabel in the
+ * inspector — see METRICS_CUT_FILL_DESIGN there for the derivation. */
+export function hasDesignBase(params: Record<string, unknown> | null | undefined): boolean {
+  const from = params?.from;
+  if (!from || typeof from !== "object") return false;
+  return (from as { type?: unknown }).type === "design";
+}

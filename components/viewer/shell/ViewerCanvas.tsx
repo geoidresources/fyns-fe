@@ -49,6 +49,7 @@ import {
   updateMeasurement,
 } from "@/lib/api/assetSvc";
 import { ApiError } from "@/lib/api/client";
+import { stripErrNamespace } from "@/lib/api/errors";
 import {
   geometryPositions,
   geometryToRectangle,
@@ -980,7 +981,7 @@ export function ViewerCanvas() {
   );
 
   const triggerCompute = useCallback(
-    async (id: string, override?: Record<string, unknown>) => {
+    async (id: string, override?: Record<string, unknown>, opts?: { force?: boolean }) => {
       store.getState().setBusy(id, true);
       try {
         // computeMeasurement persists the override (§6.1). A PROMOTED method
@@ -988,22 +989,33 @@ export function ViewerCanvas() {
         // and already persisted, so the refresh below shows the final doc and no
         // preview is needed. Otherwise the async worker is running: fire the
         // instant estimate so a number appears while it computes.
-        const res = await computeMeasurement(
-          surveyId,
-          id,
-          override ? { params: override } : undefined
-        );
+        // `force` (ORB-39) bypasses the in-flight 409 so a row whose job died
+        // server-side can be re-dispatched.
+        const body: { params?: Record<string, unknown>; force?: boolean } = {};
+        if (override) body.params = override;
+        if (opts?.force) body.force = true;
+        const res = await computeMeasurement(surveyId, id, body);
         if (res.status === "completed") {
           toast.success("Computed");
         } else {
           void runEstimate(id);
-          toast.info("Compute dispatched — result will appear when ready");
+          toast.info(
+            opts?.force
+              ? "Forced re-run dispatched — result will appear when ready"
+              : "Compute dispatched — result will appear when ready"
+          );
         }
       } catch (err) {
         if (err instanceof ApiError && err.status === 422) {
-          toast.warning(`Compute not available yet: ${err.message}`);
+          // 422 covers four distinct causes (unsupported kind, unresolvable
+          // inputs, no geometry, invalid params) and the response carries only a
+          // message — no machine-readable code to branch on. So the prefix stays
+          // neutral: "not available yet" used to be shown for all of them, which
+          // misdiagnosed a fixable validation error as a missing feature. The
+          // backend message carries the specific reason.
+          toast.warning(`Can't compute: ${stripErrNamespace(err.message)}`);
         } else if (err instanceof Error) {
-          toast.error(err.message);
+          toast.error(stripErrNamespace(err.message));
         }
       } finally {
         store.getState().setBusy(id, false);

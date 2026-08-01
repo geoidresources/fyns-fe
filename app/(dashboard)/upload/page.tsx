@@ -37,7 +37,8 @@ import {
   type FileRole,
   type PlannedSkip,
 } from "@/lib/upload/planner";
-import { putToSignedUrl } from "@/lib/upload/putToSignedUrl";
+import { UploadTimeoutError, putToSignedUrl } from "@/lib/upload/putToSignedUrl";
+import { withRetry } from "@/lib/upload/retry";
 
 // ---------------------------------------------------------------- constants
 
@@ -70,7 +71,10 @@ const VDATUM_OPTIONS = [
 
 const TAG_SUGGESTIONS = ["pit", "survey", "lidar", "design"];
 
-const DRAFT_KEY = "geoid-upload-draft";
+// v2 (ORB-38): v1 drafts persisted the old unconfirmed `EPSG:4326` CRS default,
+// so restoring one would smuggle that default straight back past the new
+// explicit-choice requirement. Bumping the key retires those drafts.
+const DRAFT_KEY = "geoid-upload-draft-v2";
 
 // ------------------------------------------------------------------- types
 
@@ -90,6 +94,51 @@ interface RunResult {
 }
 
 type Phase = "form" | "working" | "done";
+
+/** One file's server-side slot, plus exactly how far it got. Both flags matter
+ * independently: bytes can be in GCS (`uploaded`) while the PATCH that flips the
+ * row to `registered` has not landed (`marked`). */
+interface AssetSlot {
+  assetId: string;
+  /** Canonical object URL, handed to the processors / design registration. */
+  url: string;
+  /** Signed PUT URL from initUploads. */
+  uploadUrl: string;
+  uploaded: boolean;
+  marked: boolean;
+}
+
+/** What the current run has already accomplished (ORB-38).
+ *
+ * `run()` used to restart from createSurvey on every retry, so a failure
+ * anywhere past step 2 duplicated the survey, its assets and its dispatched
+ * workflows — and asset-svc exposes no survey/asset delete to clean the orphan
+ * up (lib/api/assetSvc.ts has deleteMeasurement/deleteFolder only). Making the
+ * retry RESUME is therefore the fix: each completed step is recorded here and
+ * skipped next time round. Held in a ref — it is bookkeeping, never rendered. */
+interface RunProgress {
+  /** Which survey this progress belongs to (see `runTargetOf`). Progress is
+   * only resumable while the form still targets the same survey. */
+  target: string;
+  /** Only set on the new-site path; prevents a retry creating a second site. */
+  project: Project | null;
+  survey: Survey | null;
+  /** filename → slot. */
+  assets: Record<string, AssetSlot>;
+  /** PlannedDispatch.label → workflow id (labels embed the filename). */
+  dispatched: Record<string, string>;
+  /** filename → registered design name. */
+  designs: Record<string, string>;
+}
+
+const emptyProgress = (target = ""): RunProgress => ({
+  target,
+  project: null,
+  survey: null,
+  assets: {},
+  dispatched: {},
+  designs: {},
+});
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
@@ -127,7 +176,10 @@ export default function UploadPage() {
   // State, not a ref — it is read during render to derive the shown name.
   const [datasetEdited, setDatasetEdited] = useState(false);
   const [surveyDate, setSurveyDate] = useState(todayISO());
-  const [epsg, setEpsg] = useState("EPSG:4326");
+  // ORB-38: no default. Defaulting to EPSG:4326 let a user upload without ever
+  // looking at the CRS field, silently mis-registering every asset whose data
+  // was in some projected CRS. Submit is blocked until this is explicitly set.
+  const [epsg, setEpsg] = useState("");
   const [vdatum, setVdatum] = useState("EGM2008");
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");
@@ -139,6 +191,10 @@ export default function UploadPage() {
   const [dragOver, setDragOver] = useState(false);
   const [draftSaved, setDraftSaved] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Resumable run bookkeeping (ORB-38). The ref holds the progress itself; the
+  // state below is only what the footer renders about it.
+  const progressRef = useRef<RunProgress>(emptyProgress());
+  const [resume, setResume] = useState<{ target: string; text: string } | null>(null);
 
   // ------------------------------------------------------------ bootstrap
 
@@ -229,6 +285,17 @@ export default function UploadPage() {
       ? `${siteNameForAutofill} — ${formatDateHuman(surveyDate)}`
       : "";
 
+  // Partial progress is only resumable while the form still targets the SAME
+  // survey. Retarget it (different site, data type or date) and the half-built
+  // survey no longer belongs to what is being submitted, so `run()` discards the
+  // progress and the resume notice below stops matching. Note `files` is
+  // deliberately absent: adding or removing a file mid-retry is legitimate, and
+  // the per-file slot map already handles it (a new file simply has no slot).
+  const runTarget = `${destination}|${siteId}|${newSiteName.trim()}|${dataType}|${surveyDate}`;
+  // Derived, not stored: a notice left over from a different target is stale by
+  // construction, so it simply stops rendering — no ref writes during render.
+  const resumeNotice = resume && resume.target === runTarget ? resume.text : null;
+
   // ------------------------------------------------------------ file queue
 
   const addFiles = useCallback(
@@ -271,122 +338,199 @@ export default function UploadPage() {
     phase === "form" &&
     files.length > 0 &&
     effectiveDatasetName.trim().length > 0 &&
+    // ORB-38: an explicit CRS choice is mandatory — see the `epsg` state above.
+    epsg.length > 0 &&
     (destination === "existing" ? !!siteId : newSiteName.trim().length >= 2);
 
+  /** Idempotent (ORB-38): every step records itself in `progressRef`, so a retry
+   * after a mid-run failure resumes rather than re-creating the survey, the
+   * assets and the dispatched workflows. */
   const run = async () => {
+    // Discard progress belonging to a different survey before reusing it — the
+    // form may have been retargeted since the failed attempt.
+    if (progressRef.current.target !== runTarget) {
+      progressRef.current = emptyProgress(runTarget);
+    }
+    const progress = progressRef.current;
     setPhase("working");
+    setResume(null);
+    // A retry re-attempts the files that failed last time — clear their badge.
+    setFiles((prev) =>
+      prev.map((p) => (p.status === "error" ? { ...p, status: "queued", progress: 0 } : p))
+    );
     try {
-      // 1) Resolve the destination project.
-      let project = selectedProject ?? null;
-      if (destination === "new") {
+      // 1) Resolve the destination project. On the new-site path this is cached
+      //    so a retry cannot create a second site.
+      let resolvedProject = destination === "new" ? progress.project : (selectedProject ?? null);
+      if (destination === "new" && !resolvedProject) {
         setStepText("Creating site…");
-        project = await createProject({
+        resolvedProject = await createProject({
           name: newSiteName.trim(),
           crs_epsg: Number(epsg.replace("EPSG:", "")) || undefined,
           crs_label: CRS_OPTIONS.find((o) => o.value === epsg)?.label,
           vertical_datum: vdatum,
         });
+        progress.project = resolvedProject;
       }
-      if (!project) throw new Error("Select a site first");
+      if (!resolvedProject) throw new Error("Select a site first");
+      const project = resolvedProject;
 
       // 2) Resolve the survey that hosts the upload. Data uploads are a new
       //    epoch (new survey); designs attach to the latest existing survey's
       //    storage folder, creating one only when the project has none.
-      let survey: Survey;
-      if (dataType === "design") {
-        setStepText("Resolving survey…");
-        const { surveys } = await listSurveys(project.id);
-        const latest = [...(surveys || [])].sort((a, b) => b.survey_date.localeCompare(a.survey_date))[0];
-        survey =
-          latest ??
-          (await createSurvey({
+      let resolvedSurvey = progress.survey;
+      if (!resolvedSurvey) {
+        if (dataType === "design") {
+          setStepText("Resolving survey…");
+          const { surveys } = await listSurveys(project.id);
+          const latest = [...(surveys || [])].sort((a, b) =>
+            b.survey_date.localeCompare(a.survey_date)
+          )[0];
+          resolvedSurvey =
+            latest ??
+            (await createSurvey({
+              project_id: project.id,
+              survey_date: surveyDate,
+              survey_type: "design",
+              metadata: { dataset_name: effectiveDatasetName.trim(), tags, source: "platform-upload" },
+            }));
+        } else {
+          setStepText("Creating survey…");
+          resolvedSurvey = await createSurvey({
             project_id: project.id,
             survey_date: surveyDate,
-            survey_type: "design",
-            metadata: { dataset_name: effectiveDatasetName.trim(), tags, source: "platform-upload" },
-          }));
-      } else {
-        setStepText("Creating survey…");
-        survey = await createSurvey({
-          project_id: project.id,
-          survey_date: surveyDate,
-          survey_type: dataType === "lidar" ? "lidar" : dataType === "preprocessed" ? "preprocessed" : "aerial",
-          metadata: {
-            dataset_name: effectiveDatasetName.trim(),
-            tags,
-            source: "platform-upload",
-            source_crs: epsg,
-            source_vertical_datum: vdatum,
-          },
-        });
+            survey_type:
+              dataType === "lidar" ? "lidar" : dataType === "preprocessed" ? "preprocessed" : "aerial",
+            metadata: {
+              dataset_name: effectiveDatasetName.trim(),
+              tags,
+              source: "platform-upload",
+              source_crs: epsg,
+              source_vertical_datum: vdatum,
+            },
+          });
+        }
+        progress.survey = resolvedSurvey;
       }
+      const survey = resolvedSurvey;
 
-      // 3) Signed upload slots.
-      setStepText("Requesting upload URLs…");
-      const { uploads } = await initUploads(
-        survey.id,
-        files.map((q) => ({
-          filename: q.file.name,
-          kind: roleToAssetKind(q.role),
-          role: q.role,
-          content_type: contentTypeFor(q.file.name),
-          crs: epsg,
-        }))
-      );
-      const uploadByName = new Map(uploads.map((u) => [u.asset.filename || "", u]));
+      // 3) Signed upload slots — ONLY for files that don't have one yet.
+      //    Re-initing a file that already has an asset row would mint a second
+      //    pending_upload row for the same object, and there is no asset-delete
+      //    endpoint to reap it.
+      const needSlots = files.filter((q) => !progress.assets[q.file.name]);
+      if (needSlots.length > 0) {
+        setStepText("Requesting upload URLs…");
+        const { uploads } = await initUploads(
+          survey.id,
+          needSlots.map((q) => ({
+            filename: q.file.name,
+            kind: roleToAssetKind(q.role),
+            role: q.role,
+            content_type: contentTypeFor(q.file.name),
+            crs: epsg,
+          }))
+        );
+        const uploadByName = new Map(uploads.map((u) => [u.asset.filename || "", u]));
+        for (const q of needSlots) {
+          const slot = uploadByName.get(q.file.name);
+          if (!slot) throw new Error(`No upload slot returned for ${q.file.name}`);
+          progress.assets[q.file.name] = {
+            assetId: slot.asset.id,
+            url: slot.asset.url,
+            uploadUrl: slot.upload_url,
+            uploaded: false,
+            marked: false,
+          };
+        }
+      }
 
       // 4) PUT each file, then mark it uploaded. Sequential keeps memory and
       //    connection pressure sane for multi-GB rasters.
-      const uploadedUrls = new Map<string, string>();
       for (const q of files) {
-        const slot = uploadByName.get(q.file.name);
-        if (!slot) throw new Error(`No upload slot returned for ${q.file.name}`);
+        const slot = progress.assets[q.file.name];
+        if (!slot) throw new Error(`No upload slot for ${q.file.name}`);
+        if (slot.uploaded && slot.marked) {
+          setFiles((prev) =>
+            prev.map((p) => (p.file.name === q.file.name ? { ...p, status: "uploaded", progress: 1 } : p))
+          );
+          continue; // already done on an earlier attempt
+        }
         setStepText(`Uploading ${q.file.name}…`);
         setFiles((prev) => prev.map((p) => (p.file.name === q.file.name ? { ...p, status: "uploading" } : p)));
         try {
-          await putToSignedUrl(slot.upload_url, q.file, contentTypeFor(q.file.name), (frac) => {
-            setFiles((prev) => prev.map((p) => (p.file.name === q.file.name ? { ...p, progress: frac } : p)));
-          });
+          if (!slot.uploaded) {
+            await putToSignedUrl(slot.uploadUrl, q.file, contentTypeFor(q.file.name), (frac) => {
+              setFiles((prev) => prev.map((p) => (p.file.name === q.file.name ? { ...p, progress: frac } : p)));
+            });
+            slot.uploaded = true;
+          }
+          // ORB-38: this PATCH used to sit OUTSIDE the try, so a failure here
+          // escaped the per-file handler — the row stayed "uploading" forever
+          // while the bytes sat in GCS as pending_upload with nothing to
+          // reconcile them. It is idempotent (it just flips one row to
+          // registered) and PATCHes never auto-retry in lib/api/client.ts, so
+          // it gets its own retry.
+          if (!slot.marked) {
+            await withRetry(() => markAssetUploaded(survey.id, slot.assetId));
+            slot.marked = true;
+          }
         } catch (err) {
           setFiles((prev) => prev.map((p) => (p.file.name === q.file.name ? { ...p, status: "error" } : p)));
           throw err;
         }
-        await markAssetUploaded(survey.id, slot.asset.id);
-        uploadedUrls.set(q.file.name, slot.asset.url);
         setFiles((prev) =>
           prev.map((p) => (p.file.name === q.file.name ? { ...p, status: "uploaded", progress: 1 } : p))
         );
       }
 
-      // 5) Dispatch processing / register designs.
+      // 5) Dispatch processing / register designs — each recorded so a later
+      //    failure never re-fires an already-accepted workflow.
       const outcome: RunResult = { surveyId: survey.id, workflows: [], designs: [], skips: [] };
       if (dataType === "design") {
         for (const q of files) {
+          const already = progress.designs[q.file.name];
+          if (already) {
+            outcome.designs.push(already);
+            continue;
+          }
           setStepText(`Registering design ${q.file.name}…`);
           const d = await createDesign({
             project_id: project.id,
             name: files.length === 1 ? effectiveDatasetName.trim() : q.file.name,
             format: designFormat(q.file.name),
-            file_url: uploadedUrls.get(q.file.name) || "",
+            file_url: progress.assets[q.file.name]?.url || "",
             source_crs: epsg,
             metadata: { tags, source: "platform-upload" },
           });
+          progress.designs[q.file.name] = d.name;
           outcome.designs.push(d.name);
         }
       } else {
         const plan = buildProcessorPlan(
-          files.map((q) => ({ name: q.file.name, role: q.role, url: uploadedUrls.get(q.file.name) || "" })),
+          files.map((q) => ({
+            name: q.file.name,
+            role: q.role,
+            url: progress.assets[q.file.name]?.url || "",
+          })),
           { epsg, workingCrs: survey.working_crs }
         );
         outcome.skips = plan.skips;
         for (const d of plan.dispatches) {
+          const already = progress.dispatched[d.label];
+          if (already) {
+            outcome.workflows.push({ label: d.label, id: already });
+            continue;
+          }
           setStepText(`Dispatching ${d.label}…`);
           const res = await generateSurvey(survey.id, { ...d.request, version: "v1" });
+          progress.dispatched[d.label] = res.workflow_id;
           outcome.workflows.push({ label: d.label, id: res.workflow_id });
         }
       }
 
       localStorage.removeItem(DRAFT_KEY);
+      progressRef.current = emptyProgress(); // run finished — next submit starts fresh
       setResult(outcome);
       setPhase("done");
       toast.success(
@@ -396,9 +540,25 @@ export default function UploadPage() {
       );
     } catch (err) {
       console.error("Upload & process failed:", err);
-      toast.error(err instanceof Error ? err.message : "Upload failed");
+      const base = err instanceof Error ? err.message : "Upload failed";
+      toast.error(
+        err instanceof UploadTimeoutError
+          ? `${base} — retry to resume from where it stopped.`
+          : base
+      );
+      // Recoverable: back to the form with the partial progress intact, so the
+      // retry picks up where this attempt died instead of duplicating it.
       setPhase("form");
       setStepText("");
+      const done = Object.values(progress.assets).filter((a) => a.uploaded && a.marked).length;
+      setResume(
+        progress.survey
+          ? {
+              target: runTarget,
+              text: `Survey already created — ${done} of ${files.length} file${files.length === 1 ? "" : "s"} uploaded. Retry resumes from there.`,
+            }
+          : null
+      );
     }
   };
 
@@ -423,6 +583,8 @@ export default function UploadPage() {
               setResult(null);
               setPhase("form");
               setStepText("");
+              progressRef.current = emptyProgress();
+              setResume(null);
             }}
             onDashboard={() => router.push("/globe")}
           />
@@ -611,12 +773,19 @@ export default function UploadPage() {
               </div>
             </div>
 
-            {/* CRS */}
-            <label className={sectionLabel}>Coordinate reference system</label>
-            <div className="mb-6 grid grid-cols-2 gap-3">
+            {/* CRS — an explicit choice is required (ORB-38). */}
+            <label className={sectionLabel}>
+              Coordinate reference system <span className="text-[#C97A4E]">*</span>
+            </label>
+            <div className="mb-2 grid grid-cols-2 gap-3">
               <Select value={epsg} onValueChange={setEpsg} disabled={phase === "working"}>
-                <SelectTrigger className={`w-full px-4 text-gray-200 ${boxClass}`} style={{ height: "3.25rem" }}>
-                  <SelectValue />
+                <SelectTrigger
+                  className={`w-full px-4 text-gray-200 ${boxClass} ${
+                    epsg ? "" : "border-[#C97A4E]/40"
+                  }`}
+                  style={{ height: "3.25rem" }}
+                >
+                  <SelectValue placeholder="Select the CRS of your files…" />
                 </SelectTrigger>
                 <SelectContent>
                   {CRS_OPTIONS.map((o) => (
@@ -639,6 +808,11 @@ export default function UploadPage() {
                 </SelectContent>
               </Select>
             </div>
+            <p className="mb-6 text-xs text-gray-500">
+              {epsg
+                ? "Assets are registered in this CRS — it must match what the files actually contain."
+                : "Required. Pick the CRS your files are actually in; an incorrect choice mis-registers the whole dataset."}
+            </p>
 
             {/* Tags */}
             <label className={sectionLabel}>Tags</label>
@@ -697,6 +871,11 @@ export default function UploadPage() {
                     <Loader2 size={13} className="animate-spin text-[#C97A4E]" />
                     {stepText}
                   </>
+                ) : resumeNotice ? (
+                  <>
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#C97A4E]" />
+                    {resumeNotice}
+                  </>
                 ) : draftSaved ? (
                   <>
                     <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" />
@@ -719,7 +898,11 @@ export default function UploadPage() {
                   onClick={run}
                   className="h-12 rounded-xl bg-[#C97A4E] px-6 text-sm font-semibold text-[#0A0D14] transition-colors hover:bg-[#b06941] disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {phase === "working" ? "Working…" : "Upload & process"}
+                  {phase === "working"
+                    ? "Working…"
+                    : resumeNotice
+                      ? "Retry upload"
+                      : "Upload & process"}
                 </button>
               </div>
             </div>

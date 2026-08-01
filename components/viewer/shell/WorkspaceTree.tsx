@@ -30,6 +30,7 @@ import {
   Loader2,
   Pencil,
   Play,
+  RefreshCw,
   Search,
   Trash2,
 } from "lucide-react";
@@ -47,6 +48,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { measurementDeleteRequest } from "@/components/viewer/deleteConfirm";
 import {
   canDropFolder,
   findNode,
@@ -69,7 +72,8 @@ import {
 import { useViewerActions } from "@/components/viewer/shell/viewerActions";
 import { useInteractionActor } from "@/components/viewer/shell/interactionContext";
 import { useSelector } from "@xstate/react";
-import { metricsOf, resultForKind } from "@/lib/viewer/calc";
+import { isComputeStuck, metricsOf, resultForKind } from "@/lib/viewer/calc";
+import { useComputeClock } from "@/components/viewer/shell/hooks/useComputeClock";
 import type { PanelMeasurement } from "@/lib/viewer/sampleData";
 
 // ------------------------------------------------------- ported row helpers
@@ -167,6 +171,15 @@ function collectSubtreeItemIds(node: WorkspaceTreeNode): string[] {
   return ids;
 }
 
+/** Nested folders beneath a node, excluding the node itself — deleteFolder is a
+ * HARD delete that cascades to them (assetSvc §deleteFolder), so the
+ * confirmation has to state how many go with it. */
+function countDescendantFolders(node: WorkspaceTreeNode): number {
+  return node.children.reduce((acc, c) => acc + 1 + countDescendantFolders(c), 0);
+}
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
 // ------------------------------------------------------------- DnD plumbing
 
 /** What's being dragged (set at dragstart, same-window only — dataTransfer
@@ -203,18 +216,23 @@ function MeasurementRow({
   m,
   busy,
   visible,
+  stuck,
   dnd,
   onSelect,
   onCompute,
+  onForceCompute,
   onDelete,
   onToggleVisible,
 }: {
   m: PanelMeasurement;
   busy: boolean;
   visible: boolean;
+  /** Has been `computing` past the stuck threshold (ORB-39). */
+  stuck: boolean;
   dnd: DndHandlers;
   onSelect: (m: PanelMeasurement) => void;
   onCompute: (id: string) => void;
+  onForceCompute: (id: string) => void;
   onDelete: (id: string) => void;
   onToggleVisible: (id: string, visible: boolean) => void;
 }) {
@@ -290,6 +308,19 @@ function MeasurementRow({
               {busy ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
             </button>
           )}
+          {/* ORB-39: a compute stuck past the threshold gets a force re-run here
+              too — the ordinary Play button above is hidden for `computing`. */}
+          {stuck && (
+            <button
+              type="button"
+              onClick={() => onForceCompute(m.id)}
+              disabled={busy}
+              title="This compute looks stuck — force a re-run"
+              className="text-amber-500/80 transition-colors hover:text-amber-400 disabled:opacity-50"
+            >
+              {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onDelete(m.id)}
@@ -353,11 +384,13 @@ function TreeNode({
   busyIds,
   collapsed,
   visibility,
+  now,
   folderOps,
   dnd,
   onToggle,
   onSelect,
   onCompute,
+  onForceCompute,
   onDelete,
   onToggleVisible,
   onToggleFolderVisible,
@@ -369,11 +402,14 @@ function TreeNode({
   busyIds: Set<string>;
   collapsed: Set<string>;
   visibility: Record<string, boolean>;
+  /** Clock for the stuck-compute check (ORB-39). */
+  now: number;
   folderOps: FolderOps;
   dnd: DndHandlers;
   onToggle: (id: string) => void;
   onSelect: (m: PanelMeasurement) => void;
   onCompute: (id: string) => void;
+  onForceCompute: (id: string) => void;
   onDelete: (id: string) => void;
   onToggleVisible: (id: string, visible: boolean) => void;
   onToggleFolderVisible: (ids: string[]) => void;
@@ -528,11 +564,13 @@ function TreeNode({
             busyIds={busyIds}
             collapsed={collapsed}
             visibility={visibility}
+            now={now}
             folderOps={folderOps}
             dnd={dnd}
             onToggle={onToggle}
             onSelect={onSelect}
             onCompute={onCompute}
+            onForceCompute={onForceCompute}
             onDelete={onDelete}
             onToggleVisible={onToggleVisible}
             onToggleFolderVisible={onToggleFolderVisible}
@@ -545,9 +583,11 @@ function TreeNode({
               m={m}
               busy={busyIds.has(m.id)}
               visible={isMeasurementVisibleOnCanvas(m, visibility)}
+              stuck={!m.demo && isComputeStuck(m, now)}
               dnd={dnd}
               onSelect={onSelect}
               onCompute={onCompute}
+              onForceCompute={onForceCompute}
               onDelete={onDelete}
               onToggleVisible={onToggleVisible}
             />
@@ -592,6 +632,12 @@ export function WorkspaceTree() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const dragRef = useRef<DragPayload | null>(null);
+  // ORB-37: both destructive tree affordances (row trash, folder trash) route
+  // through this before touching the backend.
+  const { confirm, confirmDialog } = useConfirm();
+  // ORB-39: ticks only while something is computing, so stuck rows can grow
+  // their force-rerun affordance without any data changing.
+  const now = useComputeClock(measurements.some((m) => m.status === "computing"));
 
   // Name search runs server-side (`measurements` already reflects the query);
   // only the completed-only filter is client-side, applied BEFORE the tree
@@ -705,12 +751,44 @@ export function WorkspaceTree() {
     },
     renameCancel: () => setRenamingId(null),
     remove: (node) => {
-      deleteFolder(node.id)
-        .then(() => {
-          toast.success("Folder deleted — its measurements moved to Ungrouped");
-          refresh();
-        })
-        .catch((err) => mutationError(err, "Could not delete the folder"));
+      // deleteFolder is a HARD delete that cascades to child folders and
+      // membership rows (assetSvc §deleteFolder). Measurements survive and fall
+      // back to Ungrouped — the copy says all three things explicitly, because
+      // "are you sure?" would hide the cascade (ORB-37).
+      const subfolders = countDescendantFolders(node);
+      const grouped = collectSubtreeItemIds(node).length;
+      confirm({
+        title: `Delete the folder ${node.name}?`,
+        description: (
+          <>
+            This permanently deletes the folder
+            {subfolders > 0 ? (
+              <>
+                {" "}
+                and the{" "}
+                <span className="text-gray-300">{plural(subfolders, "folder", "folders")}</span>{" "}
+                nested inside it
+              </>
+            ) : null}
+            , and clears the grouping for{" "}
+            <span className="text-gray-300">
+              {plural(grouped, "measurement", "measurements")}
+            </span>
+            . The measurements themselves are not deleted — they move back to Ungrouped. This
+            cannot be undone.
+          </>
+        ),
+        confirmLabel: "Delete folder",
+        onConfirm: async () => {
+          try {
+            await deleteFolder(node.id);
+            toast.success("Folder deleted — its measurements moved to Ungrouped");
+            refresh();
+          } catch (err) {
+            mutationError(err, "Could not delete the folder");
+          }
+        },
+      });
     },
   };
 
@@ -802,6 +880,21 @@ export function WorkspaceTree() {
     },
   };
 
+  /** Amber refresh icon on a stuck row → re-dispatch with `force`, bypassing
+   * asset-svc's compute-in-flight 409 (ORB-39). */
+  const forceCompute = (id: string) => actions.triggerCompute(id, undefined, { force: true });
+
+  /** Row trash icon → confirm, then the real delete (ORB-37). */
+  const confirmRemoveMeasurement = (id: string) => {
+    const m = byId.get(id);
+    if (!m) return;
+    confirm(
+      measurementDeleteRequest({ name: m.name, draft: m.draft }, () =>
+        actions.removeMeasurement(id)
+      )
+    );
+  };
+
   const treeEmpty = nodes.every((n) => subtreeCount(n) === 0 && n.children.length === 0);
 
   return (
@@ -886,17 +979,20 @@ export function WorkspaceTree() {
                 busyIds={busyIds}
                 collapsed={collapsed}
                 visibility={measurementVisibility}
+                now={now}
                 folderOps={folderOps}
                 dnd={dnd}
                 onToggle={toggleNode}
                 onSelect={actions.selectMeasurementRow}
                 onCompute={actions.triggerCompute}
-                onDelete={actions.removeMeasurement}
+                onForceCompute={forceCompute}
+                onDelete={confirmRemoveMeasurement}
                 onToggleVisible={setMeasurementVisible}
                 onToggleFolderVisible={toggleFolderVisible}
               />
             ))}
         </div>
+        {confirmDialog}
       </div>
     </TooltipProvider>
   );

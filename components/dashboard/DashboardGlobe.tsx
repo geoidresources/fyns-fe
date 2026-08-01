@@ -105,8 +105,6 @@ export function DashboardGlobe({
         <Viewer
           ref={handleViewerRef}
           full
-          requestRenderMode
-          maximumRenderTimeChange={Infinity}
           timeline={false}
           animation={false}
           geocoder={false}
