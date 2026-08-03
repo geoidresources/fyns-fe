@@ -23,6 +23,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { toast } from "sonner";
 import type { TerrainStats } from "@/lib/api/assetSvc";
+import { suggestContourInterval } from "@/lib/viewer/contours";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import {
@@ -92,6 +93,12 @@ interface LayerPanelProps {
   hasHillshade: boolean;
   contourIntervalM: number | null;
   availableContourIntervals: number[];
+  /** Fire a `contour-generate` job for the DSM/DTM surface at `intervalM`. */
+  onGenerateContours?: (intervalM: number) => void;
+  /** A contour-generate dispatch is in flight (button shows a spinner). */
+  contourGenerating?: boolean;
+  /** The survey has a co-registered DSM/DTM raster to contour (else disabled). */
+  canGenerateContours?: boolean;
   digitalTwinEnabled?: boolean;
   digitalTwinAvailable?: boolean;
   showDigitalTwin?: boolean;
@@ -312,6 +319,85 @@ function formatElevationM(value: number): string {
   return `${Math.round(value)} m`;
 }
 
+/** DSM/DTM contour trigger inside the terrain settings card: a numeric interval
+ * (pre-filled from the surface's elevation range via `suggestContourInterval`)
+ * plus a Generate button that dispatches a `contour-generate` job. The result
+ * lands as a contour vector layer the panel already renders — this only fires
+ * the request. Disabled when the survey has no co-registered raster to contour
+ * or a job is already in flight. */
+function GenerateContoursControl({
+  stats,
+  canGenerate,
+  generating,
+  onGenerate,
+}: {
+  stats?: TerrainStats;
+  canGenerate: boolean;
+  generating: boolean;
+  onGenerate: (intervalM: number) => void;
+}) {
+  const suggested = stats
+    ? suggestContourInterval(stats.min_elevation, stats.max_elevation)
+    : null;
+  const [intervalText, setIntervalText] = useState(() =>
+    suggested != null ? String(suggested) : ""
+  );
+
+  // Re-seed the field when a new surface's stats arrive (survey switch) — the
+  // same render-phase "adjust state on prop change" pattern TerrainSettings
+  // uses for its Range inputs, so no extra commit and no set-state-in-effect.
+  const [prevSuggested, setPrevSuggested] = useState(suggested);
+  if (suggested !== prevSuggested) {
+    setPrevSuggested(suggested);
+    if (suggested != null) setIntervalText(String(suggested));
+  }
+
+  const parsed = Number(intervalText);
+  const valid = Number.isFinite(parsed) && parsed > 0;
+  const disabled = !canGenerate || generating;
+
+  return (
+    <div>
+      <div className="mb-1.5 text-[11px] text-gray-400">Generate Contours</div>
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <input
+            value={intervalText}
+            onChange={(e) => setIntervalText(e.target.value)}
+            inputMode="decimal"
+            disabled={disabled}
+            aria-label="Contour interval in meters"
+            className="h-8 w-full rounded-md border border-white/[0.08] bg-[#19191d] pl-2.5 pr-6 text-xs text-gray-200 focus:border-[#C97A4E] focus:outline-none disabled:opacity-50"
+          />
+          <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-gray-500">
+            m
+          </span>
+        </div>
+        <button
+          type="button"
+          disabled={disabled || !valid}
+          onClick={() => onGenerate(parsed)}
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-[#C97A4E] px-3 text-xs font-medium text-[#0A0D14] transition-colors hover:bg-[#d4885c] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {generating ? (
+            <>
+              <HugeiconsIcon icon={Loading03Icon} size={13} className="animate-spin" />
+              Generating…
+            </>
+          ) : (
+            "Generate"
+          )}
+        </button>
+      </div>
+      <p className="mt-1 text-[10px] text-gray-500">
+        {canGenerate
+          ? "Adds contour lines at this spacing."
+          : "Needs a processed DSM/DTM surface."}
+      </p>
+    </div>
+  );
+}
+
 /** Inline expandable settings for a DSM/DTM terrain layer. Opacity is wired to
  * the real tileset; colormap/shading switch baked lens overlays when present. */
 function TerrainSettings({
@@ -324,6 +410,9 @@ function TerrainSettings({
   hasHillshade,
   onColorMapChange,
   onShadingChange,
+  canGenerateContours,
+  contourGenerating,
+  onGenerateContours,
 }: {
   opacity: number;
   onOpacity: (opacity: number) => void;
@@ -334,6 +423,9 @@ function TerrainSettings({
   hasHillshade: boolean;
   onColorMapChange: (value: string) => void;
   onShadingChange: (value: string) => void;
+  canGenerateContours?: boolean;
+  contourGenerating?: boolean;
+  onGenerateContours?: (intervalM: number) => void;
 }) {
   const [range, setRange] = useState(() => ({
     min: stats ? String(Math.round(stats.min_elevation)) : "0",
@@ -443,6 +535,15 @@ function TerrainSettings({
           </SelectContent>
         </Select>
       </div>
+
+      {onGenerateContours && (
+        <GenerateContoursControl
+          stats={stats}
+          canGenerate={!!canGenerateContours}
+          generating={!!contourGenerating}
+          onGenerate={onGenerateContours}
+        />
+      )}
     </div>
   );
 }
@@ -458,6 +559,9 @@ function TerrainLayerRow({
   hasHillshade,
   onColorMapChange,
   onShadingChange,
+  canGenerateContours,
+  contourGenerating,
+  onGenerateContours,
 }: {
   control: LayerControl;
   onToggle: () => void;
@@ -468,6 +572,9 @@ function TerrainLayerRow({
   hasHillshade: boolean;
   onColorMapChange: (value: string) => void;
   onShadingChange: (value: string) => void;
+  canGenerateContours?: boolean;
+  contourGenerating?: boolean;
+  onGenerateContours?: (intervalM: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -520,6 +627,9 @@ function TerrainLayerRow({
           hasHillshade={hasHillshade}
           onColorMapChange={onColorMapChange}
           onShadingChange={onShadingChange}
+          canGenerateContours={canGenerateContours}
+          contourGenerating={contourGenerating}
+          onGenerateContours={onGenerateContours}
         />
       )}
     </div>
@@ -595,6 +705,9 @@ export function LayerPanel({
   hasHillshade,
   contourIntervalM,
   availableContourIntervals,
+  onGenerateContours,
+  contourGenerating = false,
+  canGenerateContours = false,
   digitalTwinEnabled = false,
   digitalTwinAvailable = false,
   showDigitalTwin = true,
@@ -665,6 +778,9 @@ export function LayerPanel({
               hasHillshade={hasHillshade}
               onColorMapChange={onColorMapChange}
               onShadingChange={onShadingChange}
+              canGenerateContours={canGenerateContours}
+              contourGenerating={contourGenerating}
+              onGenerateContours={onGenerateContours}
             />
           ))}
           {lenses.map((l) => (

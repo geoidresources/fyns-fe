@@ -65,6 +65,11 @@ export interface ViewerActions {
   handleColorMapChange: (value: string) => void;
   handleShadingChange: (value: string) => void;
   handleContourIntervalChange: (intervalM: number) => void;
+  /** Dispatch a `contour-generate` job for the survey's DSM/DTM surface at the
+   * given interval (meters), then poll the manifest until the resulting
+   * contour VectorLayer lands (LayerPanel renders it). No-op when the surface
+   * has no `raw_raster_url`. Sets/clears the store's `contourGenerating` flag. */
+  handleGenerateContours: (intervalM: number) => void;
   handleToggleImages: () => void;
   handleToggleGcps: () => void;
   handleToggleDigitalTwin: () => void;

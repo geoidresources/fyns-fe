@@ -166,6 +166,14 @@ function SurveyTree({ projectId, surveyId }: { projectId: string; surveyId: stri
     [layerControls]
   );
 
+  // Contour generation needs a co-registered surface raster (raw_raster_url) —
+  // the same artifact measurement compute resolves. Present ⇒ enable the button.
+  const canGenerateContours = useMemo(
+    () => (manifest?.layers.terrain ?? []).some((t) => !!t.raw_raster_url),
+    [manifest]
+  );
+  const contourGenerating = useViewerStore((s) => s.contourGenerating);
+
   const contourIntervalM = view.contourIntervalM ?? availableContourIntervals[0] ?? null;
   const imageCount = manifest?.layers.vectors?.find((v) => v.role === "image_positions")?.feature_count;
   const gcpCount = manifest?.layers.vectors?.find((v) => v.role === "gcps")?.feature_count;
@@ -196,6 +204,9 @@ function SurveyTree({ projectId, surveyId }: { projectId: string; surveyId: stri
         hasHillshade={hasHillshade}
         contourIntervalM={contourIntervalM}
         availableContourIntervals={availableContourIntervals}
+        onGenerateContours={actions.handleGenerateContours}
+        contourGenerating={contourGenerating}
+        canGenerateContours={canGenerateContours}
         digitalTwinEnabled={view.digitalTwinEnabled}
         digitalTwinAvailable={USE_WORLD_TERRAIN}
         showDigitalTwin={showDigitalTwin}

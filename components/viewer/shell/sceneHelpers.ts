@@ -109,6 +109,15 @@ export function proxyGcsUrls<T>(value: T): T {
   return value;
 }
 
+/** Reverse of proxyGcsUrls for a single URL: turn the app's same-origin
+ * `/gcs/…` proxy path back into the real `storage.googleapis.com` bucket URL.
+ * The proxy exists only so Cesium's WebGL fetches are same-origin; a backend
+ * `generate` job must receive the real bucket URL it can actually read, never
+ * the FE proxy path. A no-op for URLs that were never proxied. */
+export function unproxyGcsUrl(url: string): string {
+  return url.startsWith("/gcs/") ? GCS_PREFIX + url.slice("/gcs/".length) : url;
+}
+
 export function bboxToRectangle(bbox?: number[]): Rectangle | undefined {
   if (!bbox || bbox.length !== 4) return undefined;
   const [west, south, east, north] = bbox;
@@ -146,7 +155,20 @@ export type LayerHandle =
   | { type: "datasource"; ds: GeoJsonDataSource }
   // Large GeoJSON (contours) parses + batches into big typed arrays — done
   // lazily on first toggle so opening the viewer never pays that cost.
-  | { type: "geojson-lazy"; url: string; loading?: boolean };
+  | { type: "geojson-lazy"; url: string; loading?: boolean }
+  // Contour XYZ tile pyramid — the constant-cost alternative to geojson-lazy.
+  // The UrlTemplateImageryProvider is built lazily on first show (mirroring
+  // geojson-lazy) then promoted to a plain `imagery` handle, so toggle/opacity/
+  // teardown flow through the exact ortho machinery. `rectangle` (the survey
+  // extent) confines requests, like each ortho ImageryLayer's rectangle.
+  | {
+      type: "imagery-lazy";
+      template: string;
+      minZoom?: number;
+      maxZoom?: number;
+      rectangle?: Rectangle;
+      loading?: boolean;
+    };
 
 export interface PendingDraw {
   mode: DrawMode;
